@@ -149,6 +149,44 @@ func TestBuildH2StreamCarrierRequestUsesGatewayOwnedBody(t *testing.T) {
 	}
 }
 
+func TestBuildH3StreamCarrierRequestUsesRequestBodyStream(t *testing.T) {
+	tpl := transportTemplate(registry.MethodWebH3Stream)
+	plan := CarrierPlan{
+		Carrier:              Carrier{MethodID: registry.MethodWebH3Stream, Name: "web.h3.stream"},
+		UDPMode:              UDPOverStreamFallback,
+		PerformanceDowngrade: true,
+	}
+	built, err := BuildCarrierRequest(CarrierRequestInput{
+		Plan:           plan,
+		Template:       tpl,
+		RequestClassID: 1,
+		NeedCapsule:    true,
+		Scheme:         "https",
+		Authority:      "cover.example",
+		Path:           "/media/init.bin",
+		Header:         http.Header{"Content-Type": []string{"application/octet-stream"}},
+		Payload:        []byte{0x44, 0x33},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built.MethodID != registry.MethodWebH3Stream || built.RequestClassID != 1 {
+		t.Fatalf("unexpected H3 stream metadata: %+v", built)
+	}
+	if built.Request.Method != http.MethodPost || built.Request.URL.Scheme != "https" || built.Request.URL.Host != "cover.example" || built.Request.URL.Path != "/media/init.bin" {
+		t.Fatalf("unexpected H3 stream request target: %+v", built.Request)
+	}
+	if built.Request.Host != "cover.example" || built.Request.ContentLength != 2 {
+		t.Fatalf("unexpected H3 stream authority/body metadata: host=%q len=%d", built.Request.Host, built.Request.ContentLength)
+	}
+	if len(built.InitialMessages) != 0 || len(built.InitialDatagrams) != 0 {
+		t.Fatalf("H3 stream carrier must use only the request body stream: %+v", built)
+	}
+	if !built.StreamFallback || built.NativeDatagrams {
+		t.Fatalf("H3 stream carrier UDP fallback flags wrong: %+v", built)
+	}
+}
+
 func TestBuildH1WebSocketCarrierRequestUsesUpgradeAndInitialMessage(t *testing.T) {
 	tpl := transportTemplate(registry.MethodWebH1WS)
 	plan := CarrierPlan{

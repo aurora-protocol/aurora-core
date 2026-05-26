@@ -70,6 +70,18 @@ func BuildCarrierRequest(in CarrierRequestInput) (BuiltCarrierRequest, error) {
 			StreamFallback:  in.Plan.UDPMode == UDPOverStreamFallback,
 			NativeDatagrams: in.Plan.UDPMode == UDPNativeDatagram,
 		}, nil
+	case registry.MethodWebH3Stream:
+		req, err := newCarrierHTTPRequest(http.MethodPost, target, in.Authority, cloneHeader(in.Header), bytes.NewReader(payload))
+		if err != nil {
+			return BuiltCarrierRequest{}, err
+		}
+		return BuiltCarrierRequest{
+			MethodID:        method,
+			RequestClassID:  class.ClassID,
+			Request:         req,
+			StreamFallback:  in.Plan.UDPMode == UDPOverStreamFallback,
+			NativeDatagrams: in.Plan.UDPMode == UDPNativeDatagram,
+		}, nil
 	case registry.MethodWebH1WS:
 		header := cloneHeader(in.Header)
 		header.Set("Connection", "Upgrade")

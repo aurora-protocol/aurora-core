@@ -34,3 +34,5 @@ jobs:
         run: go run ./cmd/auroractl platform-check
       - name: Check production proof harness
         run: go run ./cmd/auroractl proof-check
+      - name: Check issuer operations harness
+        run: go run ./cmd/auroractl issuer-check

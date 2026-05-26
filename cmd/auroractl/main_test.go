@@ -111,6 +111,24 @@ func TestProofCheckCommandPrintsProductionProofReport(t *testing.T) {
 	}
 }
 
+func TestIssuerCheckCommandPrintsOperationsReport(t *testing.T) {
+	var out bytes.Buffer
+	if err := issuerCheck(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"issuer_ops_check passed=true metadata=true hint_provisioning=true atomic_replay_store=true verifier_fail_closed=true redacted_logs=true public_relay_policy=true findings=0\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("issuer-check output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "passed=false") {
+		t.Fatalf("issuer-check output contains failing result:\n%s", text)
+	}
+}
+
 func TestCryptoCheckCommandPrintsProviderAgreement(t *testing.T) {
 	var out bytes.Buffer
 	if err := cryptoCheck(&out); err != nil {
@@ -162,13 +180,19 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "Privacy Pass Blind RSA production proof harness") {
 		t.Fatalf("capabilities output missing production proof harness:\n%s", text)
 	}
+	if !strings.Contains(text, "issuer operations conformance harness") {
+		t.Fatalf("capabilities output missing issuer operations harness:\n%s", text)
+	}
 	if strings.Contains(text, "not production-complete:\n- ML-DSA") {
 		t.Fatalf("capabilities output still reports ML-DSA work as the first missing item:\n%s", text)
 	}
 	if strings.Contains(text, "full real-crypto vector package") {
 		t.Fatalf("capabilities output still lists the real-crypto vector package as remaining:\n%s", text)
 	}
-	if !strings.Contains(text, "production issuer operations, production cover-origin deployment, production platform packaging/device entitlements, external DPI/classifier evaluation, external active-probe evaluation") {
+	if strings.Contains(text, "production issuer operations") {
+		t.Fatalf("capabilities output still lists local issuer operations as unimplemented:\n%s", text)
+	}
+	if !strings.Contains(text, "issuer daemon deployment/live Privacy Pass issuance, production cover-origin deployment, production platform packaging/device entitlements, external DPI/classifier evaluation, external active-probe evaluation") {
 		t.Fatalf("capabilities output stopped tracking remaining production work:\n%s", text)
 	}
 }
@@ -349,6 +373,7 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go run ./cmd/auroractl classifier-check",
 		"go run ./cmd/auroractl platform-check",
 		"go run ./cmd/auroractl proof-check",
+		"go run ./cmd/auroractl issuer-check",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("CI workflow missing %q:\n%s", want, text)

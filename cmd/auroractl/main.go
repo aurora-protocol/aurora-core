@@ -14,6 +14,7 @@ import (
 	auroracover "github.com/aurora-protocol/aurora-core/cover"
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/failure"
+	auroraops "github.com/aurora-protocol/aurora-core/ops"
 	auroraplatform "github.com/aurora-protocol/aurora-core/platform"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
@@ -42,6 +43,8 @@ func main() {
 		err = platformCheck(os.Stdout)
 	case "proof-check":
 		err = proofCheck(os.Stdout)
+	case "issuer-check":
+		err = issuerCheck(os.Stdout)
 	case "crypto-check":
 		err = cryptoCheck(os.Stdout)
 	case "wire-check":
@@ -62,7 +65,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|platform-check|proof-check|crypto-check|wire-check|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|platform-check|proof-check|issuer-check|crypto-check|wire-check|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -327,9 +330,9 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- signed directory, relay descriptor, and cover-template real-crypto vectors")
 	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, exit-layer packet, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
-	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, platform adapter conformance profiles, Privacy Pass Blind RSA production proof harness")
+	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, platform adapter conformance profiles, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness")
 	fmt.Fprintln(w, "not production-complete:")
-	fmt.Fprintln(w, "- production issuer operations, production cover-origin deployment, production platform packaging/device entitlements, external DPI/classifier evaluation, external active-probe evaluation")
+	fmt.Fprintln(w, "- issuer daemon deployment/live Privacy Pass issuance, production cover-origin deployment, production platform packaging/device entitlements, external DPI/classifier evaluation, external active-probe evaluation")
 }
 
 func cryptoCheck(w io.Writer) error {
@@ -473,6 +476,32 @@ func proofCheck(w io.Writer) error {
 	)
 	if !report.Passed {
 		return fmt.Errorf("proof-check failed production proof harness")
+	}
+	return nil
+}
+
+func issuerCheck(w io.Writer) error {
+	report, err := auroraops.RunIssuerOperationsHarness(200)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(
+		w,
+		"issuer_ops_check passed=%t metadata=%t hint_provisioning=%t atomic_replay_store=%t verifier_fail_closed=%t redacted_logs=%t public_relay_policy=%t findings=%d\n",
+		report.Passed,
+		report.MetadataVerified,
+		report.HintProvisioning,
+		report.AtomicReplayStore,
+		report.VerifierFailClosed,
+		report.SensitiveLogsRedacted,
+		report.PublicRelayProofPolicy,
+		len(report.Findings),
+	)
+	for _, finding := range report.Findings {
+		fmt.Fprintf(w, "issuer_ops_finding %s\n", finding)
+	}
+	if !report.Passed {
+		return fmt.Errorf("issuer-check failed operations conformance")
 	}
 	return nil
 }

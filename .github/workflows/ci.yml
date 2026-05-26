@@ -28,6 +28,10 @@ jobs:
         run: go run ./cmd/auroractl vectors --check
       - name: Check real crypto vector drift
         run: go run ./cmd/auroractl vectors --real-crypto --check
+      - name: Check negative vector drift
+        run: go run ./cmd/auroractl vectors --negative --check
+      - name: Check negative vector rejection coverage
+        run: go run ./cmd/auroractl negative-vectors-check
       - name: Check crypto provider agreement
         run: go run ./cmd/auroractl crypto-check
       - name: Check public wire markers

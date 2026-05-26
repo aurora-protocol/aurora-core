@@ -39,6 +39,8 @@ func main() {
 		err = vectors(os.Args[2:], os.Stdout)
 	case "capabilities":
 		capabilities()
+	case "negative-vectors-check":
+		err = negativeVectorsCheck(os.Stdout)
 	case "active-probes":
 		err = activeProbes(os.Stdout)
 	case "classifier-check":
@@ -85,11 +87,12 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|cover-check|crypto-check|wire-check|host-build-check [--portable|--apple-simulator|--all]|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|cover-check|crypto-check|wire-check|host-build-check [--portable|--apple-simulator|--all]|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
 const realCryptoVectorSnapshotPath = "vectors/real_crypto_vectors.txt"
+const negativeVectorSnapshotPath = "vectors/negative_vectors.txt"
 
 func vectors(args []string, w io.Writer) error {
 	if len(args) == 0 {
@@ -119,6 +122,23 @@ func vectors(args []string, w io.Writer) error {
 				return fmt.Errorf("vectors: unknown real-crypto option %q", args[1])
 			}
 			return checkVectorSnapshot("real crypto", args[2], writeRealCryptoVectors)
+		default:
+			return fmt.Errorf("vectors: too many arguments")
+		}
+	case "--negative":
+		switch len(args) {
+		case 1:
+			return writeNegativeVectors(w)
+		case 2:
+			if args[1] != "--check" {
+				return fmt.Errorf("vectors: unknown negative option %q", args[1])
+			}
+			return checkVectorSnapshot("negative", negativeVectorSnapshotPath, writeNegativeVectors)
+		case 3:
+			if args[1] != "--check" {
+				return fmt.Errorf("vectors: unknown negative option %q", args[1])
+			}
+			return checkVectorSnapshot("negative", args[2], writeNegativeVectors)
 		default:
 			return fmt.Errorf("vectors: too many arguments")
 		}
@@ -360,10 +380,34 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- first-hop prelude transcript hashing, sealed control capsules, Finished messages, application secret derivation, and first packet sealing")
 	fmt.Fprintln(w, "- signed directory, relay descriptor, and cover-template real-crypto vectors")
 	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, exit-layer packet, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
+	fmt.Fprintln(w, "- P2 negative vector harness for malformed public keys, wrong key_encoding, wrong signatures, wrong AEAD tag, and replay")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
 	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, P0 host build matrix, HTTP CONNECT/SOCKS5 local interface handlers, client FLOW_OPEN frame emission, relay frame-block flow demux, fake-IP mapped UDP flow integration, UDP target confirm TTL enforcement, synthetic local DNS forwarder responses, negative-cache-aware local DNS responses, shared opaque carrier session adapters, append-only file replay cache, protocol decode fuzz harness, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, external evaluation evidence verifier, deployment security assessment evidence verifier, platform adapter conformance profiles, packet-to-core platform ABI forwarding, packet, DNS, socket, and network-path platform ABI forwarding, platform packaging and entitlement conformance matrix, release readiness evidence verifier, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, issuer service readiness harness, issuer HTTP daemon readiness harness, binary issuer verifier mTLS handler, cover-origin deployment conformance harness")
 	fmt.Fprintln(w, "not production-complete:")
 	fmt.Fprintln(w, "- external live issuer deployment, real signed platform release execution/device provisioning, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation")
+}
+
+func writeNegativeVectors(w io.Writer) error {
+	report, err := corevectors.GenerateNegativeVectorReport()
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(w, corevectors.FormatNegativeVectorReport(report))
+	return err
+}
+
+func negativeVectorsCheck(w io.Writer) error {
+	report, err := corevectors.GenerateNegativeVectorReport()
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, corevectors.FormatNegativeVectorReport(report)); err != nil {
+		return err
+	}
+	if !report.Passed {
+		return fmt.Errorf("negative-vectors-check failed rejection coverage")
+	}
+	return nil
 }
 
 func cryptoCheck(w io.Writer) error {

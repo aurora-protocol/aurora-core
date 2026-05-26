@@ -13,6 +13,7 @@ Implemented now:
 - AccessHint computation, spent-hint cache, token redemption hash, token spent key, replay context hash, and bootstrap dedup key;
 - first-hop and split-route prelude transcript hashing, sealed control capsules, Finished messages, application traffic secret derivation, first application packet vectors, and exit-layer packet vectors;
 - signed real-crypto metadata vectors for directory consensus, relay descriptors, and cover templates;
+- negative-vector generation and checks for malformed public keys, wrong key encodings, wrong signatures, wrong AEAD tags, and replay;
 - policy profiles, PAL scoring, PACE reference behavior, local config parsing, threat-safe logging wrappers, `auroractl`, the local proxy client with HTTP CONNECT/SOCKS5 interface handlers, client FLOW_OPEN frame emission, relay frame-block flow demux, fake-IP mapped UDP flow integration, UDP target confirm TTL enforcement, synthetic local DNS forwarder responses, negative-cache-aware local DNS responses, P0 host build matrix checks, cover-template-validated H2/H1/shadow-origin/H3 datagram and explicitly gated MASQUE carrier request builders, shared opaque carrier session adapters, append-only file replay cache, relay admission/exit gates, protocol decode fuzz harness, HTTP cover-origin gateway handler, gateway-backed active-probe harness, deterministic DPI/classifier baseline harness, external evaluation evidence verifier, deployment security assessment evidence verifier, platform adapter conformance profiles, packet-to-core platform ABI forwarding, platform packaging and entitlement conformance matrix, release readiness evidence verifier, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, issuer service readiness harness, issuer HTTP daemon readiness harness, binary issuer verifier mTLS handler, cover-origin deployment conformance harness, vector drift tests, and ops helpers.
 
 ## Layout
@@ -37,6 +38,8 @@ Use a workspace-local Go build cache in sandboxed environments:
 GOCACHE=/private/tmp/aurora-gocache go test ./...
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl vectors
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl vectors --check
+GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl vectors --negative --check
+GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl negative-vectors-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl wire-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl host-build-check --portable
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl classifier-check

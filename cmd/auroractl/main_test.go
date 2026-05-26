@@ -419,6 +419,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "all-object canonical round-trip coverage") {
 		t.Fatalf("capabilities output missing all-object round-trip coverage:\n%s", text)
 	}
+	if !strings.Contains(text, "P2 negative vector harness") {
+		t.Fatalf("capabilities output missing P2 negative vector coverage:\n%s", text)
+	}
 	if !strings.Contains(text, "issuer operations conformance harness") {
 		t.Fatalf("capabilities output missing issuer operations harness:\n%s", text)
 	}
@@ -454,6 +457,48 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	}
 	if !strings.Contains(text, "external live issuer deployment, real signed platform release execution/device provisioning, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation") {
 		t.Fatalf("capabilities output stopped tracking remaining production work:\n%s", text)
+	}
+}
+
+func TestNegativeVectorsCheckCommandPrintsRequiredCases(t *testing.T) {
+	var out bytes.Buffer
+	if err := negativeVectorsCheck(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"negative_vectors_check passed=true cases=5 failures=0\n",
+		"negative_vector malformed_public_key rejected=true",
+		"negative_vector wrong_key_encoding rejected=true",
+		"negative_vector wrong_signature rejected=true",
+		"negative_vector wrong_aead_tag rejected=true",
+		"negative_vector replay rejected=true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("negative-vectors-check output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "rejected=false") {
+		t.Fatalf("negative-vectors-check output contains accepted negative case:\n%s", text)
+	}
+}
+
+func TestVectorsCommandPrintsNegativeVectors(t *testing.T) {
+	var out bytes.Buffer
+	if err := vectors([]string{"--negative"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"negative_vector malformed_public_key rejected=true",
+		"negative_vector wrong_key_encoding rejected=true",
+		"negative_vector wrong_signature rejected=true",
+		"negative_vector wrong_aead_tag rejected=true",
+		"negative_vector replay rejected=true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("negative vector output missing %q:\n%s", want, text)
+		}
 	}
 }
 
@@ -647,6 +692,8 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go test ./...",
 		"go run ./cmd/auroractl vectors --check",
 		"go run ./cmd/auroractl vectors --real-crypto --check",
+		"go run ./cmd/auroractl vectors --negative --check",
+		"go run ./cmd/auroractl negative-vectors-check",
 		"go run ./cmd/auroractl crypto-check",
 		"go run ./cmd/auroractl wire-check",
 		"go run ./cmd/auroractl host-build-check --portable",

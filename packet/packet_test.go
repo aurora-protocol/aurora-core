@@ -19,6 +19,38 @@ func bytesOf(b byte, n int) []byte {
 	return out
 }
 
+func sealUncheckedForPacketTest(t *testing.T, p Protector, block protocol.FrameBlock) AuroraPacket {
+	t.Helper()
+	plaintext, err := protocol.Encode(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aad, err := auroracrypto.PacketAD(p.Suite, p.RouteInstanceID, p.HopLayer, p.Direction, p.KeyPhase, p.NextPacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce, err := auroracrypto.XORNonce96(p.StaticIV, p.NextPacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := auroracrypto.SealForSuite(p.Suite, p.Key, nonce, aad, plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sealed) < 16 {
+		t.Fatalf("sealed payload too short")
+	}
+	return AuroraPacket{
+		RouteInstanceID: p.RouteInstanceID,
+		HopLayer:        p.HopLayer,
+		Direction:       p.Direction,
+		KeyPhase:        p.KeyPhase,
+		PacketNumber:    p.NextPacket,
+		Ciphertext:      append([]byte(nil), sealed[:len(sealed)-16]...),
+		AuthTag:         append([]byte(nil), sealed[len(sealed)-16:]...),
+	}
+}
+
 func TestProtectorSealOpen(t *testing.T) {
 	flow := protocol.FlowOpen{
 		FlowOpenVersion:  registry.Version20,
@@ -129,6 +161,43 @@ func TestProtectorRejectsReservedDirectionBeforeSeal(t *testing.T) {
 	}
 	if _, err := p.Seal(block); err == nil {
 		t.Fatalf("reserved packet direction was sealed")
+	}
+}
+
+func TestProtectorRejectsMalformedFrameBlockBeforeSeal(t *testing.T) {
+	open := protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           7,
+		FlowKind:         0x01,
+		TargetKind:       0x03,
+		TargetHost:       []byte("example.com"),
+		TargetPort:       443,
+		NameBindingID:    bytesOf(0x11, 16),
+		DNSAnswerSetHash: bytesOf(0x22, 48),
+	}
+	payload, err := protocol.Encode(open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{
+		FrameType: registry.FrameFlowOpen,
+		FlowID:    8,
+		Payload:   payload,
+	}}}
+	p := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		HopLayer:        1,
+		Direction:       0,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+
+	if _, err := p.Seal(block); err == nil {
+		t.Fatalf("malformed frame block was sealed")
+	}
+	if p.NextPacket != 0 {
+		t.Fatalf("malformed frame block advanced packet counter to %d", p.NextPacket)
 	}
 }
 
@@ -558,10 +627,7 @@ func TestProtectorRejectsUnknownReservedFrameType(t *testing.T) {
 		Key:             bytesOf(0x33, 32),
 		StaticIV:        bytesOf(0x44, 12),
 	}
-	pkt, err := p.Seal(block)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pkt := sealUncheckedForPacketTest(t, *p, block)
 	if _, err := p.Open(pkt); err == nil {
 		t.Fatalf("unknown reserved frame type accepted")
 	}
@@ -598,10 +664,7 @@ func TestProtectorRejectsFlowOpenWithUnknownCriticalExtension(t *testing.T) {
 		Key:             bytesOf(0x33, 32),
 		StaticIV:        bytesOf(0x44, 12),
 	}
-	pkt, err := p.Seal(block)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pkt := sealUncheckedForPacketTest(t, *p, block)
 	if _, err := p.Open(pkt); err == nil {
 		t.Fatalf("flow open with unknown critical extension accepted")
 	}
@@ -619,10 +682,7 @@ func TestProtectorRejectsMalformedDataFrame(t *testing.T) {
 		Key:             bytesOf(0x33, 32),
 		StaticIV:        bytesOf(0x44, 12),
 	}
-	pkt, err := p.Seal(block)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pkt := sealUncheckedForPacketTest(t, *p, block)
 	if _, err := p.Open(pkt); err == nil {
 		t.Fatalf("malformed datagram frame accepted")
 	}
@@ -656,10 +716,7 @@ func TestProtectorRejectsFlowOpenInBackwardDirection(t *testing.T) {
 		Key:             bytesOf(0x33, 32),
 		StaticIV:        bytesOf(0x44, 12),
 	}
-	pkt, err := p.Seal(block)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pkt := sealUncheckedForPacketTest(t, *p, block)
 	if _, err := p.Open(pkt); err == nil {
 		t.Fatalf("backward-direction FLOW_OPEN accepted")
 	}

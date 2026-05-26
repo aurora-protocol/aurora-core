@@ -63,6 +63,9 @@ func (p *Protector) Seal(block protocol.FrameBlock) (AuroraPacket, error) {
 	if p.Direction > 1 {
 		return AuroraPacket{}, fmt.Errorf("packet: reserved packet direction 0x%x", p.Direction)
 	}
+	if err := protocol.ValidateFrameBlockForDirection(block, p.Direction); err != nil {
+		return AuroraPacket{}, err
+	}
 	plaintext, err := protocol.Encode(block)
 	if err != nil {
 		return AuroraPacket{}, err

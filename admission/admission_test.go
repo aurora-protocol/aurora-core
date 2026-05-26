@@ -90,6 +90,29 @@ func TestAccessHintRequiresOneMaxUse(t *testing.T) {
 	}
 }
 
+func TestClientTransportHintsHashTreatsReservedRecentResultsAsUnknown(t *testing.T) {
+	unknown := protocol.ClientTransportHints{
+		RecentQUICResult:       0,
+		RecentH2Result:         0,
+		MaxDatagramPayloadHint: 1200,
+	}
+	reserved := unknown
+	reserved.RecentQUICResult = 0x06
+	reserved.RecentH2Result = 0xff
+
+	unknownHash, err := ClientTransportHintsHash(unknown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservedHash, err := ClientTransportHintsHash(reserved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(unknownHash, reservedHash) {
+		t.Fatalf("reserved recent transport hint results were not treated as unknown")
+	}
+}
+
 func TestReplayTokenSpentKeyIgnoresReplayProofNonce(t *testing.T) {
 	admissionContext := rep(0x20, 48)
 	proof := protocol.AdmissionProof{

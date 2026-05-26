@@ -286,6 +286,16 @@ func (h ClientTransportHints) ValidatePrototype() error {
 	return nil
 }
 
+func (h ClientTransportHints) NormalizePrototype() ClientTransportHints {
+	if h.RecentQUICResult > 0x05 {
+		h.RecentQUICResult = 0x00
+	}
+	if h.RecentH2Result > 0x05 {
+		h.RecentH2Result = 0x00
+	}
+	return h
+}
+
 type PolicyOffer struct {
 	OfferedVersions         []uint64
 	OfferedSuites           []uint64

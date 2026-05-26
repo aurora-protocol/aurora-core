@@ -35,6 +35,7 @@ func ClientTransportHintsHash(hints protocol.ClientTransportHints) ([]byte, erro
 	if err := hints.ValidatePrototype(); err != nil {
 		return nil, err
 	}
+	hints = hints.NormalizePrototype()
 	encoded, err := protocol.Encode(hints)
 	if err != nil {
 		return nil, err

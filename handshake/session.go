@@ -57,12 +57,17 @@ func (s *ClientSession) MarkCoverPrelude0Sent() error {
 	return nil
 }
 
-func (s *ClientSession) MarkCoverPrelude1Verified() error {
+func (s *ClientSession) VerifyCoverPrelude1(in CoverPreludeVerificationInput) ([]byte, error) {
 	if s.state != StateVerifyCoverPrelude1 {
-		return fmt.Errorf("handshake: cannot verify CoverPrelude1 from state %d", s.state)
+		return nil, fmt.Errorf("handshake: cannot verify CoverPrelude1 from state %d", s.state)
+	}
+	transcript, err := VerifyCoverPrelude1Signatures(in)
+	if err != nil {
+		s.state = StateAborted
+		return nil, err
 	}
 	s.state = StateSendCoverCapsule1
-	return nil
+	return transcript, nil
 }
 
 func (s *ClientSession) BuildCoverCapsule1(c protocol.CoverCapsule1Plain) (protocol.CoverCapsule1Plain, error) {

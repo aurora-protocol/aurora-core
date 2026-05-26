@@ -1,11 +1,15 @@
 package handshake
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"testing"
 
 	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/aurora-protocol/aurora-core/trust"
 )
 
 func TestClientDoesNotReleaseAdmissionBeforePreludeVerification(t *testing.T) {
@@ -30,11 +34,48 @@ func TestClientDoesNotReleaseAdmissionBeforePreludeVerification(t *testing.T) {
 	if err := s.MarkCoverPrelude0Sent(); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkCoverPrelude1Verified(); err != nil {
+	in := signedCoverPreludeVerificationInput(t)
+	if _, err := s.VerifyCoverPrelude1(in); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.BuildCoverCapsule1(capsule); err != nil {
 		t.Fatalf("client did not release admission after prelude verification: %v", err)
+	}
+}
+
+func TestClientVerifiesCoverPrelude1SignaturesBeforeAdmissionRelease(t *testing.T) {
+	s := NewClientSession()
+	if err := s.MarkDescriptorLoaded(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkCoverOpened(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkCoverPrelude0Sent(); err != nil {
+		t.Fatal(err)
+	}
+	in := signedCoverPreludeVerificationInput(t)
+	if _, err := s.VerifyCoverPrelude1(in); err != nil {
+		t.Fatalf("valid CoverPrelude1 rejected: %v", err)
+	}
+	if _, err := s.BuildCoverCapsule1(protocol.CoverCapsule1Plain{MsgType: registry.MsgCoverCapsule1}); err != nil {
+		t.Fatalf("admission remained blocked after verified CoverPrelude1: %v", err)
+	}
+}
+
+func TestVerifyCoverPrelude1SignaturesRejectsTamperedPrelude(t *testing.T) {
+	in := signedCoverPreludeVerificationInput(t)
+	in.Prelude1.SelectedCoverProfileID = hs(0xee, 16)
+	if _, err := VerifyCoverPrelude1Signatures(in); err == nil {
+		t.Fatalf("tampered CoverPrelude1 signature accepted")
+	}
+}
+
+func TestVerifyCoverPrelude1SignaturesRequiresDescriptorBoundHash(t *testing.T) {
+	in := signedCoverPreludeVerificationInput(t)
+	in.Prelude1.RelayDescriptorHash = hs(0xee, 48)
+	if _, err := VerifyCoverPrelude1Signatures(in); err == nil {
+		t.Fatalf("CoverPrelude1 with wrong descriptor hash accepted")
 	}
 }
 
@@ -93,7 +134,7 @@ func TestWrongServerFinishedBlocksApplicationReady(t *testing.T) {
 	if err := s.MarkCoverPrelude0Sent(); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkCoverPrelude1Verified(); err != nil {
+	if _, err := s.VerifyCoverPrelude1(signedCoverPreludeVerificationInput(t)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.BuildCoverCapsule1(protocol.CoverCapsule1Plain{MsgType: registry.MsgCoverCapsule1}); err != nil {
@@ -116,4 +157,90 @@ func hs(b byte, n int) []byte {
 		out[i] = b
 	}
 	return out
+}
+
+func signedCoverPreludeVerificationInput(t *testing.T) CoverPreludeVerificationInput {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	classicalKey := protocol.PublicKeyRecord{
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+		PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+	}
+	descriptor := protocol.RelayDescriptor{
+		DescriptorVersion:            registry.Version20,
+		RelayID:                      hs(0x01, 32),
+		ValidFromUnix:                100,
+		ValidUntilUnix:               300,
+		RelayLongtermClassicalKey:    classicalKey,
+		RelayLongtermPQKey:           classicalKey,
+		EpochID:                      7,
+		EpochAuthClassicalKey:        classicalKey,
+		EpochAuthPQKey:               classicalKey,
+		EpochValidFromUnix:           100,
+		EpochValidUntilUnix:          300,
+		ReplayEpochID:                8,
+		ReplayEpochValidUntilUnix:    260,
+		ReplayWindowID:               hs(0x02, 16),
+		SupportedSuiteIDs:            []uint64{registry.SuiteHybrid768AESGCM},
+		SupportedMethodIDs:           []uint64{registry.MethodWebH2Stream},
+		SupportedPolicyIDsCommitment: hs(0x03, 48),
+		SupportedShapeIDsCommitment:  hs(0x04, 48),
+		ExitPolicyCommitment:         hs(0x05, 48),
+		AbusePolicyCommitment:        hs(0x06, 48),
+	}
+	descriptorHash, err := trust.RelayDescriptorHash(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coverTemplateHash := hs(0x07, 48)
+	p0 := protocol.CoverPrelude0{
+		MsgType:                     registry.MsgCoverPrelude0,
+		Version:                     registry.Version20,
+		SuiteOffers:                 []uint64{registry.SuiteHybrid768AESGCM},
+		ClientNonce:                 hs(0x08, 32),
+		ClientClassicalEphPub:       []byte{0x09},
+		ClientMLKEMEncapsulationKey: []byte{0x0a},
+		RelayDescriptorHash:         descriptorHash,
+		CoverTemplateHash:           coverTemplateHash,
+		RequestClassID:              3,
+		HintIssuerID:                hs(0x0b, 16),
+		RelayBucketID:               hs(0x0c, 16),
+		HintEpochID:                 9,
+		HintSelector:                hs(0x0d, 16),
+		AccessHint:                  hs(0x0e, 16),
+		ClientCoverRandom:           hs(0x0f, 32),
+	}
+	p1 := protocol.CoverPrelude1{
+		MsgType:                       registry.MsgCoverPrelude1,
+		Version:                       registry.Version20,
+		SelectedSuite:                 registry.SuiteHybrid768AESGCM,
+		RelayDescriptorHash:           descriptorHash,
+		CoverTemplateHash:             coverTemplateHash,
+		RelayEpochID:                  descriptor.EpochID,
+		ServerNonce:                   hs(0x10, 32),
+		ServerClassicalEphPub:         []byte{0x11},
+		ServerMLKEMCiphertextToClient: []byte{0x12},
+		SelectedCoverProfileID:        hs(0x13, 16),
+		SelectedBootstrapEnvelopeID:   hs(0x14, 16),
+	}
+	coverStreamBinding := hs(0x15, 48)
+	transcript, err := PreludeTranscriptHash(registry.SuiteHybrid768AESGCM, coverStreamBinding, p0, p1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1.ServerPreludeSignatureClassical, err = ecdsa.SignASN1(rand.Reader, priv, transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return CoverPreludeVerificationInput{
+		Suite:              registry.SuiteHybrid768AESGCM,
+		CoverStreamBinding: coverStreamBinding,
+		Prelude0:           p0,
+		Prelude1:           p1,
+		Descriptor:         descriptor,
+	}
 }

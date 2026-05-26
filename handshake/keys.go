@@ -1,10 +1,13 @@
 package handshake
 
 import (
+	"bytes"
 	"fmt"
 
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/protocol"
+	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/aurora-protocol/aurora-core/trust"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
@@ -80,6 +83,78 @@ func PreludeTranscriptHash(suite uint64, coverStreamBinding []byte, p0 protocol.
 		encoded0,
 		encoded1,
 	)
+}
+
+type CoverPreludeVerificationInput struct {
+	Suite              uint64
+	CoverStreamBinding []byte
+	Prelude0           protocol.CoverPrelude0
+	Prelude1           protocol.CoverPrelude1
+	Descriptor         protocol.RelayDescriptor
+	RequirePQ          bool
+}
+
+func VerifyCoverPrelude1Signatures(in CoverPreludeVerificationInput) ([]byte, error) {
+	if in.Prelude0.MsgType != registry.MsgCoverPrelude0 || in.Prelude0.Version != registry.Version20 {
+		return nil, fmt.Errorf("handshake: invalid CoverPrelude0 header")
+	}
+	if in.Prelude1.MsgType != registry.MsgCoverPrelude1 || in.Prelude1.Version != registry.Version20 {
+		return nil, fmt.Errorf("handshake: invalid CoverPrelude1 header")
+	}
+	if in.Prelude1.SelectedSuite != in.Suite {
+		return nil, fmt.Errorf("handshake: selected suite mismatch")
+	}
+	if !suiteOffered(in.Prelude0.SuiteOffers, in.Suite) {
+		return nil, fmt.Errorf("handshake: selected suite was not offered")
+	}
+	if !suiteOffered(in.Descriptor.SupportedSuiteIDs, in.Suite) {
+		return nil, fmt.Errorf("handshake: selected suite is not supported by descriptor")
+	}
+	if in.Prelude1.RelayEpochID != in.Descriptor.EpochID {
+		return nil, fmt.Errorf("handshake: relay epoch mismatch")
+	}
+	descriptorHash, err := trust.RelayDescriptorHash(in.Descriptor)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(in.Prelude0.RelayDescriptorHash, descriptorHash) || !bytes.Equal(in.Prelude1.RelayDescriptorHash, descriptorHash) {
+		return nil, fmt.Errorf("handshake: prelude descriptor hash mismatch")
+	}
+	if !bytes.Equal(in.Prelude0.CoverTemplateHash, in.Prelude1.CoverTemplateHash) {
+		return nil, fmt.Errorf("handshake: cover template hash mismatch")
+	}
+	transcript, err := PreludeTranscriptHash(in.Suite, in.CoverStreamBinding, in.Prelude0, in.Prelude1)
+	if err != nil {
+		return nil, err
+	}
+	if len(in.Prelude1.ServerPreludeSignatureClassical) == 0 {
+		return nil, fmt.Errorf("handshake: missing classical prelude signature")
+	}
+	if err := verifyPublicKeySignature(in.Descriptor.EpochAuthClassicalKey, transcript, in.Prelude1.ServerPreludeSignatureClassical); err != nil {
+		return nil, err
+	}
+	if in.RequirePQ || len(in.Prelude1.ServerPreludeSignaturePQ) > 0 {
+		if len(in.Prelude1.ServerPreludeSignaturePQ) == 0 {
+			return nil, fmt.Errorf("handshake: missing PQ prelude signature")
+		}
+		if err := verifyPublicKeySignature(in.Descriptor.EpochAuthPQKey, transcript, in.Prelude1.ServerPreludeSignaturePQ); err != nil {
+			return nil, err
+		}
+	}
+	return transcript, nil
+}
+
+func verifyPublicKeySignature(key protocol.PublicKeyRecord, digest, signature []byte) error {
+	return auroracrypto.VerifySignature(key.SignatureScheme, key.KeyEncoding, key.PublicKey, digest, signature)
+}
+
+func suiteOffered(offers []uint64, selected uint64) bool {
+	for _, offer := range offers {
+		if offer == selected {
+			return true
+		}
+	}
+	return false
 }
 
 func DeriveHandshakeSecrets(suite uint64, ssPQ, ssClassical, handshakeBindingContext, preludeTranscriptHash []byte) (HandshakeSecrets, error) {

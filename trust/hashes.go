@@ -171,6 +171,11 @@ func ValidateCoverTemplateTime(t protocol.CoverTemplate, now uint64, maxFutureSk
 }
 
 func ValidateRequestClass(c protocol.RequestClass) error {
+	switch c.ClassType {
+	case registry.RequestOriginPassThrough, registry.RequestGatewayOwnedSlot, registry.RequestSidecarOriginSlot:
+	default:
+		return fmt.Errorf("trust: unknown request class type 0x%x", c.ClassType)
+	}
 	if c.ClassType == registry.RequestOriginPassThrough && (c.MayCarryPrelude || c.MayCarryCapsule) {
 		return fmt.Errorf("trust: origin-pass-through class cannot carry protocol material")
 	}

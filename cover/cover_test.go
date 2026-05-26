@@ -152,6 +152,20 @@ func TestValidateTemplateRejectsOriginPassThroughProtocolMaterial(t *testing.T) 
 	}
 }
 
+func TestValidateTemplateRejectsUnknownRequestClassType(t *testing.T) {
+	tpl := validTemplate(t)
+	tpl.RequestClasses = append(tpl.RequestClasses, protocol.RequestClass{
+		ClassID:             3,
+		ClassType:           0xff,
+		AllowedMethodFamily: registry.MethodWebH2Stream,
+		PathTemplateID:      cb(0x13, 16),
+	})
+	refreshOriginCommitment(t, &tpl)
+	if err := ValidateTemplate(tpl, ValidationOptions{NowUnix: 150, MaxFutureSkew: 120}); err == nil {
+		t.Fatalf("unknown request class type accepted")
+	}
+}
+
 func TestValidateTemplateRejectsForwardableFailedCapsules(t *testing.T) {
 	tpl := validTemplate(t)
 	tpl.CapsuleEnvelope.ConsumeFailedBodyLocally = false

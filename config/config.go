@@ -208,6 +208,9 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("config: unknown replay cache %q", c.ReplayCache)
 	}
+	if c.AllowLabTokens && c.Profile != "lab" {
+		return fmt.Errorf("config: allow_lab_tokens requires lab profile")
+	}
 	return nil
 }
 

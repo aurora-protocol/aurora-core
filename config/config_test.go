@@ -80,3 +80,28 @@ allow_plaintext_tokens = true
 		t.Fatalf("unknown security key accepted")
 	}
 }
+
+func TestAllowLabTokensRequiresLabProfile(t *testing.T) {
+	_, err := Parse(strings.NewReader(`[aurora]
+profile = "adversarial-dpi"
+
+[security]
+allow_lab_tokens = true
+`))
+	if err == nil {
+		t.Fatalf("non-lab profile accepted lab token enablement")
+	}
+
+	cfg, err := Parse(strings.NewReader(`[aurora]
+profile = "lab"
+
+[security]
+allow_lab_tokens = true
+`))
+	if err != nil {
+		t.Fatalf("lab profile rejected lab token enablement: %v", err)
+	}
+	if !cfg.AllowLabTokens {
+		t.Fatalf("lab token enablement was not parsed")
+	}
+}

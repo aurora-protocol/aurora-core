@@ -298,6 +298,61 @@ func DecodeFlowOpen(r *wire.Reader) FlowOpen {
 	}
 }
 
+func ValidateFlowOpen(open FlowOpen) error {
+	if open.FlowOpenVersion != registry.Version20 {
+		return fmt.Errorf("protocol: unsupported flow_open_version 0x%x", open.FlowOpenVersion)
+	}
+	if open.FlowID == 0 {
+		return fmt.Errorf("protocol: FLOW_OPEN has zero flow_id")
+	}
+	switch open.FlowKind {
+	case 0x01, 0x02, 0x03:
+	default:
+		return fmt.Errorf("protocol: reserved flow_kind 0x%x", open.FlowKind)
+	}
+	switch open.TargetKind {
+	case 0x01:
+		if len(open.TargetHost) != 4 {
+			return fmt.Errorf("protocol: FLOW_OPEN IPv4 target must be 4 bytes")
+		}
+	case 0x02:
+		if len(open.TargetHost) != 16 {
+			return fmt.Errorf("protocol: FLOW_OPEN IPv6 target must be 16 bytes")
+		}
+	case 0x03:
+		if len(open.TargetHost) == 0 {
+			return fmt.Errorf("protocol: FLOW_OPEN domain target is empty")
+		}
+	default:
+		return fmt.Errorf("protocol: reserved target_kind 0x%x", open.TargetKind)
+	}
+	switch open.UDPFQDNMode {
+	case 0x00, 0x01, 0x02, 0x03:
+	default:
+		return fmt.Errorf("protocol: reserved udp_fqdn_mode 0x%x", open.UDPFQDNMode)
+	}
+	if len(open.NameBindingID) != 16 {
+		return fmt.Errorf("protocol: FLOW_OPEN name_binding_id must be 16 bytes")
+	}
+	if len(open.DNSAnswerSetHash) != 48 {
+		return fmt.Errorf("protocol: FLOW_OPEN DNS answer hash must be 48 bytes")
+	}
+	switch open.LocalBindingMode {
+	case 0x00, 0x01, 0x02, 0x03:
+	default:
+		return fmt.Errorf("protocol: reserved local_binding_mode 0x%x", open.LocalBindingMode)
+	}
+	switch open.PriorityClass {
+	case 0x00, 0x01, 0x02, 0x03:
+	default:
+		return fmt.Errorf("protocol: reserved priority_class 0x%x", open.PriorityClass)
+	}
+	if err := ValidateExtensions(open.Extensions, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
 type UDPTargetConfirm struct {
 	FlowID           uint64
 	TargetKind       uint8
@@ -395,6 +450,9 @@ func ValidateFlowManagementFrame(frame AuroraFrame) error {
 		payload := DecodeFlowOpen(r)
 		payloadFlowID = payload.FlowID
 		extensions = payload.Extensions
+		if err := ValidateFlowOpen(payload); err != nil {
+			return err
+		}
 	case registry.FrameUDPTargetConfirm:
 		payload := DecodeUDPTargetConfirm(r)
 		payloadFlowID = payload.FlowID

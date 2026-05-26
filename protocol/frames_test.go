@@ -308,6 +308,58 @@ func TestValidateFrameBlockRejectsTrailingFlowManagementPayload(t *testing.T) {
 	}
 }
 
+func TestValidateFrameBlockRejectsMalformedFlowOpenPayload(t *testing.T) {
+	base := FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           21,
+		FlowKind:         0x01,
+		TargetKind:       0x01,
+		TargetHost:       []byte{93, 184, 216, 34},
+		TargetPort:       443,
+		NameBindingID:    bytes.Repeat([]byte{0x01}, 16),
+		DNSAnswerSetHash: bytes.Repeat([]byte{0x02}, 48),
+		LocalBindingMode: 0x00,
+		PriorityClass:    0x01,
+	}
+	cases := map[string]FlowOpen{
+		"version": func() FlowOpen {
+			open := base
+			open.FlowOpenVersion = 0
+			return open
+		}(),
+		"zero flow": func() FlowOpen {
+			open := base
+			open.FlowID = 0
+			return open
+		}(),
+		"flow kind": func() FlowOpen {
+			open := base
+			open.FlowKind = 0xff
+			return open
+		}(),
+		"target kind": func() FlowOpen {
+			open := base
+			open.TargetKind = 0xff
+			return open
+		}(),
+	}
+	for name, open := range cases {
+		t.Run(name, func(t *testing.T) {
+			payload, err := Encode(open)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateFrameBlock(FrameBlock{Frames: []AuroraFrame{{
+				FrameType: registry.FrameFlowOpen,
+				FlowID:    open.FlowID,
+				Payload:   payload,
+			}}}); err == nil {
+				t.Fatalf("malformed FLOW_OPEN accepted: %+v", open)
+			}
+		})
+	}
+}
+
 func TestValidateUDPTargetConfirmRejectsMalformedTarget(t *testing.T) {
 	base := UDPTargetConfirm{
 		FlowID:           10,

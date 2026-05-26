@@ -46,6 +46,40 @@ func TestFileReplayCachePersistsSpentKeysAcrossInstances(t *testing.T) {
 	}
 }
 
+func TestFileReplayCacheRejectsDuplicateFromStaleOpenInstance(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "replay-cache.log")
+	key := rep(0x78, 48)
+
+	first, err := NewFileReplayCache(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := NewFileReplayCache(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	inserted, err := first.InsertIfAbsent(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inserted {
+		t.Fatalf("first insert reported replay")
+	}
+	inserted, err = second.InsertIfAbsent(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inserted {
+		t.Fatalf("stale open cache accepted duplicate spent key")
+	}
+	if !second.Has(key) {
+		t.Fatalf("stale open cache did not observe key written by peer")
+	}
+}
+
 func TestVerifyAndSpendReplayFailsClosedWhenReplayCacheWriteFails(t *testing.T) {
 	proof, replay, handshakeBinding, admissionContext := replayVerificationFixture(t)
 	_, _, err := VerifyAndSpendReplay(ReplayVerificationInput{

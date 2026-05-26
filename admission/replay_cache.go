@@ -72,7 +72,16 @@ func NewFileReplayCache(path string) (*FileReplayCache, error) {
 		file: file,
 		seen: make(map[string]struct{}),
 	}
+	if err := lockReplayCacheFile(file); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
 	if err := cache.load(); err != nil {
+		_ = unlockReplayCacheFile(file)
+		_ = file.Close()
+		return nil, err
+	}
+	if err := unlockReplayCacheFile(file); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
@@ -87,6 +96,13 @@ func (c *FileReplayCache) InsertIfAbsent(key []byte) (bool, error) {
 	defer c.mu.Unlock()
 	if c.file == nil {
 		return false, fmt.Errorf("admission: replay cache is closed")
+	}
+	if err := lockReplayCacheFile(c.file); err != nil {
+		return false, err
+	}
+	defer unlockReplayCacheFile(c.file)
+	if err := c.load(); err != nil {
+		return false, err
 	}
 	k := string(key)
 	if _, ok := c.seen[k]; ok {
@@ -135,6 +151,7 @@ func (c *FileReplayCache) load() error {
 	if _, err := c.file.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
+	seen := make(map[string]struct{})
 	scanner := bufio.NewScanner(c.file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -145,11 +162,12 @@ func (c *FileReplayCache) load() error {
 		if err != nil {
 			return fmt.Errorf("admission: replay cache %s has malformed key: %w", c.path, err)
 		}
-		c.seen[string(key)] = struct{}{}
+		seen[string(key)] = struct{}{}
 	}
 	if err := scanner.Err(); err != nil {
 		return err
 	}
+	c.seen = seen
 	_, err := c.file.Seek(0, io.SeekEnd)
 	return err
 }

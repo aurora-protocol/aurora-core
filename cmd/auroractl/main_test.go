@@ -111,6 +111,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "gateway-backed active-probe harness") {
 		t.Fatalf("capabilities output missing gateway-backed active-probe harness:\n%s", text)
 	}
+	if !strings.Contains(text, "HTTP cover-origin gateway handler") {
+		t.Fatalf("capabilities output missing HTTP cover-origin gateway handler:\n%s", text)
+	}
 	if !strings.Contains(text, "DPI/classifier baseline harness") {
 		t.Fatalf("capabilities output missing classifier baseline harness:\n%s", text)
 	}
@@ -120,7 +123,7 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if strings.Contains(text, "full real-crypto vector package") {
 		t.Fatalf("capabilities output still lists the real-crypto vector package as remaining:\n%s", text)
 	}
-	if !strings.Contains(text, "Privacy Pass production proof verification, cover-origin gateway, platform adapters, external DPI/classifier evaluation, external active-probe evaluation") {
+	if !strings.Contains(text, "Privacy Pass production proof verification, production cover-origin deployment, platform adapters, external DPI/classifier evaluation, external active-probe evaluation") {
 		t.Fatalf("capabilities output stopped tracking remaining production work:\n%s", text)
 	}
 }

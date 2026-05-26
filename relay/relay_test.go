@@ -12,6 +12,8 @@ import (
 	"encoding/asn1"
 	"errors"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -445,6 +447,106 @@ func TestSidecarOriginFailureConsumesBodyAndRecordsRedactedLog(t *testing.T) {
 	}
 }
 
+func TestHTTPGatewayForwardsOriginPassThroughRoute(t *testing.T) {
+	origin := &recordingHTTPOrigin{recordingOrigin: recordingOrigin{normal: Response{Status: 200, Body: []byte("cover")}}}
+	handler := HTTPGatewayHandler{
+		Gateway:  Gateway{Origin: origin},
+		Template: coverTemplateForRelayTest(),
+		Routes: []HTTPGatewayRoute{{
+			Path:    "/assets/app.bin",
+			ClassID: 2,
+			Kind:    CoverRequestOrdinary,
+		}},
+	}
+	body := []byte("ordinary-origin-body")
+	req := httptest.NewRequest(http.MethodPost, "https://cover.example/assets/app.bin", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent || origin.httpForwarded != 1 || origin.lastPath != "/assets/app.bin" || !bytes.Equal(origin.lastHTTPBody, body) {
+		t.Fatalf("origin pass-through route was not forwarded verbatim: code=%d origin=%+v", rec.Code, origin)
+	}
+}
+
+func TestHTTPGatewayOwnedFailureConsumesBodyAtHTTPBoundary(t *testing.T) {
+	origin := &recordingHTTPOrigin{recordingOrigin: recordingOrigin{normal: Response{Status: 200, Body: []byte("cover")}}}
+	handler := HTTPGatewayHandler{
+		Gateway:  Gateway{Origin: origin},
+		Template: coverTemplateForRelayTest(),
+		Routes: []HTTPGatewayRoute{{
+			Path:    "/bootstrap.bin",
+			ClassID: 1,
+			Kind:    CoverRequestCapsule,
+			Failure: FailureBadAEADTag,
+		}},
+	}
+	req := httptest.NewRequest(http.MethodPost, "https://cover.example/bootstrap.bin", strings.NewReader("raw sensitive capsule"))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || rec.Body.String() != "cover" {
+		t.Fatalf("gateway-owned failure did not return ordinary origin response: code=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if origin.httpForwarded != 0 || origin.httpSidecarForwarded != 0 || origin.forwarded != 0 || origin.sidecarForwarded != 0 {
+		t.Fatalf("failed gateway-owned body reached an upstream origin: %+v", origin)
+	}
+}
+
+func TestHTTPGatewaySidecarFailureRedactsBodyAtHTTPBoundary(t *testing.T) {
+	origin := &recordingHTTPOrigin{recordingOrigin: recordingOrigin{normal: Response{Status: 200, Body: []byte("cover")}}}
+	handler := HTTPGatewayHandler{
+		Gateway:  Gateway{Origin: origin},
+		Template: coverTemplateForRelayTest(),
+		Routes: []HTTPGatewayRoute{{
+			Path:    "/sidecar/upload",
+			ClassID: 3,
+			Kind:    CoverRequestCapsule,
+			Failure: FailureBadAEADTag,
+		}},
+	}
+	req := httptest.NewRequest(http.MethodPost, "https://cover.example/sidecar/upload", strings.NewReader("raw sensitive sidecar capsule"))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || rec.Body.String() != "cover" {
+		t.Fatalf("sidecar failure did not return ordinary origin response: code=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if origin.httpSidecarForwarded != 0 || origin.sidecarForwarded != 0 {
+		t.Fatalf("failed sidecar body was forwarded upstream: %+v", origin)
+	}
+	if origin.failureLogs != 1 || origin.lastFailureLog.Code != failure.BadAEADTag.LogKey() || len(origin.lastFailureLog.Body) != 0 {
+		t.Fatalf("sidecar failure log was not redacted: %+v", origin.lastFailureLog)
+	}
+}
+
+func TestHTTPGatewayOversizeBodyMapsToCoverOriginWithoutForwarding(t *testing.T) {
+	origin := &recordingHTTPOrigin{recordingOrigin: recordingOrigin{normal: Response{Status: 200, Body: []byte("cover")}}}
+	handler := HTTPGatewayHandler{
+		Gateway:      Gateway{Origin: origin},
+		Template:     coverTemplateForRelayTest(),
+		MaxBodyBytes: 4,
+		Routes: []HTTPGatewayRoute{{
+			Path:    "/assets/app.bin",
+			ClassID: 2,
+			Kind:    CoverRequestOrdinary,
+		}},
+	}
+	req := httptest.NewRequest(http.MethodPost, "https://cover.example/assets/app.bin", strings.NewReader("too-large"))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || rec.Body.String() != "cover" {
+		t.Fatalf("oversize body did not map to cover response: code=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if origin.httpForwarded != 0 || origin.forwarded != 0 {
+		t.Fatalf("oversize body was forwarded upstream: %+v", origin)
+	}
+}
+
 type recordingOrigin struct {
 	normal           Response
 	forwarded        int
@@ -474,6 +576,28 @@ func (o *recordingOrigin) ForwardSidecarRequest(body []byte) Response {
 func (o *recordingOrigin) RecordSidecarFailure(log RedactedFailureLog) {
 	o.failureLogs++
 	o.lastFailureLog = log
+}
+
+type recordingHTTPOrigin struct {
+	recordingOrigin
+	httpForwarded        int
+	httpSidecarForwarded int
+	lastPath             string
+	lastHTTPBody         []byte
+}
+
+func (o *recordingHTTPOrigin) ForwardHTTPRequest(req *http.Request, body []byte) Response {
+	o.httpForwarded++
+	o.lastPath = req.URL.Path
+	o.lastHTTPBody = append([]byte(nil), body...)
+	return Response{Status: http.StatusNoContent}
+}
+
+func (o *recordingHTTPOrigin) ForwardSidecarHTTPRequest(req *http.Request, body []byte) Response {
+	o.httpSidecarForwarded++
+	o.lastPath = req.URL.Path
+	o.lastHTTPBody = append([]byte(nil), body...)
+	return Response{Status: http.StatusPartialContent}
 }
 
 func coverTemplateForRelayTest() protocol.CoverTemplate {

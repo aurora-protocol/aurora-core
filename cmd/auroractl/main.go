@@ -321,9 +321,9 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- signed directory, relay descriptor, and cover-template real-crypto vectors")
 	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, exit-layer packet, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
-	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, gateway-backed active-probe harness, DPI/classifier baseline harness")
+	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness")
 	fmt.Fprintln(w, "not production-complete:")
-	fmt.Fprintln(w, "- Privacy Pass production proof verification, cover-origin gateway, platform adapters, external DPI/classifier evaluation, external active-probe evaluation")
+	fmt.Fprintln(w, "- Privacy Pass production proof verification, production cover-origin deployment, platform adapters, external DPI/classifier evaluation, external active-probe evaluation")
 }
 
 func cryptoCheck(w io.Writer) error {

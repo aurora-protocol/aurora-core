@@ -184,6 +184,16 @@ func TestAdmissionPolicyRejectsStructurallyInvalidProofBeforeVerifier(t *testing
 		"bad redemption hash": func(proof *protocol.AdmissionProof) {
 			proof.RedemptionContextHash = bytesOf(0x55, 47)
 		},
+		"bad token nonce": func(proof *protocol.AdmissionProof) {
+			proof.TokenNonce = bytesOf(0x56, 31)
+		},
+		"unknown critical extension": func(proof *protocol.AdmissionProof) {
+			proof.Extensions = []protocol.Extension{{
+				ExtensionType: 0x7002,
+				Critical:      true,
+				Body:          []byte("required"),
+			}}
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			proof := relayAdmissionProof(registry.ProofBlindRSA2048)

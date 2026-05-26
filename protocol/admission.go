@@ -73,8 +73,26 @@ func (p AdmissionProof) ValidateStructural(now uint64, allowLab bool) error {
 	default:
 		return fmt.Errorf("protocol: unknown admission proof type 0x%x", p.ProofType)
 	}
+	if len(p.IssuerID) != 16 {
+		return fmt.Errorf("protocol: issuer id must be 16 bytes")
+	}
+	if len(p.TokenKeyID) != 32 {
+		return fmt.Errorf("protocol: token key id must be 32 bytes")
+	}
+	if len(p.RelayBucketID) != 16 {
+		return fmt.Errorf("protocol: relay bucket id must be 16 bytes")
+	}
+	if len(p.TokenScopeID) != 16 {
+		return fmt.Errorf("protocol: token scope id must be 16 bytes")
+	}
+	if len(p.TokenNonce) != 32 {
+		return fmt.Errorf("protocol: token nonce must be 32 bytes")
+	}
 	if len(p.RedemptionContextHash) != 48 {
 		return fmt.Errorf("protocol: redemption context hash must be 48 bytes")
+	}
+	if err := ValidateExtensions(p.Extensions, nil); err != nil {
+		return err
 	}
 	return nil
 }

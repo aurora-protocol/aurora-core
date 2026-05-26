@@ -184,6 +184,28 @@ func ListenAndServe(addr string, handler http.Handler) error {
 	return err
 }
 
+func ListenAndServeTLS(addr string, handler http.Handler, certFile, keyFile string) error {
+	if addr == "" {
+		return fmt.Errorf("server: listen address is required")
+	}
+	if handler == nil {
+		return fmt.Errorf("server: handler is required")
+	}
+	if certFile == "" || keyFile == "" {
+		return fmt.Errorf("server: TLS certificate and key are required")
+	}
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	err := server.ListenAndServeTLS(certFile, keyFile)
+	if err == http.ErrServerClosed {
+		return nil
+	}
+	return err
+}
+
 func (r *ReadinessReport) require(ok bool, finding string) {
 	if ok {
 		return

@@ -78,6 +78,39 @@ func TestRunTunPacketModeOpensLinuxTUNDevice(t *testing.T) {
 	}
 }
 
+func TestRunTLSModeServesHTTPSForAppleClients(t *testing.T) {
+	var gotAddr, gotCert, gotKey string
+	restoreListen := setListenAndServeTLSForTest(func(addr string, handler http.Handler, certFile, keyFile string) error {
+		gotAddr = addr
+		gotCert = certFile
+		gotKey = keyFile
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("TLS handler health response = %d", rec.Code)
+		}
+		return http.ErrServerClosed
+	})
+	defer restoreListen()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--listen", "0.0.0.0:9443",
+		"--tls-cert", "/tmp/aurora-cert.pem",
+		"--tls-key", "/tmp/aurora-key.pem",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run returned %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if gotAddr != "0.0.0.0:9443" || gotCert != "/tmp/aurora-cert.pem" || gotKey != "/tmp/aurora-key.pem" {
+		t.Fatalf("TLS listener args = addr=%q cert=%q key=%q", gotAddr, gotCert, gotKey)
+	}
+	if !strings.Contains(stdout.String(), "scheme=https") {
+		t.Fatalf("stdout missing HTTPS scheme: %s", stdout.String())
+	}
+}
+
 func TestRunCoverOriginURLServesReverseProxiedCover(t *testing.T) {
 	restoreCover := setNewCoverOriginForTest(func(raw string) (http.Handler, error) {
 		if raw != "https://cover.example" {
@@ -174,6 +207,14 @@ func setListenAndServeForTest(fn func(string, http.Handler) error) func() {
 	listenAndServe = fn
 	return func() {
 		listenAndServe = previous
+	}
+}
+
+func setListenAndServeTLSForTest(fn func(string, http.Handler, string, string) error) func() {
+	previous := listenAndServeTLS
+	listenAndServeTLS = fn
+	return func() {
+		listenAndServeTLS = previous
 	}
 }
 

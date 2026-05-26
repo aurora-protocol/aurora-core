@@ -17,6 +17,7 @@ const packetModeLoopback = "loopback"
 
 var (
 	listenAndServe        = server.ListenAndServe
+	listenAndServeTLS     = server.ListenAndServeTLS
 	newCoverOrigin        = newReverseProxyCoverOrigin
 	openLinuxPacketDevice = func(config platform.LinuxTUNConfig) (io.ReadWriteCloser, int, error) {
 		device, err := platform.OpenLinuxTUNDevice(config)
@@ -38,6 +39,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	listen := flags.String("listen", "127.0.0.1:9443", "listen address")
 	coverBody := flags.String("cover-body", "<html><body>ok</body></html>", "ordinary cover-origin response body")
 	coverOriginURL := flags.String("cover-origin-url", "", "ordinary cover-origin URL to reverse proxy")
+	tlsCert := flags.String("tls-cert", "", "TLS certificate file for HTTPS serving")
+	tlsKey := flags.String("tls-key", "", "TLS private key file for HTTPS serving")
 	now := flags.Uint64("harness-now", 200, "harness unix timestamp")
 	readinessCheck := flags.Bool("readiness-check", false, "run the server readiness harness and exit")
 	packetMode := flags.String("packet-mode", packetModeLoopback, "packet exchange mode: loopback or tun")
@@ -54,6 +57,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if !isValidPacketMode(*packetMode) {
 		fmt.Fprintf(stderr, "server: packet mode %q must be loopback or tun\n", *packetMode)
+		return 2
+	}
+	if (*tlsCert == "") != (*tlsKey == "") {
+		fmt.Fprintln(stderr, "server: TLS certificate and key must be configured together")
 		return 2
 	}
 	if *readinessCheck {
@@ -115,9 +122,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "aurorad listening=%s packet_mode=%s\n", *listen, *packetMode)
-	if err := listenAndServe(*listen, handler); err != nil && err != http.ErrServerClosed {
-		fmt.Fprintln(stderr, err)
+	scheme := "http"
+	if *tlsCert != "" {
+		scheme = "https"
+	}
+	fmt.Fprintf(stdout, "aurorad listening=%s scheme=%s packet_mode=%s\n", *listen, scheme, *packetMode)
+	var serveErr error
+	if *tlsCert != "" {
+		serveErr = listenAndServeTLS(*listen, handler, *tlsCert, *tlsKey)
+	} else {
+		serveErr = listenAndServe(*listen, handler)
+	}
+	if serveErr != nil && serveErr != http.ErrServerClosed {
+		fmt.Fprintln(stderr, serveErr)
 		return 1
 	}
 	return 0

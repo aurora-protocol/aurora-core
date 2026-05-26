@@ -141,9 +141,14 @@ type ReplayVerificationInput struct {
 	AdmissionContextHash    []byte
 	TokenSpentCache         *MemoryReplayCache
 	BootstrapDedupCache     *MemoryReplayCache
+	NowUnix                 uint64
+	AllowLabProofs          bool
 }
 
 func VerifyAndSpendReplay(in ReplayVerificationInput) (tokenSpentKey, bootstrapDedupKey []byte, err error) {
+	if err := in.AdmissionProof.ValidateStructural(in.NowUnix, in.AllowLabProofs); err != nil {
+		return nil, nil, err
+	}
 	if err := in.ReplayProof.ValidateStructural(); err != nil {
 		return nil, nil, err
 	}

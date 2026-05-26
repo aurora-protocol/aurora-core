@@ -117,6 +117,7 @@ func BuildIssuerVerifierRequest(in IssuerVerifierRequestInput) (protocol.IssuerV
 		HopIndex:                in.HopIndex,
 		HandshakeBindingContext: in.HandshakeBindingContext,
 		AdmissionContextHash:    in.AdmissionContextHash,
+		NowUnix:                 in.NowUnix,
 	})
 	if err != nil {
 		return protocol.IssuerVerifierRequest{}, nil, err

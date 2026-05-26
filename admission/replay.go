@@ -6,6 +6,7 @@ import (
 
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/protocol"
+	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
@@ -32,8 +33,18 @@ func PolicyOfferHash(offer protocol.PolicyOffer) ([]byte, error) {
 }
 
 func ClientTransportHintsHash(hints protocol.ClientTransportHints) ([]byte, error) {
+	return clientTransportHintsHashForPolicy(hints, 0)
+}
+
+func clientTransportHintsHashForPolicy(hints protocol.ClientTransportHints, requestedPolicyID uint64) ([]byte, error) {
 	if err := hints.ValidatePrototype(); err != nil {
 		return nil, err
+	}
+	switch requestedPolicyID {
+	case registry.PolicyAdversarialStrict, registry.PolicyEmergencyWeb:
+		if len(hints.NetworkCohortHint) != 0 {
+			return nil, fmt.Errorf("admission: network_cohort_hint must be empty for requested policy 0x%x", requestedPolicyID)
+		}
 	}
 	hints = hints.NormalizePrototype()
 	encoded, err := protocol.Encode(hints)
@@ -52,7 +63,7 @@ func AdmissionContextHash(in ContextInput) ([]byte, error) {
 	if in.RouteHop {
 		hints = protocol.EmptyClientTransportHints()
 	}
-	hintsHash, err := ClientTransportHintsHash(hints)
+	hintsHash, err := clientTransportHintsHashForPolicy(hints, in.PolicyOffer.RequestedPolicyID)
 	if err != nil {
 		return nil, err
 	}

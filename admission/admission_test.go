@@ -113,6 +113,35 @@ func TestClientTransportHintsHashTreatsReservedRecentResultsAsUnknown(t *testing
 	}
 }
 
+func TestAdmissionContextHashRejectsCohortHintForStrictPolicies(t *testing.T) {
+	for name, policyID := range map[string]uint64{
+		"adversarial strict": registry.PolicyAdversarialStrict,
+		"emergency web":      registry.PolicyEmergencyWeb,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := AdmissionContextHash(ContextInput{
+				SelectedVersion:                 registry.Version20,
+				SelectedSuite:                   registry.SuiteHybrid768AESGCM,
+				RelayDescriptorHash:             rep(0x51, 48),
+				CoverTemplateHash:               rep(0x52, 48),
+				RouteInstanceID:                 1,
+				HopIndex:                        0,
+				HandshakeBindingContext:         rep(0x53, 48),
+				PreludeTranscriptHashForThisHop: rep(0x54, 48),
+				PolicyOffer: protocol.PolicyOffer{
+					RequestedPolicyID: policyID,
+				},
+				ClientTransportHints: protocol.ClientTransportHints{
+					NetworkCohortHint: []byte("cohort"),
+				},
+			})
+			if err == nil {
+				t.Fatalf("accepted network cohort hint")
+			}
+		})
+	}
+}
+
 func TestReplayTokenSpentKeyIgnoresReplayProofNonce(t *testing.T) {
 	admissionContext := rep(0x20, 48)
 	proof := protocol.AdmissionProof{

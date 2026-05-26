@@ -68,6 +68,9 @@ func ValidateFrameBlock(block FrameBlock) error {
 		if err := ValidateKeyUpdateFrame(frame); err != nil {
 			return err
 		}
+		if err := ValidateRouteFrame(frame); err != nil {
+			return err
+		}
 		if err := ValidateFlowManagementFrame(frame); err != nil {
 			return err
 		}
@@ -675,6 +678,43 @@ func DecodeRouteForwardFrame(r *wire.Reader) RouteForwardFrame {
 		NextRelayLocator:               r.ReadOpaque16(),
 		OpaqueNextHopPrelude:           r.ReadOpaque24(),
 	}
+}
+
+func ValidateRouteFrame(frame AuroraFrame) error {
+	switch frame.FrameType {
+	case registry.FrameRouteForward:
+		r := wire.NewReader(frame.Payload)
+		forward := DecodeRouteForwardFrame(r)
+		if r.Err() != nil {
+			return r.Err()
+		}
+		if !r.EOF() {
+			return fmt.Errorf("protocol: trailing ROUTE_FORWARD payload bytes")
+		}
+		return ValidateRouteForwardFrame(forward)
+	default:
+		return nil
+	}
+}
+
+func ValidateRouteForwardFrame(forward RouteForwardFrame) error {
+	switch forward.NextRelayLocatorType {
+	case registry.LocatorIPv4Port:
+		if len(forward.NextRelayLocator) != 6 {
+			return fmt.Errorf("protocol: IPv4 locator must be 6 bytes")
+		}
+	case registry.LocatorIPv6Port:
+		if len(forward.NextRelayLocator) != 18 {
+			return fmt.Errorf("protocol: IPv6 locator must be 18 bytes")
+		}
+	case registry.LocatorAuthority, registry.LocatorOpaque:
+		if len(forward.NextRelayLocator) == 0 {
+			return fmt.Errorf("protocol: route-forward locator is empty")
+		}
+	default:
+		return fmt.Errorf("protocol: reserved route-forward locator type 0x%x", forward.NextRelayLocatorType)
+	}
+	return nil
 }
 
 type RoutePreludeEnvelope struct {

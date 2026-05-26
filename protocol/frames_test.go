@@ -291,6 +291,48 @@ func TestRouteControlPayloadsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestValidateFrameBlockRejectsMalformedRouteForwardPayload(t *testing.T) {
+	base := RouteForwardFrame{
+		RouteInstanceID:                11,
+		HopIndex:                       1,
+		NextRelayDescriptorHash:        bytes.Repeat([]byte{0x66}, 48),
+		PreviousHopRelayDescriptorHash: bytes.Repeat([]byte{0x77}, 48),
+		NextRelayRoutingRecordID:       bytes.Repeat([]byte{0x88}, 16),
+		NextRelayLocatorType:           registry.LocatorAuthority,
+		NextRelayLocator:               []byte("next.example"),
+		OpaqueNextHopPrelude:           []byte("sealed"),
+	}
+	cases := map[string][]byte{
+		"reserved locator type": func() []byte {
+			forward := base
+			forward.NextRelayLocatorType = 0x05
+			payload, err := Encode(forward)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return payload
+		}(),
+		"trailing bytes": func() []byte {
+			payload, err := Encode(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return append(payload, 0xff)
+		}(),
+	}
+	for name, payload := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateFrameBlock(FrameBlock{Frames: []AuroraFrame{{
+				FrameType: registry.FrameRouteForward,
+				Payload:   payload,
+			}}})
+			if err == nil {
+				t.Fatalf("malformed ROUTE_FORWARD payload accepted: %x", payload)
+			}
+		})
+	}
+}
+
 func TestNewUDPTargetConfirmFrameValidatesAndCopiesPayload(t *testing.T) {
 	selectedIP := []byte{203, 0, 113, 10}
 	hash := bytes.Repeat([]byte{0xbb}, 48)

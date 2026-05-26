@@ -81,6 +81,11 @@ func TestRunTunPacketModeOpensLinuxTUNDevice(t *testing.T) {
 func TestRunTLSModeServesHTTPSForAppleClients(t *testing.T) {
 	spentTokenCachePath := filepath.Join(t.TempDir(), "spent-token-cache.log")
 	var gotAddr, gotCert, gotKey string
+	device := &recordingPacketDevice{}
+	restoreOpen := setOpenLinuxPacketDeviceForTest(func(config platform.LinuxTUNConfig) (io.ReadWriteCloser, int, error) {
+		return device, 1400, nil
+	})
+	defer restoreOpen()
 	restoreCover := setNewCoverOriginForTest(func(raw string) (http.Handler, error) {
 		if raw != "https://cover.example" {
 			t.Fatalf("cover origin URL = %s", raw)
@@ -112,6 +117,7 @@ func TestRunTLSModeServesHTTPSForAppleClients(t *testing.T) {
 		"--tls-key", "/tmp/aurora-key.pem",
 		"--cover-origin-url", "https://cover.example",
 		"--spent-token-cache", spentTokenCachePath,
+		"--packet-mode", "tun",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run returned %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -121,6 +127,9 @@ func TestRunTLSModeServesHTTPSForAppleClients(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "scheme=https") {
 		t.Fatalf("stdout missing HTTPS scheme: %s", stdout.String())
+	}
+	if !device.closed {
+		t.Fatal("packet device was not closed when aurorad exited")
 	}
 }
 
@@ -163,6 +172,36 @@ func TestRunRejectsNonLoopbackTLSWithoutCoverOriginURL(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cover origin") || !strings.Contains(stderr.String(), "non-loopback") {
 		t.Fatalf("stderr missing cover-origin requirement: %s", stderr.String())
+	}
+}
+
+func TestRunRejectsNonLoopbackTLSWithoutTUNPacketMode(t *testing.T) {
+	spentTokenCachePath := filepath.Join(t.TempDir(), "spent-token-cache.log")
+	restoreCover := setNewCoverOriginForTest(func(raw string) (http.Handler, error) {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("cover"))
+		}), nil
+	})
+	defer restoreCover()
+	restoreListen := setListenAndServeTLSForTest(func(addr string, handler http.Handler, certFile, keyFile string) error {
+		return http.ErrServerClosed
+	})
+	defer restoreListen()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--listen", "0.0.0.0:9443",
+		"--tls-cert", "/tmp/aurora-cert.pem",
+		"--tls-key", "/tmp/aurora-key.pem",
+		"--cover-origin-url", "https://cover.example",
+		"--spent-token-cache", spentTokenCachePath,
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("run accepted public TLS without TUN packet mode stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "packet mode tun") || !strings.Contains(stderr.String(), "non-loopback") {
+		t.Fatalf("stderr missing public packet-mode requirement: %s", stderr.String())
 	}
 }
 

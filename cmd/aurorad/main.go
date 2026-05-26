@@ -77,6 +77,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "server: cover origin URL is required for non-loopback listen addresses")
 		return 2
 	}
+	if !*readinessCheck && !isLoopbackListenAddress(*listen) && *packetMode != platform.PacketTUN {
+		fmt.Fprintln(stderr, "server: packet mode tun is required for non-loopback listen addresses")
+		return 2
+	}
 	if *readinessCheck {
 		report, err := server.RunReadinessHarness(*now)
 		if err != nil {

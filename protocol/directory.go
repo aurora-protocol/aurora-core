@@ -18,6 +18,16 @@ func (s SignatureEntry) EncodeTo(e *wire.Encoder) {
 	e.WriteOpaque16(s.Signature)
 }
 
+func DecodeSignatureEntry(r *wire.Reader) SignatureEntry {
+	return SignatureEntry{
+		AuthorityID:     r.ReadOpaqueFixed(16),
+		AuthorityKeyID:  r.ReadOpaqueFixed(16),
+		SignatureScheme: r.ReadVarint(),
+		KeyEncoding:     r.ReadVarint(),
+		Signature:       r.ReadOpaque16(),
+	}
+}
+
 type DirectoryConsensus struct {
 	Version                 uint64
 	Epoch                   uint64
@@ -51,6 +61,28 @@ func (d DirectoryConsensus) EncodeTo(e *wire.Encoder) {
 	}
 }
 
+func DecodeDirectoryConsensus(r *wire.Reader) DirectoryConsensus {
+	out := DirectoryConsensus{
+		Version:                 r.ReadVarint(),
+		Epoch:                   r.ReadUint64(),
+		ValidFromUnix:           r.ReadUint64(),
+		ValidUntilUnix:          r.ReadUint64(),
+		PreviousConsensusHash:   r.ReadPreHash(),
+		RelayDescriptorRoot:     r.ReadPreHash(),
+		CoverTemplateFamilyRoot: r.ReadPreHash(),
+		RevocationRoot:          r.ReadPreHash(),
+		PolicyRoot:              r.ReadPreHash(),
+		BridgeBucketCommitment:  r.ReadPreHash(),
+		IssuerMetadataRoot:      r.ReadPreHash(),
+	}
+	count := r.ReadVarint()
+	out.AuthoritySignatures = make([]SignatureEntry, 0, count)
+	for i := uint64(0); i < count; i++ {
+		out.AuthoritySignatures = append(out.AuthoritySignatures, DecodeSignatureEntry(r))
+	}
+	return out
+}
+
 func (d DirectoryConsensus) Unsigned() DirectoryConsensus {
 	d.AuthoritySignatures = nil
 	return d
@@ -74,6 +106,18 @@ func (r RoutingRecord) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(r.Priority)
 	e.WriteUint64(r.NotBeforeUnix)
 	e.WriteUint64(r.NotAfterUnix)
+}
+
+func DecodeRoutingRecord(r *wire.Reader) RoutingRecord {
+	return RoutingRecord{
+		RoutingRecordID:   r.ReadOpaque16(),
+		TransportFamilyID: r.ReadVarint(),
+		LocatorType:       r.ReadVarint(),
+		LocatorBody:       r.ReadOpaque16(),
+		Priority:          r.ReadVarint(),
+		NotBeforeUnix:     r.ReadUint64(),
+		NotAfterUnix:      r.ReadUint64(),
+	}
 }
 
 type RelayDescriptor struct {
@@ -138,6 +182,45 @@ func (r RelayDescriptor) EncodeTo(e *wire.Encoder) {
 	e.WriteOpaque16(r.SignatureByLongtermPQ)
 }
 
+func DecodeRelayDescriptor(r *wire.Reader) RelayDescriptor {
+	out := RelayDescriptor{
+		DescriptorVersion:            r.ReadVarint(),
+		RelayID:                      r.ReadOpaqueFixed(32),
+		RoleFlags:                    r.ReadUint32(),
+		ValidFromUnix:                r.ReadUint64(),
+		ValidUntilUnix:               r.ReadUint64(),
+		RelayLongtermClassicalKey:    DecodePublicKeyRecord(r),
+		RelayLongtermPQKey:           DecodePublicKeyRecord(r),
+		EpochID:                      r.ReadUint64(),
+		EpochAuthClassicalKey:        DecodePublicKeyRecord(r),
+		EpochAuthPQKey:               DecodePublicKeyRecord(r),
+		EpochValidFromUnix:           r.ReadUint64(),
+		EpochValidUntilUnix:          r.ReadUint64(),
+		ReplayEpochID:                r.ReadUint64(),
+		ReplayEpochValidUntilUnix:    r.ReadUint64(),
+		ReplayWindowID:               r.ReadOpaqueFixed(16),
+		SupportedSuiteIDs:            r.ReadVarintVector(),
+		SupportedMethodIDs:           r.ReadVarintVector(),
+		SupportedPolicyIDsCommitment: r.ReadPreHash(),
+		SupportedShapeIDsCommitment:  r.ReadPreHash(),
+	}
+	records := r.ReadVarint()
+	out.PublicRoutingRecords = make([]RoutingRecord, 0, records)
+	for i := uint64(0); i < records; i++ {
+		out.PublicRoutingRecords = append(out.PublicRoutingRecords, DecodeRoutingRecord(r))
+	}
+	hashes := r.ReadVarint()
+	out.CoverTemplateInstanceHashes = make([][]byte, 0, hashes)
+	for i := uint64(0); i < hashes; i++ {
+		out.CoverTemplateInstanceHashes = append(out.CoverTemplateInstanceHashes, r.ReadPreHash())
+	}
+	out.ExitPolicyCommitment = r.ReadPreHash()
+	out.AbusePolicyCommitment = r.ReadPreHash()
+	out.SignatureByLongtermClassical = r.ReadOpaque16()
+	out.SignatureByLongtermPQ = r.ReadOpaque16()
+	return out
+}
+
 func (r RelayDescriptor) Unsigned() RelayDescriptor {
 	r.SignatureByLongtermClassical = nil
 	r.SignatureByLongtermPQ = nil
@@ -166,6 +249,19 @@ func (r RequestClass) EncodeTo(e *wire.Encoder) {
 	e.WriteBool(r.MayCarryCapsule)
 }
 
+func DecodeRequestClass(r *wire.Reader) RequestClass {
+	return RequestClass{
+		ClassID:             r.ReadVarint(),
+		ClassType:           r.ReadVarint(),
+		AllowedMethodFamily: r.ReadVarint(),
+		PathTemplateID:      r.ReadOpaqueFixed(16),
+		BodyPolicyID:        r.ReadVarint(),
+		ResponsePolicyID:    r.ReadVarint(),
+		MayCarryPrelude:     r.ReadBool(),
+		MayCarryCapsule:     r.ReadBool(),
+	}
+}
+
 type PreludeEnvelope struct {
 	MinRequestBodySize         uint64
 	MaxRequestBodySize         uint64
@@ -190,6 +286,20 @@ func (p PreludeEnvelope) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(p.ResponseTimingPolicyID)
 }
 
+func DecodePreludeEnvelope(r *wire.Reader) PreludeEnvelope {
+	return PreludeEnvelope{
+		MinRequestBodySize:         r.ReadVarint(),
+		MaxRequestBodySize:         r.ReadVarint(),
+		RequestSizeDistributionID:  r.ReadOpaqueFixed(16),
+		MinResponseBodySize:        r.ReadVarint(),
+		MaxResponseBodySize:        r.ReadVarint(),
+		ResponseSizeDistributionID: r.ReadOpaqueFixed(16),
+		ContentTypeFamilyID:        r.ReadVarint(),
+		ChunkingPolicyID:           r.ReadVarint(),
+		ResponseTimingPolicyID:     r.ReadVarint(),
+	}
+}
+
 type CapsuleEnvelope struct {
 	EnvelopeID               []byte
 	MinCapsuleBodySize       uint64
@@ -210,6 +320,19 @@ func (c CapsuleEnvelope) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(c.ChunkingPolicyID)
 	e.WriteVarint(c.FailureResponseFamilyID)
 	e.WriteBool(c.ConsumeFailedBodyLocally)
+}
+
+func DecodeCapsuleEnvelope(r *wire.Reader) CapsuleEnvelope {
+	return CapsuleEnvelope{
+		EnvelopeID:               r.ReadOpaqueFixed(16),
+		MinCapsuleBodySize:       r.ReadVarint(),
+		MaxCapsuleBodySize:       r.ReadVarint(),
+		BodySizeDistributionID:   r.ReadOpaqueFixed(16),
+		AllowedContentTypeIDs:    r.ReadVarintVector(),
+		ChunkingPolicyID:         r.ReadVarint(),
+		FailureResponseFamilyID:  r.ReadVarint(),
+		ConsumeFailedBodyLocally: r.ReadBool(),
+	}
 }
 
 type H2CoverProfile struct {
@@ -234,6 +357,20 @@ func (h H2CoverProfile) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(h.RequestGraphFamilyID)
 	e.WriteOpaqueFixed(h.RecordSizeDistributionID, 16)
 	e.WriteVarint(h.IdleTimeoutPolicyID)
+}
+
+func DecodeH2CoverProfile(r *wire.Reader) H2CoverProfile {
+	return H2CoverProfile{
+		ProfileID:                  r.ReadVarint(),
+		H2SettingsFamilyID:         r.ReadVarint(),
+		PseudoHeaderOrderFamilyID:  r.ReadVarint(),
+		HPACKBehaviorFamilyID:      r.ReadVarint(),
+		MaxConcurrentStreamsBucket: r.ReadVarint(),
+		InitialWindowBucket:        r.ReadVarint(),
+		RequestGraphFamilyID:       r.ReadVarint(),
+		RecordSizeDistributionID:   r.ReadOpaqueFixed(16),
+		IdleTimeoutPolicyID:        r.ReadVarint(),
+	}
 }
 
 type H3CoverProfile struct {
@@ -266,6 +403,23 @@ func (h H3CoverProfile) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(h.FallbackMethodID)
 }
 
+func DecodeH3CoverProfile(r *wire.Reader) H3CoverProfile {
+	return H3CoverProfile{
+		ProfileID:                  r.ReadVarint(),
+		H3SettingsFamilyID:         r.ReadVarint(),
+		QPACKBehaviorFamilyID:      r.ReadVarint(),
+		SupportsH3Datagram:         r.ReadBool(),
+		SupportsWebTransportH3:     r.ReadBool(),
+		WebTransportProfileID:      r.ReadVarint(),
+		QUICDatagramRequired:       r.ReadBool(),
+		ResetStreamAtRequired:      r.ReadBool(),
+		RequestGraphFamilyID:       r.ReadVarint(),
+		DatagramSizeDistributionID: r.ReadOpaqueFixed(16),
+		DatagramRateDistributionID: r.ReadOpaqueFixed(16),
+		FallbackMethodID:           r.ReadVarint(),
+	}
+}
+
 type WebSocketCoverProfile struct {
 	ProfileID               uint64
 	UpgradeFamilyID         uint64
@@ -286,6 +440,18 @@ func (w WebSocketCoverProfile) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(w.StreamLifetimePolicyID)
 }
 
+func DecodeWebSocketCoverProfile(r *wire.Reader) WebSocketCoverProfile {
+	return WebSocketCoverProfile{
+		ProfileID:               r.ReadVarint(),
+		UpgradeFamilyID:         r.ReadVarint(),
+		SubprotocolFamilyID:     r.ReadVarint(),
+		FrameSizeDistributionID: r.ReadOpaqueFixed(16),
+		PingPolicyID:            r.ReadVarint(),
+		CloseBehaviorID:         r.ReadVarint(),
+		StreamLifetimePolicyID:  r.ReadVarint(),
+	}
+}
+
 type CacheCookiePolicy struct {
 	PolicyID                 uint64
 	CookieBehaviorFamilyID   uint64
@@ -302,6 +468,17 @@ func (c CacheCookiePolicy) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(c.ETagBehaviorFamilyID)
 	e.WriteVarint(c.VaryHeaderFamilyID)
 	e.WriteVarint(c.RedirectBehaviorFamilyID)
+}
+
+func DecodeCacheCookiePolicy(r *wire.Reader) CacheCookiePolicy {
+	return CacheCookiePolicy{
+		PolicyID:                 r.ReadVarint(),
+		CookieBehaviorFamilyID:   r.ReadVarint(),
+		CacheControlFamilyID:     r.ReadVarint(),
+		ETagBehaviorFamilyID:     r.ReadVarint(),
+		VaryHeaderFamilyID:       r.ReadVarint(),
+		RedirectBehaviorFamilyID: r.ReadVarint(),
+	}
 }
 
 type TimingEnvelope struct {
@@ -322,6 +499,18 @@ func (t TimingEnvelope) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(t.TimeoutFamilyID)
 	e.WriteVarint(t.RetryFamilyID)
 	e.WriteVarint(t.CloseTimingFamilyID)
+}
+
+func DecodeTimingEnvelope(r *wire.Reader) TimingEnvelope {
+	return TimingEnvelope{
+		TimingPolicyID:       r.ReadVarint(),
+		MinResponseDelayMS:   r.ReadVarint(),
+		MaxResponseDelayMS:   r.ReadVarint(),
+		JitterDistributionID: r.ReadOpaqueFixed(16),
+		TimeoutFamilyID:      r.ReadVarint(),
+		RetryFamilyID:        r.ReadVarint(),
+		CloseTimingFamilyID:  r.ReadVarint(),
+	}
 }
 
 type CoverTemplate struct {
@@ -377,6 +566,44 @@ func (c CoverTemplate) EncodeTo(e *wire.Encoder) {
 	c.TimingEnvelope.EncodeTo(e)
 	e.WriteOpaque16(c.TemplateFamilySignature)
 	e.WriteOpaque16(c.TemplateInstanceSignature)
+}
+
+func DecodeCoverTemplate(r *wire.Reader) CoverTemplate {
+	out := CoverTemplate{
+		TemplateVersion:       r.ReadVarint(),
+		TemplateID:            r.ReadOpaque16(),
+		TemplateFamilyID:      r.ReadOpaque16(),
+		ValidFromUnix:         r.ReadUint64(),
+		ValidUntilUnix:        r.ReadUint64(),
+		OriginSPKIHash:        r.ReadPreHash(),
+		PublicNameHash:        r.ReadPreHash(),
+		CoverOriginCommitment: r.ReadPreHash(),
+	}
+	classes := r.ReadVarint()
+	out.RequestClasses = make([]RequestClass, 0, classes)
+	for i := uint64(0); i < classes; i++ {
+		out.RequestClasses = append(out.RequestClasses, DecodeRequestClass(r))
+	}
+	gatewayCommitments := r.ReadVarint()
+	out.GatewayOwnedSlotCommitments = make([][]byte, 0, gatewayCommitments)
+	for i := uint64(0); i < gatewayCommitments; i++ {
+		out.GatewayOwnedSlotCommitments = append(out.GatewayOwnedSlotCommitments, r.ReadPreHash())
+	}
+	passThroughCommitments := r.ReadVarint()
+	out.OriginPassThroughSlotCommitments = make([][]byte, 0, passThroughCommitments)
+	for i := uint64(0); i < passThroughCommitments; i++ {
+		out.OriginPassThroughSlotCommitments = append(out.OriginPassThroughSlotCommitments, r.ReadPreHash())
+	}
+	out.PreludeEnvelope = DecodePreludeEnvelope(r)
+	out.CapsuleEnvelope = DecodeCapsuleEnvelope(r)
+	out.H2Profile = DecodeH2CoverProfile(r)
+	out.H3Profile = DecodeH3CoverProfile(r)
+	out.WebSocketProfile = DecodeWebSocketCoverProfile(r)
+	out.CacheCookiePolicy = DecodeCacheCookiePolicy(r)
+	out.TimingEnvelope = DecodeTimingEnvelope(r)
+	out.TemplateFamilySignature = r.ReadOpaque16()
+	out.TemplateInstanceSignature = r.ReadOpaque16()
+	return out
 }
 
 func (c CoverTemplate) Unsigned() CoverTemplate {

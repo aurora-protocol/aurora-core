@@ -122,6 +122,7 @@ type CoreSink interface {
 	SubmitTCPFlow(protocol.FlowOpen) error
 	SubmitUDPDatagram(flowID uint64, datagram []byte) error
 	SubmitDNSMessage(flowID uint64, message []byte) error
+	SubmitPacket(packet []byte) error
 	ReadPacketOrFrame() ([]byte, bool)
 	NotifyNetworkChange(PathInfo)
 	ExportRedactedDiagnostics() []byte
@@ -179,11 +180,22 @@ func (a *ThinAdapter) SubmitDNSMessage(flowID uint64, message []byte) error {
 	return a.core.SubmitDNSMessage(flowID, append([]byte(nil), message...))
 }
 
+func (a *ThinAdapter) SubmitPacket(packet []byte) error {
+	if a.core == nil {
+		return fmt.Errorf("platform: missing core sink")
+	}
+	return a.core.SubmitPacket(append([]byte(nil), packet...))
+}
+
 func (a *ThinAdapter) ReadPacketOrFrame() ([]byte, bool) {
 	if a.core == nil {
 		return nil, false
 	}
-	return a.core.ReadPacketOrFrame()
+	data, ok := a.core.ReadPacketOrFrame()
+	if !ok {
+		return nil, false
+	}
+	return append([]byte(nil), data...), true
 }
 
 func (a *ThinAdapter) NotifyNetworkChange(path PathInfo) {

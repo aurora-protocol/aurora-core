@@ -117,8 +117,13 @@ func TestThinAdapterForwardsCoreABIWithoutCryptoState(t *testing.T) {
 		t.Fatal(err)
 	}
 	dns[0] = 0
+	packet := []byte{0x45, 0x00, 0x00, 0x14}
+	if err := adapter.SubmitPacket(packet); err != nil {
+		t.Fatal(err)
+	}
+	packet[0] = 0
 	adapter.NotifyNetworkChange(PathInfo{Interface: "wifi"})
-	if sink.openSessions != 1 || sink.tcpFlows != 1 || sink.udpDatagrams != 1 || sink.dnsMessages != 1 || sink.networkChanges != 1 {
+	if sink.openSessions != 1 || sink.tcpFlows != 1 || sink.udpDatagrams != 1 || sink.dnsMessages != 1 || sink.packets != 1 || sink.networkChanges != 1 {
 		t.Fatalf("adapter did not forward ABI calls: %+v", sink)
 	}
 	if !bytes.Equal(sink.lastTCPFlow.TargetHost, []byte("example.com")) {
@@ -126,6 +131,18 @@ func TestThinAdapterForwardsCoreABIWithoutCryptoState(t *testing.T) {
 	}
 	if !bytes.Equal(sink.lastDNSMessage, []byte{0x12, 0x34, 0x01, 0x00}) {
 		t.Fatalf("DNS message was not copied before forwarding: %x", sink.lastDNSMessage)
+	}
+	if !bytes.Equal(sink.lastPacket, []byte{0x45, 0x00, 0x00, 0x14}) {
+		t.Fatalf("packet was not copied before forwarding: %x", sink.lastPacket)
+	}
+	sink.nextPacketOrFrame = []byte{0x01, 0x02, 0x03}
+	outbound, ok := adapter.ReadPacketOrFrame()
+	if !ok || !bytes.Equal(outbound, []byte{0x01, 0x02, 0x03}) {
+		t.Fatalf("adapter did not return outbound core packet/frame: ok=%v data=%x", ok, outbound)
+	}
+	outbound[0] = 0xff
+	if !bytes.Equal(sink.lastReturnedPacketOrFrame, []byte{0x01, 0x02, 0x03}) {
+		t.Fatalf("outbound packet/frame exposed core-owned buffer: %x", sink.lastReturnedPacketOrFrame)
 	}
 }
 
@@ -179,13 +196,17 @@ func TestAdapterBlueprintVerificationRejectsMissingProxyFallback(t *testing.T) {
 }
 
 type recordingCoreSink struct {
-	openSessions   int
-	tcpFlows       int
-	udpDatagrams   int
-	dnsMessages    int
-	networkChanges int
-	lastTCPFlow    protocol.FlowOpen
-	lastDNSMessage []byte
+	openSessions              int
+	tcpFlows                  int
+	udpDatagrams              int
+	dnsMessages               int
+	packets                   int
+	networkChanges            int
+	lastTCPFlow               protocol.FlowOpen
+	lastDNSMessage            []byte
+	lastPacket                []byte
+	nextPacketOrFrame         []byte
+	lastReturnedPacketOrFrame []byte
 }
 
 func (s *recordingCoreSink) OpenSession(configBlob []byte) error {
@@ -217,8 +238,20 @@ func (s *recordingCoreSink) SubmitDNSMessage(_ uint64, message []byte) error {
 	return nil
 }
 
+func (s *recordingCoreSink) SubmitPacket(packet []byte) error {
+	s.packets++
+	s.lastPacket = append([]byte(nil), packet...)
+	return nil
+}
+
 func (s *recordingCoreSink) ReadPacketOrFrame() ([]byte, bool) {
-	return nil, false
+	if s.nextPacketOrFrame == nil {
+		return nil, false
+	}
+	out := s.nextPacketOrFrame
+	s.nextPacketOrFrame = nil
+	s.lastReturnedPacketOrFrame = out
+	return out, true
 }
 
 func (s *recordingCoreSink) NotifyNetworkChange(PathInfo) {

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"testing"
 
+	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/aurora-protocol/aurora-core/wire"
 )
 
 func hx(b byte, n int) []byte {
@@ -30,6 +32,90 @@ func TestDeriveHandshakeSecretsBindsContext(t *testing.T) {
 	}
 	if bytes.Equal(a.HandshakeSecret, b.HandshakeSecret) {
 		t.Fatalf("handshake secret did not bind handshake context")
+	}
+}
+
+func TestCoverStreamBindingMatchesCanonicalPreimage(t *testing.T) {
+	in := CoverStreamBindingInput{
+		OuterExporterValue:       hx(0x11, 48),
+		HTTPVersion:              []byte("h2"),
+		ConnectionIDHash:         hx(0x12, 48),
+		StreamIDOrRequestID:      7,
+		MethodFamilyID:           registry.MethodWebH2Stream,
+		NormalizedAuthorityHash:  hx(0x13, 48),
+		NormalizedPathTemplateID: hx(0x14, 16),
+		RequestClassID:           3,
+		ClientCoverRandom:        hx(0x15, 32),
+	}
+	got, err := CoverStreamBinding(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := wire.NewEncoder()
+	e.WriteBytes([]byte("aurora v2.0 cover stream binding"))
+	e.WriteOpaqueFixed(in.OuterExporterValue, 48)
+	e.WriteOpaque8(in.HTTPVersion)
+	e.WritePreHash(in.ConnectionIDHash)
+	e.WriteVarint(in.StreamIDOrRequestID)
+	e.WriteVarint(in.MethodFamilyID)
+	e.WritePreHash(in.NormalizedAuthorityHash)
+	e.WriteOpaqueFixed(in.NormalizedPathTemplateID, 16)
+	e.WriteVarint(in.RequestClassID)
+	e.WriteOpaqueFixed(in.ClientCoverRandom, 32)
+	preimage, err := e.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := auroracrypto.PreHash(preimage)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("cover stream binding mismatch\n got %x\nwant %x", got, want)
+	}
+	in.RequestClassID = 4
+	changed, err := CoverStreamBinding(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(got, changed) {
+		t.Fatalf("cover stream binding did not bind request class")
+	}
+}
+
+func TestFirstHopBindingContextFeedsHandshakeSecrets(t *testing.T) {
+	coverBinding, err := CoverStreamBinding(CoverStreamBindingInput{
+		OuterExporterValue:       hx(0x21, 48),
+		HTTPVersion:              []byte("h2"),
+		ConnectionIDHash:         hx(0x22, 48),
+		StreamIDOrRequestID:      5,
+		MethodFamilyID:           registry.MethodWebH2Stream,
+		NormalizedAuthorityHash:  hx(0x23, 48),
+		NormalizedPathTemplateID: hx(0x24, 16),
+		RequestClassID:           1,
+		ClientCoverRandom:        hx(0x25, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := FirstHopBindingContext(hx(0x21, 48), coverBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ctx) != 48 {
+		t.Fatalf("first-hop binding length = %d", len(ctx))
+	}
+	a, err := DeriveHandshakeSecrets(registry.SuiteHybrid768AESGCM, hx(1, 32), hx(2, 32), ctx, hx(4, 48))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedCtx, err := FirstHopBindingContext(hx(0x99, 48), coverBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := DeriveHandshakeSecrets(registry.SuiteHybrid768AESGCM, hx(1, 32), hx(2, 32), changedCtx, hx(4, 48))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(a.HandshakeSecret, b.HandshakeSecret) {
+		t.Fatalf("handshake secret did not bind first-hop context")
 	}
 }
 

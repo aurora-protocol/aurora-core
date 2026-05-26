@@ -5,6 +5,7 @@ import (
 
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/protocol"
+	"github.com/aurora-protocol/aurora-core/wire"
 )
 
 type HandshakeSecrets struct {
@@ -19,6 +20,49 @@ type HandshakeSecrets struct {
 	ClientHSIV            []byte
 	ServerHSKey           []byte
 	ServerHSIV            []byte
+}
+
+type CoverStreamBindingInput struct {
+	OuterExporterValue       []byte
+	HTTPVersion              []byte
+	ConnectionIDHash         []byte
+	StreamIDOrRequestID      uint64
+	MethodFamilyID           uint64
+	NormalizedAuthorityHash  []byte
+	NormalizedPathTemplateID []byte
+	RequestClassID           uint64
+	ClientCoverRandom        []byte
+}
+
+func CoverStreamBinding(in CoverStreamBindingInput) ([]byte, error) {
+	e := wire.NewEncoder()
+	e.WriteBytes([]byte("aurora v2.0 cover stream binding"))
+	e.WriteOpaqueFixed(in.OuterExporterValue, 48)
+	e.WriteOpaque8(in.HTTPVersion)
+	e.WritePreHash(in.ConnectionIDHash)
+	e.WriteVarint(in.StreamIDOrRequestID)
+	e.WriteVarint(in.MethodFamilyID)
+	e.WritePreHash(in.NormalizedAuthorityHash)
+	e.WriteOpaqueFixed(in.NormalizedPathTemplateID, 16)
+	e.WriteVarint(in.RequestClassID)
+	e.WriteOpaqueFixed(in.ClientCoverRandom, 32)
+	preimage, err := e.Bytes()
+	if err != nil {
+		return nil, err
+	}
+	return auroracrypto.PreHash(preimage), nil
+}
+
+func FirstHopBindingContext(outerExporterValue, coverStreamBinding []byte) ([]byte, error) {
+	e := wire.NewEncoder()
+	e.WriteBytes([]byte("aurora v2.0 first-hop binding context"))
+	e.WriteOpaqueFixed(outerExporterValue, 48)
+	e.WritePreHash(coverStreamBinding)
+	preimage, err := e.Bytes()
+	if err != nil {
+		return nil, err
+	}
+	return auroracrypto.PreHash(preimage), nil
 }
 
 func PreludeTranscriptHash(suite uint64, coverStreamBinding []byte, p0 protocol.CoverPrelude0, p1 protocol.CoverPrelude1) ([]byte, error) {

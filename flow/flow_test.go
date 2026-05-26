@@ -78,3 +78,58 @@ func TestFakeIPAllocatorIsStableAndPrivate(t *testing.T) {
 		t.Fatalf("fake IP assignment not stable: %s/%x vs %s/%x", ip1, id1, ip2, id2)
 	}
 }
+
+func TestFlowTTLAndIdleTimeoutDropStaleDatagrams(t *testing.T) {
+	m := NewManager()
+	open := protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           12,
+		FlowKind:         FlowKindUDPAssociation,
+		TargetKind:       TargetKindIPv4,
+		TargetHost:       []byte{203, 0, 113, 9},
+		TargetPort:       443,
+		UDPFQDNMode:      UDPFQDNClientResolvedNameBinding,
+		NameBindingID:    fb(0xaa, 16),
+		DNSAnswerSetHash: fb(0xbb, 48),
+		LocalBindingMode: LocalBindingTransparentFakeIP,
+		PriorityClass:    PriorityRealtime,
+	}
+	if err := m.OpenWithOptions(open, FlowOptions{NowUnix: 100, TTLSeconds: 20, IdleTimeoutSeconds: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.AcceptDatagram(12, 104); !ok {
+		t.Fatalf("active datagram flow was dropped")
+	}
+	if _, ok := m.AcceptDatagram(12, 110); ok {
+		t.Fatalf("idle UDP datagram was accepted after timeout")
+	}
+	if _, ok := m.DemuxInbound(12); ok {
+		t.Fatalf("expired flow remained in manager")
+	}
+}
+
+func TestFlowTTLIsHardCapEvenWhenActive(t *testing.T) {
+	m := NewManager()
+	open := protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           13,
+		FlowKind:         FlowKindUDPAssociation,
+		TargetKind:       TargetKindIPv4,
+		TargetHost:       []byte{203, 0, 113, 10},
+		TargetPort:       443,
+		UDPFQDNMode:      UDPFQDNClientResolvedNameBinding,
+		NameBindingID:    fb(0xaa, 16),
+		DNSAnswerSetHash: fb(0xbb, 48),
+		LocalBindingMode: LocalBindingTransparentFakeIP,
+		PriorityClass:    PriorityRealtime,
+	}
+	if err := m.OpenWithOptions(open, FlowOptions{NowUnix: 100, TTLSeconds: 7, IdleTimeoutSeconds: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.AcceptDatagram(13, 106); !ok {
+		t.Fatalf("flow expired before TTL")
+	}
+	if _, ok := m.AcceptDatagram(13, 108); ok {
+		t.Fatalf("datagram accepted after flow TTL")
+	}
+}

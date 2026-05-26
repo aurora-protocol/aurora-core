@@ -31,6 +31,10 @@ const (
 	LocalBindingTransparentOriginalIP uint8 = 0x01
 	LocalBindingTransparentFakeIP     uint8 = 0x02
 	LocalBindingTUNPacketFlow         uint8 = 0x03
+
+	PriorityInteractive uint8 = 0x01
+	PriorityBulk        uint8 = 0x02
+	PriorityRealtime    uint8 = 0x03
 )
 
 type FlowState struct {
@@ -43,8 +47,19 @@ type FlowState struct {
 	NameBindingID    []byte
 	DNSAnswerSetHash []byte
 	LocalBindingMode uint8
+	PriorityClass    uint8
+	CreatedAtUnix    uint64
+	LastActivityUnix uint64
+	TTLSeconds       uint64
+	IdleTimeoutSecs  uint64
 	ConfirmedHost    []byte
 	ConfirmedPort    uint16
+}
+
+type FlowOptions struct {
+	NowUnix            uint64
+	TTLSeconds         uint64
+	IdleTimeoutSeconds uint64
 }
 
 type Manager struct {
@@ -57,6 +72,10 @@ func NewManager() *Manager {
 }
 
 func (m *Manager) Open(open protocol.FlowOpen) error {
+	return m.OpenWithOptions(open, FlowOptions{})
+}
+
+func (m *Manager) OpenWithOptions(open protocol.FlowOpen, opts FlowOptions) error {
 	if open.FlowOpenVersion != registry.Version20 {
 		return fmt.Errorf("flow: unsupported flow_open_version 0x%x", open.FlowOpenVersion)
 	}
@@ -68,6 +87,7 @@ func (m *Manager) Open(open protocol.FlowOpen) error {
 	if _, ok := m.flows[open.FlowID]; ok {
 		return fmt.Errorf("flow: duplicate flow_id %d", open.FlowID)
 	}
+	now := opts.NowUnix
 	m.flows[open.FlowID] = FlowState{
 		FlowID:           open.FlowID,
 		Kind:             open.FlowKind,
@@ -78,6 +98,11 @@ func (m *Manager) Open(open protocol.FlowOpen) error {
 		NameBindingID:    append([]byte(nil), open.NameBindingID...),
 		DNSAnswerSetHash: append([]byte(nil), open.DNSAnswerSetHash...),
 		LocalBindingMode: open.LocalBindingMode,
+		PriorityClass:    open.PriorityClass,
+		CreatedAtUnix:    now,
+		LastActivityUnix: now,
+		TTLSeconds:       opts.TTLSeconds,
+		IdleTimeoutSecs:  opts.IdleTimeoutSeconds,
 	}
 	return nil
 }
@@ -103,6 +128,22 @@ func (m *Manager) DemuxInbound(flowID uint64) (FlowState, bool) {
 	defer m.mu.Unlock()
 	state, ok := m.flows[flowID]
 	return state, ok
+}
+
+func (m *Manager) AcceptDatagram(flowID uint64, now uint64) (FlowState, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state, ok := m.flows[flowID]
+	if !ok || state.Kind != FlowKindUDPAssociation {
+		return FlowState{}, false
+	}
+	if state.expired(now) {
+		delete(m.flows, flowID)
+		return FlowState{}, false
+	}
+	state.LastActivityUnix = now
+	m.flows[flowID] = state
+	return state, true
 }
 
 func (m *Manager) Close(close protocol.FlowClose) error {
@@ -146,6 +187,16 @@ func validateOpen(open protocol.FlowOpen) error {
 		return fmt.Errorf("flow: relay-resolved UDP disabled by default for transparent fake-IP mode")
 	}
 	return nil
+}
+
+func (s FlowState) expired(now uint64) bool {
+	if s.TTLSeconds > 0 && now >= s.CreatedAtUnix+s.TTLSeconds {
+		return true
+	}
+	if s.IdleTimeoutSecs > 0 && now > s.LastActivityUnix+s.IdleTimeoutSecs {
+		return true
+	}
+	return false
 }
 
 type FakeIPAllocator struct {

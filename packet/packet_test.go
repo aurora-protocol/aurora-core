@@ -76,6 +76,63 @@ func TestProtectorRejectsMetadataMismatch(t *testing.T) {
 	}
 }
 
+func TestReceiverRejectsDuplicatePacketNumber(t *testing.T) {
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
+	protector := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		HopLayer:        2,
+		Direction:       0,
+		KeyPhase:        0,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	pkt, err := protector.Seal(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := NewReceiver(ReceiverConfig{Protector: *protector, WindowSize: 64})
+	if _, err := receiver.Open(pkt); err != nil {
+		t.Fatalf("first packet open failed: %v", err)
+	}
+	if _, err := receiver.Open(pkt); err == nil {
+		t.Fatalf("duplicate packet number accepted")
+	}
+}
+
+func TestReceiverRejectsPacketsOutsideDrainWindow(t *testing.T) {
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
+	protector := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		HopLayer:        2,
+		Direction:       0,
+		KeyPhase:        0,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	var packets []AuroraPacket
+	for i := 0; i < 5; i++ {
+		pkt, err := protector.Seal(block)
+		if err != nil {
+			t.Fatal(err)
+		}
+		packets = append(packets, pkt)
+	}
+	receiver := NewReceiver(ReceiverConfig{Protector: *protector, WindowSize: 2})
+	for _, pkt := range packets[3:] {
+		if _, err := receiver.Open(pkt); err != nil {
+			t.Fatalf("new packet open failed: %v", err)
+		}
+	}
+	if _, err := receiver.Open(packets[1]); err == nil {
+		t.Fatalf("stale packet outside receiver window accepted")
+	}
+	if _, err := receiver.Open(packets[2]); err != nil {
+		t.Fatalf("out-of-order packet inside receiver window rejected: %v", err)
+	}
+}
+
 func TestFlowManagementMismatchFailsBeforeMutation(t *testing.T) {
 	flow := protocol.FlowOpen{
 		FlowOpenVersion:  registry.Version20,

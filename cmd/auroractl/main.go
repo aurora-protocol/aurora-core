@@ -352,7 +352,7 @@ func capabilities() {
 
 func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "implemented:")
-	fmt.Fprintln(w, "- Section 9 wire scalar, opaque, vector, and struct encoding with opaque8/16/24 boundary test coverage and vector element-count boundary coverage")
+	fmt.Fprintln(w, "- Section 9 wire scalar, opaque, vector, and struct encoding with opaque8/16/24 boundary test coverage, vector element-count boundary coverage, and reserved enum rejection coverage")
 	fmt.Fprintln(w, "- Appendix A registries")
 	fmt.Fprintln(w, "- Appendix B.4 and B.5 structural vectors")
 	fmt.Fprintln(w, "- DirectoryConsensus, RelayDescriptor, CoverTemplate trust hashes, signature inputs, and strict ML-DSA authority quorum")

@@ -410,6 +410,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "vector element-count boundary coverage") {
 		t.Fatalf("capabilities output missing vector element-count coverage:\n%s", text)
 	}
+	if !strings.Contains(text, "reserved enum rejection coverage") {
+		t.Fatalf("capabilities output missing reserved enum rejection coverage:\n%s", text)
+	}
 	if !strings.Contains(text, "issuer operations conformance harness") {
 		t.Fatalf("capabilities output missing issuer operations harness:\n%s", text)
 	}

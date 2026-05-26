@@ -340,6 +340,45 @@ func DecodePolicyOffer(r *wire.Reader) PolicyOffer {
 	}
 }
 
+func (p PolicyOffer) ValidateStructural() error {
+	for _, version := range p.OfferedVersions {
+		if err := validateVersionKnown(version); err != nil {
+			return err
+		}
+	}
+	for _, suite := range p.OfferedSuites {
+		if err := validateSuiteKnown(suite); err != nil {
+			return err
+		}
+	}
+	for _, method := range p.OfferedMethods {
+		if err := validateMethodKnown(method); err != nil {
+			return err
+		}
+	}
+	if err := validatePolicyKnown(p.MinimumPolicyID); err != nil {
+		return err
+	}
+	if err := validatePolicyKnown(p.RequestedPolicyID); err != nil {
+		return err
+	}
+	if err := validateRouteModeKnown(p.RequestedRouteModeID); err != nil {
+		return err
+	}
+	if err := validateShapeKnown(p.RequestedShapeID); err != nil {
+		return err
+	}
+	for _, personality := range p.TunnelPersonalityOffers {
+		if err := validateTunnelPersonalityKnown(personality); err != nil {
+			return err
+		}
+	}
+	if err := ValidateExtensions(p.Extensions, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
 type VirtualAddressAssignment struct {
 	LeaseID         []byte
 	AddressFamily   uint64
@@ -434,6 +473,24 @@ func DecodePolicyAccept(r *wire.Reader) PolicyAccept {
 }
 
 func (p PolicyAccept) ValidateStructural() error {
+	if err := validateVersionKnown(p.SelectedVersion); err != nil {
+		return err
+	}
+	if err := validateSuiteKnown(p.SelectedSuite); err != nil {
+		return err
+	}
+	if err := validateMethodKnown(p.SelectedMethod); err != nil {
+		return err
+	}
+	if err := validatePolicyKnown(p.SelectedPolicy); err != nil {
+		return err
+	}
+	if err := validateRouteModeKnown(p.SelectedRouteModeID); err != nil {
+		return err
+	}
+	if err := validateShapeKnown(p.SelectedShape); err != nil {
+		return err
+	}
 	switch p.SelectedTunnelPersonality {
 	case registry.PersonalityProxyFlow:
 		if p.VirtualAddressAssignment != nil {
@@ -446,6 +503,11 @@ func (p PolicyAccept) ValidateStructural() error {
 	default:
 		return fmt.Errorf("protocol: reserved tunnel personality 0x%x", p.SelectedTunnelPersonality)
 	}
+	for _, method := range p.FallbackMethods {
+		if err := validateMethodKnown(method); err != nil {
+			return err
+		}
+	}
 	if err := ValidateExtensions(p.Extensions, nil); err != nil {
 		return err
 	}
@@ -453,6 +515,9 @@ func (p PolicyAccept) ValidateStructural() error {
 }
 
 func (p PolicyAccept) ValidateForOffer(offer PolicyOffer) error {
+	if err := offer.ValidateStructural(); err != nil {
+		return err
+	}
 	if err := p.ValidateStructural(); err != nil {
 		return err
 	}
@@ -481,4 +546,92 @@ func containsUint64(xs []uint64, want uint64) bool {
 		}
 	}
 	return false
+}
+
+func validateVersionKnown(version uint64) error {
+	if version == registry.Version20 {
+		return nil
+	}
+	return fmt.Errorf("protocol: reserved version 0x%x", version)
+}
+
+func validateSuiteKnown(suite uint64) error {
+	switch suite {
+	case registry.SuiteHybrid768AESGCM,
+		registry.SuiteHybrid768P256AESGCM,
+		registry.SuiteHybrid1024AESGCM,
+		registry.SuiteHybrid768ChaCha20,
+		registry.SuiteHybrid768P256ChaCha20,
+		registry.SuiteHybrid1024ChaCha20,
+		registry.SuiteLabClassical:
+		return nil
+	default:
+		return fmt.Errorf("protocol: reserved suite 0x%x", suite)
+	}
+}
+
+func validatePolicyKnown(policy uint64) error {
+	switch policy {
+	case registry.PolicyFastWeb,
+		registry.PolicyBalancedWeb,
+		registry.PolicyAdversarialDPI,
+		registry.PolicyAdversarialStrict,
+		registry.PolicyEmergencyWeb,
+		registry.PolicyLab:
+		return nil
+	default:
+		return fmt.Errorf("protocol: reserved policy 0x%x", policy)
+	}
+}
+
+func validateRouteModeKnown(route uint64) error {
+	switch route {
+	case registry.RouteFast1,
+		registry.RouteSplit2,
+		registry.RouteSafe3,
+		registry.RouteBridgeSplit,
+		registry.RouteAuto:
+		return nil
+	default:
+		return fmt.Errorf("protocol: reserved route mode 0x%x", route)
+	}
+}
+
+func validateShapeKnown(shape uint64) error {
+	switch shape {
+	case registry.ShapeLight,
+		registry.ShapeNormal,
+		registry.ShapeStrict,
+		registry.ShapeEmergency:
+		return nil
+	default:
+		return fmt.Errorf("protocol: reserved shape 0x%x", shape)
+	}
+}
+
+func validateTunnelPersonalityKnown(personality uint64) error {
+	switch personality {
+	case registry.PersonalityProxyFlow,
+		registry.PersonalityIPLite,
+		registry.PersonalityFullIP:
+		return nil
+	default:
+		return fmt.Errorf("protocol: reserved tunnel personality 0x%x", personality)
+	}
+}
+
+func validateMethodKnown(method uint64) error {
+	switch method {
+	case registry.MethodWebH2Stream,
+		registry.MethodWebH1WS,
+		registry.MethodShadowOrigin,
+		registry.MethodWebH3Stream,
+		registry.MethodWebH3ExtDgram,
+		registry.MethodMasqueConnectIP,
+		registry.MethodMasqueConnectUDP,
+		registry.MethodDirectQUICLab:
+		return nil
+	default:
+		return fmt.Errorf("protocol: reserved method 0x%x", method)
+	}
 }

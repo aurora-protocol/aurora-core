@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/netip"
+	"strings"
 
 	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/failure"
@@ -344,6 +345,22 @@ func (p ExitPolicy) AllowIP(ipString string) bool {
 	return true
 }
 
+func (p ExitPolicy) AllowDomain(domain string) bool {
+	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if domain == "" {
+		return false
+	}
+	if p.AllowPrivate {
+		return true
+	}
+	return domain != "localhost" &&
+		!strings.HasSuffix(domain, ".localhost") &&
+		domain != "local" &&
+		!strings.HasSuffix(domain, ".local") &&
+		domain != "home.arpa" &&
+		!strings.HasSuffix(domain, ".home.arpa")
+}
+
 var blockedExitPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("100.64.0.0/10"),
@@ -579,6 +596,10 @@ func (h *ExitFlowHandler) checkExitPolicy(open protocol.FlowOpen) error {
 		}
 		if !h.Policy.AllowIP(addr.String()) {
 			return fmt.Errorf("relay: exit policy denied target")
+		}
+	case coreflow.TargetKindDomainName:
+		if !h.Policy.AllowDomain(string(open.TargetHost)) {
+			return fmt.Errorf("relay: exit policy denied domain target")
 		}
 	}
 	return nil

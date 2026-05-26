@@ -111,6 +111,21 @@ func TestExitFlowHandlerRejectsPolicyDeniedFlowBeforeOpen(t *testing.T) {
 	}
 }
 
+func TestExitFlowHandlerRejectsLoopbackDomainBeforeOpen(t *testing.T) {
+	handler := NewExitFlowHandler(DefaultExitPolicy())
+	open := relayTCPFlowOpen(23, "localhost")
+	frames, err := handler.HandleFlowOpenFrame(flowOpenFrame(t, open), 100)
+	if err == nil {
+		t.Fatalf("loopback domain flow was accepted")
+	}
+	if len(frames) != 0 {
+		t.Fatalf("policy denied domain emitted frames: %+v", frames)
+	}
+	if _, ok := handler.FlowState(23); ok {
+		t.Fatalf("policy denied domain mutated state")
+	}
+}
+
 func TestExitFlowHandlerEmitsUDPTargetConfirmForClientSuppliedIP(t *testing.T) {
 	handler := NewExitFlowHandler(DefaultExitPolicy())
 	handler.UDPConfirmTTLSeconds = 120

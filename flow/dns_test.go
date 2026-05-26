@@ -208,6 +208,21 @@ func TestDNSForwarderAnswersNegativeCachedLocalAQueryWithoutFrame(t *testing.T) 
 	}
 }
 
+func TestDNSForwarderRejectsLocalAQueryWithoutUsableIPAnswer(t *testing.T) {
+	f := NewDNSForwarder(DNSForwarderOptions{FakeIPCIDR: "198.18.0.0/15"})
+	query := dnsQuestion(0x1239, "NoData.Example", 1)
+
+	if _, err := f.AnswerLocalAQuery(96, query, nil, 100); err == nil {
+		t.Fatalf("local DNS query with no usable IP answer synthesized a fake IP")
+	}
+	if _, err := f.ResolveFakeA("NoData.Example", []string{"not-an-ip"}, 100); err == nil {
+		t.Fatalf("fake-IP resolver accepted an answer set without an IP target")
+	}
+	if len(f.allocator.byName) != 0 || len(f.allocator.byIP) != 0 {
+		t.Fatalf("rejected answer set mutated fake-IP mappings: byName=%v byIP=%v", f.allocator.byName, f.allocator.byIP)
+	}
+}
+
 func TestDNSForwarderExpiresNegativeCachedLocalAQuery(t *testing.T) {
 	f := NewDNSForwarder(DNSForwarderOptions{FakeIPCIDR: "198.18.0.0/15"})
 	f.AddNegative("Missing.Example.", 100, 30)

@@ -62,6 +62,9 @@ func (f *DNSForwarder) ResolveFakeA(domain string, answers []string, now uint64)
 	if name == "" {
 		return SyntheticAnswer{}, fmt.Errorf("flow: empty DNS name")
 	}
+	if _, _, err := firstIPTarget(answers); err != nil {
+		return SyntheticAnswer{}, err
+	}
 	f.mu.Lock()
 	if validUntil, ok := f.negative[name]; ok {
 		if now <= validUntil {

@@ -44,6 +44,11 @@ func ValidateTemplate(tpl protocol.CoverTemplate, opts ValidationOptions) error 
 		if err := trust.ValidateRequestClass(class); err != nil {
 			return err
 		}
+		if class.MayCarryPrelude || class.MayCarryCapsule {
+			if !isKnownMethodFamily(class.AllowedMethodFamily) {
+				return fmt.Errorf("cover: protocol carrier has invalid method family 0x%x", class.AllowedMethodFamily)
+			}
+		}
 		if class.ClassType == registry.RequestGatewayOwnedSlot && (class.MayCarryPrelude || class.MayCarryCapsule) {
 			gatewayCarrier = true
 		}
@@ -52,6 +57,17 @@ func ValidateTemplate(tpl protocol.CoverTemplate, opts ValidationOptions) error 
 		return fmt.Errorf("cover: no gateway-owned request class can carry protocol material")
 	}
 	return nil
+}
+
+func SelectCarrierClass(tpl protocol.CoverTemplate, classID uint64, method uint64, needCapsule bool) (protocol.RequestClass, error) {
+	class, err := SelectGatewayOwnedClass(tpl, classID, needCapsule)
+	if err != nil {
+		return protocol.RequestClass{}, err
+	}
+	if class.AllowedMethodFamily != method {
+		return protocol.RequestClass{}, fmt.Errorf("cover: request class method family 0x%x does not match selected method 0x%x", class.AllowedMethodFamily, method)
+	}
+	return class, nil
 }
 
 func SelectGatewayOwnedClass(tpl protocol.CoverTemplate, classID uint64, needCapsule bool) (protocol.RequestClass, error) {
@@ -87,6 +103,22 @@ func validatePreludeEnvelope(p protocol.PreludeEnvelope) error {
 		return fmt.Errorf("cover: prelude response envelope too small")
 	}
 	return nil
+}
+
+func isKnownMethodFamily(method uint64) bool {
+	switch method {
+	case registry.MethodWebH2Stream,
+		registry.MethodWebH1WS,
+		registry.MethodShadowOrigin,
+		registry.MethodWebH3Stream,
+		registry.MethodWebH3ExtDgram,
+		registry.MethodMasqueConnectIP,
+		registry.MethodMasqueConnectUDP,
+		registry.MethodDirectQUICLab:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateCapsuleEnvelope(tpl protocol.CoverTemplate) error {

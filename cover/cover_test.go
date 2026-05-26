@@ -89,6 +89,31 @@ func TestValidateTemplateAcceptsGatewayOwnedCarrier(t *testing.T) {
 	}
 }
 
+func TestValidateTemplateRejectsCarrierWithoutMethodFamily(t *testing.T) {
+	tpl := validTemplate(t)
+	tpl.RequestClasses[0].AllowedMethodFamily = 0
+	refreshOriginCommitment(t, &tpl)
+	if err := ValidateTemplate(tpl, ValidationOptions{NowUnix: 150, MaxFutureSkew: 120}); err == nil {
+		t.Fatalf("protocol carrier without method family accepted")
+	}
+}
+
+func TestSelectCarrierClassRequiresMatchingMethodFamily(t *testing.T) {
+	tpl := validTemplate(t)
+	if _, err := SelectCarrierClass(tpl, 1, registry.MethodWebH1WS, true); err == nil {
+		t.Fatalf("web.h1.ws selected an H2-only carrier class")
+	}
+	tpl.RequestClasses[0].AllowedMethodFamily = registry.MethodWebH1WS
+	refreshOriginCommitment(t, &tpl)
+	class, err := SelectCarrierClass(tpl, 1, registry.MethodWebH1WS, true)
+	if err != nil {
+		t.Fatalf("matching method family rejected: %v", err)
+	}
+	if class.AllowedMethodFamily != registry.MethodWebH1WS {
+		t.Fatalf("unexpected carrier class selected: %+v", class)
+	}
+}
+
 func TestValidateTemplateRejectsOriginPassThroughProtocolMaterial(t *testing.T) {
 	tpl := validTemplate(t)
 	tpl.RequestClasses[1].MayCarryPrelude = true
@@ -116,4 +141,13 @@ func TestValidateTemplateRejectsOriginCommitmentMismatch(t *testing.T) {
 	if err := ValidateTemplate(tpl, ValidationOptions{NowUnix: 150, MaxFutureSkew: 120}); err == nil {
 		t.Fatalf("cover origin commitment mismatch accepted")
 	}
+}
+
+func refreshOriginCommitment(t *testing.T, tpl *protocol.CoverTemplate) {
+	t.Helper()
+	commitment, err := trust.CoverOriginCommitment(*tpl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpl.CoverOriginCommitment = commitment
 }

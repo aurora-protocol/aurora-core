@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestHarnessHandlerServesCoverAndIssuerEndpoints(t *testing.T) {
@@ -138,6 +141,53 @@ func TestPacketExchangeInvalidProbeFallsBackToCover(t *testing.T) {
 	}
 }
 
+func TestDevicePacketExchangerWritesInboundPacketsToDevice(t *testing.T) {
+	device := newScriptedPacketDevice()
+	exchanger, err := NewDevicePacketExchanger(device, DevicePacketExchangerOptions{
+		MTU:          1280,
+		QueuePackets: 4,
+	})
+	if err != nil {
+		t.Fatalf("NewDevicePacketExchanger failed: %v", err)
+	}
+	defer exchanger.Close()
+
+	_, err = exchanger.ExchangePacketBatch(PacketBatch{
+		Packets:         [][]byte{{0x45, 0x00, 0x00, 0x14}},
+		ProtocolNumbers: []uint16{2},
+	})
+	if err != nil {
+		t.Fatalf("ExchangePacketBatch failed: %v", err)
+	}
+
+	writes := device.Writes()
+	if len(writes) != 1 || !bytes.Equal(writes[0], []byte{0x45, 0x00, 0x00, 0x14}) {
+		t.Fatalf("device writes = %x", writes)
+	}
+}
+
+func TestDevicePacketExchangerDrainsOutboundDevicePackets(t *testing.T) {
+	device := newScriptedPacketDevice()
+	exchanger, err := NewDevicePacketExchanger(device, DevicePacketExchangerOptions{
+		MTU:          1280,
+		QueuePackets: 4,
+	})
+	if err != nil {
+		t.Fatalf("NewDevicePacketExchanger failed: %v", err)
+	}
+	defer exchanger.Close()
+
+	device.QueueRead([]byte{0x45, 0x00, 0x00, 0x14})
+	outbound := waitForDeviceOutbound(t, exchanger)
+
+	if len(outbound.Packets) != 1 || !bytes.Equal(outbound.Packets[0], []byte{0x45, 0x00, 0x00, 0x14}) {
+		t.Fatalf("outbound device packet mismatch: %+v", outbound)
+	}
+	if outbound.ProtocolNumbers[0] != 2 {
+		t.Fatalf("outbound protocol = %d, want IPv4 protocol number 2", outbound.ProtocolNumbers[0])
+	}
+}
+
 func TestRunReadinessHarnessCoversLinuxServerSurface(t *testing.T) {
 	report, err := RunReadinessHarness(200)
 	if err != nil {
@@ -189,6 +239,73 @@ func mustJSON(t *testing.T, v any) []byte {
 	out, err := json.Marshal(v)
 	if err != nil {
 		t.Fatalf("json marshal failed: %v", err)
+	}
+	return out
+}
+
+func waitForDeviceOutbound(t *testing.T, exchanger PacketExchanger) PacketBatch {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		outbound, err := exchanger.ExchangePacketBatch(PacketBatch{})
+		if err != nil {
+			t.Fatalf("ExchangePacketBatch failed while waiting for outbound packet: %v", err)
+		}
+		if len(outbound.Packets) > 0 {
+			return outbound
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("timed out waiting for outbound device packet")
+	return PacketBatch{}
+}
+
+type scriptedPacketDevice struct {
+	mu     sync.Mutex
+	reads  chan []byte
+	writes [][]byte
+	closed bool
+}
+
+func newScriptedPacketDevice() *scriptedPacketDevice {
+	return &scriptedPacketDevice{reads: make(chan []byte, 8)}
+}
+
+func (d *scriptedPacketDevice) QueueRead(packet []byte) {
+	d.reads <- append([]byte(nil), packet...)
+}
+
+func (d *scriptedPacketDevice) Read(p []byte) (int, error) {
+	packet, ok := <-d.reads
+	if !ok {
+		return 0, io.EOF
+	}
+	return copy(p, packet), nil
+}
+
+func (d *scriptedPacketDevice) Write(p []byte) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.writes = append(d.writes, append([]byte(nil), p...))
+	return len(p), nil
+}
+
+func (d *scriptedPacketDevice) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.closed {
+		d.closed = true
+		close(d.reads)
+	}
+	return nil
+}
+
+func (d *scriptedPacketDevice) Writes() [][]byte {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([][]byte, len(d.writes))
+	for i, packet := range d.writes {
+		out[i] = append([]byte(nil), packet...)
 	}
 	return out
 }

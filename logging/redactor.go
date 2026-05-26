@@ -251,7 +251,9 @@ func isSensitiveTypeName(name string) bool {
 	case "AdmissionProof",
 		"ReplayProof",
 		"CoverCapsule1Plain",
+		"CoverCapsule2Plain",
 		"RouteCapsule1Plain",
+		"RouteCapsule2Plain",
 		"IssuerVerifierRequest":
 		return true
 	default:

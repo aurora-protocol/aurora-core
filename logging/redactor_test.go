@@ -158,6 +158,22 @@ func TestSafeFieldRedactsSensitiveValuesInsideContainers(t *testing.T) {
 	}
 }
 
+func TestSafeFieldRedactsAllCapsulePlaintextTypes(t *testing.T) {
+	for name, value := range map[string]any{
+		"cover capsule 1": protocol.CoverCapsule1Plain{},
+		"cover capsule 2": protocol.CoverCapsule2Plain{},
+		"route capsule 1": protocol.RouteCapsule1Plain{},
+		"route capsule 2": protocol.RouteCapsule2Plain{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			field := SafeField("context", value, false)
+			if field.Value != "[redacted-field]" {
+				t.Fatalf("capsule plaintext type was not fully redacted: %+v", field)
+			}
+		})
+	}
+}
+
 func TestSafeFieldRedactsPublicLogSensitiveOperationalFields(t *testing.T) {
 	for _, key := range []string{
 		"bridge_locator",

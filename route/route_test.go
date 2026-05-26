@@ -263,6 +263,34 @@ func TestVerifyRoutePrelude1RequiresCanonicalRouteHopBinding(t *testing.T) {
 	}
 }
 
+func TestRouteClientDoesNotReleaseCapsuleBeforePreludeVerification(t *testing.T) {
+	session := NewClientSession()
+	capsule := protocol.RouteCapsule1Plain{
+		AdmissionProof: sampleRouteAdmissionProof(),
+		ReplayProof:    sampleRouteReplayProof(),
+		PolicyOffer:    sampleRoutePolicyOffer(),
+		ClientFinished: rb(0xc1, 48),
+	}
+	if _, err := session.BuildRouteCapsule1(capsule); err == nil {
+		t.Fatalf("route capsule was released before ROUTE_PRELUDE1 verification")
+	}
+	in := signedRoutePreludeVerificationInput(t)
+	transcript, err := session.VerifyRoutePrelude1(in)
+	if err != nil {
+		t.Fatalf("valid ROUTE_PRELUDE1 rejected: %v", err)
+	}
+	if len(transcript) != 48 {
+		t.Fatalf("route prelude transcript length = %d, want 48", len(transcript))
+	}
+	built, err := session.BuildRouteCapsule1(capsule)
+	if err != nil {
+		t.Fatalf("route capsule remained blocked after ROUTE_PRELUDE1 verification: %v", err)
+	}
+	if built.MsgType != registry.MsgRouteCapsule1 || built.RouteInstanceID != in.Prelude1.RouteInstanceID || built.HopIndex != in.Prelude1.HopIndex {
+		t.Fatalf("route capsule header was not bound to verified prelude: %+v", built)
+	}
+}
+
 func routeTestEnvelope() EnvelopeInput {
 	return EnvelopeInput{
 		RouteInstanceID:                1,
@@ -276,6 +304,46 @@ func routeTestEnvelope() EnvelopeInput {
 		WrapSuiteID:                    registry.WrapSuiteRouteV1,
 		WrapNonce:                      rb(0x32, 16),
 		HintSecret:                     rb(0x33, 32),
+	}
+}
+
+func sampleRouteAdmissionProof() protocol.AdmissionProof {
+	return protocol.AdmissionProof{
+		ProofVersion:          registry.Version20,
+		ProofType:             registry.ProofBlindRSA2048,
+		IssuerID:              rb(0xb1, 16),
+		TokenKeyID:            rb(0xb2, 32),
+		RelayBucketID:         rb(0xb3, 16),
+		TokenScopeID:          rb(0xb4, 16),
+		ExpiryUnix:            200,
+		TokenNonce:            rb(0xb5, 32),
+		RedemptionContextHash: rb(0xb6, 48),
+		TokenPublicMetadata:   []byte("metadata"),
+		TokenAuthenticator:    []byte("token"),
+	}
+}
+
+func sampleRouteReplayProof() protocol.ReplayProof {
+	return protocol.ReplayProof{
+		ProofVersion:        registry.Version20,
+		ReplayEpochID:       9,
+		TokenRedemptionHash: rb(0xb7, 48),
+		ClientReplayNonce:   rb(0xb8, 32),
+		ReplayContextHash:   rb(0xb9, 48),
+		ReplayWindowID:      rb(0xba, 16),
+	}
+}
+
+func sampleRoutePolicyOffer() protocol.PolicyOffer {
+	return protocol.PolicyOffer{
+		OfferedVersions:         []uint64{registry.Version20},
+		OfferedSuites:           []uint64{registry.SuiteHybrid768AESGCM},
+		OfferedMethods:          []uint64{registry.MethodWebH2Stream},
+		MinimumPolicyID:         registry.PolicyFastWeb,
+		RequestedPolicyID:       registry.PolicyBalancedWeb,
+		RequestedRouteModeID:    registry.RouteSplit2,
+		RequestedShapeID:        registry.ShapeNormal,
+		TunnelPersonalityOffers: []uint64{registry.PersonalityProxyFlow},
 	}
 }
 

@@ -77,6 +77,16 @@ func ComputeSpentHintKey(cred AccessHintCredential) ([]byte, error) {
 }
 
 func VerifyAndSpendAccessHint(cache *MemoryReplayCache, cred AccessHintCredential, bindingContext, clientNonce, receivedHint []byte) error {
+	return VerifyAndSpendAccessHintAt(cache, cred, bindingContext, clientNonce, receivedHint, 0)
+}
+
+func VerifyAndSpendAccessHintAt(cache *MemoryReplayCache, cred AccessHintCredential, bindingContext, clientNonce, receivedHint []byte, nowUnix uint64) error {
+	if cache == nil {
+		return fmt.Errorf("admission: missing access hint replay cache")
+	}
+	if nowUnix != 0 && cred.ExpiryUnix != 0 && nowUnix >= cred.ExpiryUnix {
+		return fmt.Errorf("admission: access hint expired")
+	}
 	expected, err := ComputeAccessHint(cred, bindingContext, clientNonce)
 	if err != nil {
 		return err

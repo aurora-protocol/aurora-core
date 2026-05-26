@@ -102,7 +102,11 @@ func NewRelaySession(hintCache *admission.MemoryReplayCache) *RelaySession {
 }
 
 func (s *RelaySession) AcceptCoverPrelude0(p0 protocol.CoverPrelude0, cred admission.AccessHintCredential, bindingContext []byte, p1 protocol.CoverPrelude1) (protocol.CoverPrelude1, error) {
-	if err := admission.VerifyAndSpendAccessHint(s.hintCache, cred, bindingContext, p0.ClientNonce, p0.AccessHint); err != nil {
+	return s.AcceptCoverPrelude0At(p0, cred, bindingContext, p1, 0)
+}
+
+func (s *RelaySession) AcceptCoverPrelude0At(p0 protocol.CoverPrelude0, cred admission.AccessHintCredential, bindingContext []byte, p1 protocol.CoverPrelude1, nowUnix uint64) (protocol.CoverPrelude1, error) {
+	if err := admission.VerifyAndSpendAccessHintAt(s.hintCache, cred, bindingContext, p0.ClientNonce, p0.AccessHint, nowUnix); err != nil {
 		return protocol.CoverPrelude1{}, err
 	}
 	return p1, nil

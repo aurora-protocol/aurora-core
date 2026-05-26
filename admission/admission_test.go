@@ -40,6 +40,38 @@ func TestAccessHintIsOneTimeForCredential(t *testing.T) {
 	}
 }
 
+func TestAccessHintRejectsExpiredCredentialBeforeSpend(t *testing.T) {
+	cred := AccessHintCredential{
+		HintIssuerID:  rep(0x11, 16),
+		RelayBucketID: rep(0x12, 16),
+		HintEpochID:   8,
+		HintSelector:  rep(0x13, 16),
+		HintSecret:    rep(0x14, 32),
+		ExpiryUnix:    100,
+		MaxUses:       1,
+	}
+	binding := rep(0x15, 48)
+	nonce := rep(0x16, 32)
+	hint, err := ComputeAccessHint(cred, binding, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := NewMemoryReplayCache()
+	if err := VerifyAndSpendAccessHintAt(cache, cred, binding, nonce, hint, 100); err == nil {
+		t.Fatalf("expired access hint accepted")
+	}
+	spentKey, err := ComputeSpentHintKey(cred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cache.Has(spentKey) {
+		t.Fatalf("expired access hint was spent")
+	}
+	if err := VerifyAndSpendAccessHintAt(cache, cred, binding, nonce, hint, 99); err != nil {
+		t.Fatalf("valid access hint rejected: %v", err)
+	}
+}
+
 func TestReplayTokenSpentKeyIgnoresReplayProofNonce(t *testing.T) {
 	admissionContext := rep(0x20, 48)
 	proof := protocol.AdmissionProof{

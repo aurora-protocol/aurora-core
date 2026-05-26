@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 
+	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/failure"
 	coreflow "github.com/aurora-protocol/aurora-core/flow"
 	"github.com/aurora-protocol/aurora-core/protocol"
@@ -359,6 +360,24 @@ type AdmissionPolicy struct {
 
 type BlindRSAVerifier interface {
 	VerifyBlindRSA2048(protocol.AdmissionProof) error
+}
+
+type MetadataBlindRSAVerifier struct {
+	IssuerMetadata []protocol.IssuerMetadata
+	NowUnix        uint64
+}
+
+func (v MetadataBlindRSAVerifier) VerifyBlindRSA2048(proof protocol.AdmissionProof) error {
+	matches := 0
+	for _, metadata := range v.IssuerMetadata {
+		if err := admission.VerifyBlindRSA2048WithIssuerMetadata(proof, metadata, v.NowUnix); err == nil {
+			matches++
+		}
+	}
+	if matches != 1 {
+		return fmt.Errorf("relay: Blind RSA issuer metadata lookup returned %d matches", matches)
+	}
+	return nil
 }
 
 type VOPRFVerifier interface {

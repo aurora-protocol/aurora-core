@@ -1,14 +1,23 @@
 package relay
 
 import (
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/asn1"
 	"errors"
+	"math/big"
 	"strings"
 	"testing"
 
+	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/failure"
 	coreflow "github.com/aurora-protocol/aurora-core/flow"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
+	auroratrust "github.com/aurora-protocol/aurora-core/trust"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
@@ -194,6 +203,22 @@ func TestAdmissionPolicyRequiresBlindRSAVerifier(t *testing.T) {
 	}
 }
 
+func TestAdmissionPolicyBlindRSAUsesIssuerMetadataVerifier(t *testing.T) {
+	proof, metadata := relayBlindRSAProofAndMetadata(t)
+	verifier := MetadataBlindRSAVerifier{IssuerMetadata: []protocol.IssuerMetadata{metadata}, NowUnix: 100}
+	if err := (AdmissionPolicy{BlindRSAVerifier: verifier, NowUnix: 100}).AllowsProof(proof); err != nil {
+		t.Fatalf("metadata-backed Blind RSA proof rejected: %v", err)
+	}
+	verifier.IssuerMetadata = nil
+	if err := (AdmissionPolicy{BlindRSAVerifier: verifier, NowUnix: 100}).AllowsProof(proof); err == nil {
+		t.Fatalf("Blind RSA proof accepted without issuer metadata")
+	}
+	verifier.IssuerMetadata = []protocol.IssuerMetadata{metadata, metadata}
+	if err := (AdmissionPolicy{BlindRSAVerifier: verifier, NowUnix: 100}).AllowsProof(proof); err == nil {
+		t.Fatalf("Blind RSA proof accepted with ambiguous issuer metadata")
+	}
+}
+
 func TestAdmissionPolicyRejectsStructurallyInvalidProofBeforeVerifier(t *testing.T) {
 	for name, mutate := range map[string]func(*protocol.AdmissionProof){
 		"expired": func(proof *protocol.AdmissionProof) {
@@ -376,6 +401,128 @@ func relayTokenMetadataForProof(proof protocol.AdmissionProof) []byte {
 		panic(err)
 	}
 	return encoded
+}
+
+func relayBlindRSAProofAndMetadata(t *testing.T) (protocol.AdmissionProof, protocol.IssuerMetadata) {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER := relayRSAPSSPublicKeyForTest(t, &priv.PublicKey)
+	keyID := sha256.Sum256(keyDER)
+	proof := protocol.AdmissionProof{
+		ProofVersion:          registry.Version20,
+		ProofType:             registry.ProofBlindRSA2048,
+		IssuerID:              bytesOf(0xa0, 16),
+		TokenKeyID:            keyID[:],
+		RelayBucketID:         bytesOf(0xa1, 16),
+		TokenScopeID:          bytesOf(0xa2, 16),
+		ExpiryUnix:            200,
+		TokenNonce:            bytesOf(0xa3, 32),
+		RedemptionContextHash: bytesOf(0xa4, 48),
+	}
+	metadata := protocol.IssuerMetadata{
+		MetadataVersion:     registry.Version20,
+		IssuerID:            append([]byte(nil), proof.IssuerID...),
+		ValidFromUnix:       10,
+		ValidUntilUnix:      200,
+		IssuerName:          []byte("issuer.example"),
+		SupportedProofTypes: []uint64{registry.ProofBlindRSA2048},
+		TokenKeyMappings: []protocol.IssuerTokenKeyRecord{{
+			ProofType:  registry.ProofBlindRSA2048,
+			TokenKeyID: append([]byte(nil), proof.TokenKeyID...),
+			TokenVerificationKey: protocol.TokenVerificationKeyRecord{
+				TokenVerificationKeyScheme: registry.TokenKeyBlindRSA2048,
+				TokenVerificationKey:       append([]byte(nil), keyDER...),
+			},
+			ValidFromUnix:  10,
+			ValidUntilUnix: 200,
+			KeyStatus:      registry.IssuerStatusActive,
+		}},
+		OriginInfoPolicies: []protocol.OriginInfoPolicy{{
+			PolicyID:       1,
+			OriginInfo:     []byte("origin.example"),
+			ValidFromUnix:  10,
+			ValidUntilUnix: 200,
+		}},
+		RelayBucketScopes: []protocol.RelayBucketScope{{
+			RelayBucketID:         append([]byte(nil), proof.RelayBucketID...),
+			TokenScopeID:          append([]byte(nil), proof.TokenScopeID...),
+			AllowedOriginPolicyID: []uint64{1},
+			ValidFromUnix:         10,
+			ValidUntilUnix:        200,
+		}},
+		MetadataSigningKeyID: bytesOf(0xa5, 16),
+		SignatureScheme:      registry.SigECDSAP256SHA384DER,
+		KeyEncoding:          registry.KeyP256SEC1Uncompressed,
+	}
+	challengeDigest, err := admission.RFC9577TokenChallengeDigest(proof.ProofType, metadata.IssuerName, []byte("origin.example"), proof.RedemptionContextHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataHash, err := auroratrust.IssuerMetadataHash(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenMetadata := protocol.AuroraTokenMetadata{
+		RFC9577TokenType:       uint16(proof.ProofType),
+		RFC9577ChallengeDigest: challengeDigest,
+		RFC9577TokenKeyID:      append([]byte(nil), proof.TokenKeyID...),
+		IssuerName:             append([]byte(nil), metadata.IssuerName...),
+		OriginInfo:             []byte("origin.example"),
+		IssuerMetadataHash:     metadataHash,
+	}
+	proof.TokenPublicMetadata, err = protocol.Encode(tokenMetadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticatorInput, err := admission.RFC9577AuthenticatorInput(proof, challengeDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha512.Sum384(authenticatorInput)
+	proof.TokenAuthenticator, err = rsa.SignPSS(rand.Reader, priv, crypto.SHA384, digest[:], &rsa.PSSOptions{
+		SaltLength: 48,
+		Hash:       crypto.SHA384,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proof, metadata
+}
+
+func relayRSAPSSPublicKeyForTest(t *testing.T, key *rsa.PublicKey) []byte {
+	t.Helper()
+	rsaKey, err := asn1.Marshal(struct {
+		N *big.Int
+		E int
+	}{
+		N: key.N,
+		E: key.E,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := asn1.Marshal(struct {
+		Algorithm struct {
+			Algorithm  asn1.ObjectIdentifier
+			Parameters asn1.RawValue `asn1:"optional"`
+		}
+		SubjectPublicKey asn1.BitString
+	}{
+		Algorithm: struct {
+			Algorithm  asn1.ObjectIdentifier
+			Parameters asn1.RawValue `asn1:"optional"`
+		}{
+			Algorithm: asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 10},
+		},
+		SubjectPublicKey: asn1.BitString{Bytes: rsaKey, BitLength: len(rsaKey) * 8},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func bytesOf(b byte, n int) []byte {

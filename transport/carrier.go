@@ -231,11 +231,11 @@ func cloneHeader(in http.Header) http.Header {
 
 func validateVisibleHeaders(header http.Header) error {
 	for k, vs := range header {
-		if containsProtocolMarker(k) {
+		if containsForbiddenWireMarker(k) {
 			return fmt.Errorf("transport: visible carrier header contains protocol marker")
 		}
 		for _, v := range vs {
-			if containsProtocolMarker(v) {
+			if containsForbiddenWireMarker(v) {
 				return fmt.Errorf("transport: visible carrier header value contains protocol marker")
 			}
 		}
@@ -243,8 +243,29 @@ func validateVisibleHeaders(header http.Header) error {
 	return nil
 }
 
-func containsProtocolMarker(s string) bool {
-	return strings.Contains(strings.ToLower(s), "aurora")
+func containsForbiddenWireMarker(s string) bool {
+	lower := strings.ToLower(s)
+	for _, marker := range forbiddenWireMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+var forbiddenWireMarkers = []string{
+	"aurora",
+	"proxy",
+	"vpn",
+	"gfw",
+	"china",
+	"auth",
+	"tunnel",
+	"bridge",
+	"relay",
+	"policy",
+	"adversarial",
+	"dpi",
 }
 
 func websocketKey(seed []byte) (string, error) {

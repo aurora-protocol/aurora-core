@@ -302,6 +302,33 @@ func TestBuildShadowOriginCarrierRequestRejectsOriginPassThroughAndPublicMarkers
 	}
 }
 
+func TestBuildCarrierRequestRejectsForbiddenVisibleHeaderMarkers(t *testing.T) {
+	tpl := transportTemplate(registry.MethodWebH2Stream)
+	plan := CarrierPlan{Carrier: Carrier{MethodID: registry.MethodWebH2Stream, Name: "web.h2.stream"}, UDPMode: UDPOverStreamFallback}
+	cases := []http.Header{
+		{"X-Proxy-Mode": []string{"normal"}},
+		{"X-Feature": []string{"bridge"}},
+		{"X-Auth": []string{"token"}},
+		{"X-Policy": []string{"adversarial-dpi"}},
+		{"X-Network": []string{"vpn"}},
+	}
+	for _, header := range cases {
+		if _, err := BuildCarrierRequest(CarrierRequestInput{
+			Plan:           plan,
+			Template:       tpl,
+			RequestClassID: 1,
+			NeedCapsule:    true,
+			Scheme:         "https",
+			Authority:      "cover.example",
+			Path:           "/assets/app.bin",
+			Header:         header,
+			Payload:        []byte{0x01},
+		}); err == nil {
+			t.Fatalf("carrier accepted forbidden visible marker header: %+v", header)
+		}
+	}
+}
+
 func TestBuildH3ExtDatagramCarrierRequestUsesWebTransportAssociation(t *testing.T) {
 	tpl := h3DatagramTemplate()
 	plan := CarrierPlan{

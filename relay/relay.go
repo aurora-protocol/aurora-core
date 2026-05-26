@@ -42,6 +42,17 @@ type ForwardingOrigin interface {
 	ForwardRequest([]byte) Response
 }
 
+type SidecarOrigin interface {
+	Origin
+	ForwardSidecarRequest([]byte) Response
+	RecordSidecarFailure(RedactedFailureLog)
+}
+
+type RedactedFailureLog struct {
+	Code string
+	Body []byte
+}
+
 type StaticOrigin struct {
 	Status int
 	Body   []byte
@@ -97,7 +108,7 @@ func (g Gateway) HandleCoverRequest(req CoverRequest) Response {
 	case registry.RequestGatewayOwnedSlot:
 		return g.handleGatewayOwned(class, req)
 	case registry.RequestSidecarOriginSlot:
-		return g.HandleFailure(req.failureOrDefault())
+		return g.handleSidecarOrigin(class, req)
 	default:
 		return g.HandleFailure(FailureInvalidCoverSlot)
 	}
@@ -120,6 +131,28 @@ func (g Gateway) handleGatewayOwned(class protocol.RequestClass, req CoverReques
 		return g.HandleFailure(req.Failure)
 	}
 	return g.HandleFailure(FailureInvalidCoverSlot)
+}
+
+func (g Gateway) handleSidecarOrigin(class protocol.RequestClass, req CoverRequest) Response {
+	sidecar, ok := g.Origin.(SidecarOrigin)
+	if !ok {
+		return g.HandleFailure(FailureInvalidCoverSlot)
+	}
+	switch req.Kind {
+	case CoverRequestOrdinary:
+		return sidecar.ForwardSidecarRequest(append([]byte(nil), req.Body...))
+	case CoverRequestPrelude:
+		if !class.MayCarryPrelude {
+			return g.HandleFailure(FailureInvalidCoverSlot)
+		}
+	case CoverRequestCapsule:
+		if !class.MayCarryCapsule {
+			return g.HandleFailure(FailureInvalidCoverSlot)
+		}
+	}
+	kind := req.failureOrDefault()
+	sidecar.RecordSidecarFailure(RedactedFailureLog{Code: failure.Classify(kind).LogKey})
+	return g.HandleFailure(kind)
 }
 
 func (g Gateway) forwardVerbatim(body []byte) Response {

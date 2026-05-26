@@ -310,10 +310,53 @@ func TestOriginPassThroughForwardsVerbatim(t *testing.T) {
 	}
 }
 
+func TestSidecarOriginOrdinaryRequestForwardsToTrustedSidecar(t *testing.T) {
+	origin := &recordingOrigin{normal: Response{Status: 200, Body: []byte("cover")}}
+	g := Gateway{Origin: origin}
+	body := []byte("ordinary-sidecar-body")
+	resp := g.HandleCoverRequest(CoverRequest{
+		Template: coverTemplateForRelayTest(),
+		ClassID:  3,
+		Kind:     CoverRequestOrdinary,
+		Body:     body,
+	})
+	if resp.Status != 206 || origin.sidecarForwarded != 1 || string(origin.sidecarBody) != string(body) {
+		t.Fatalf("sidecar ordinary request was not forwarded to trusted sidecar: resp=%+v origin=%+v", resp, origin)
+	}
+}
+
+func TestSidecarOriginFailureConsumesBodyAndRecordsRedactedLog(t *testing.T) {
+	origin := &recordingOrigin{normal: Response{Status: 200, Body: []byte("cover")}}
+	g := Gateway{Origin: origin}
+	resp := g.HandleCoverRequest(CoverRequest{
+		Template: coverTemplateForRelayTest(),
+		ClassID:  3,
+		Kind:     CoverRequestCapsule,
+		Body:     []byte("raw sensitive bootstrap body"),
+		Failure:  FailureBadAEADTag,
+	})
+	if resp.Status != 200 || string(resp.Body) != "cover" {
+		t.Fatalf("unexpected sidecar cover response: %+v", resp)
+	}
+	if origin.sidecarForwarded != 0 {
+		t.Fatalf("failed sidecar capsule body was forwarded upstream")
+	}
+	if origin.failureLogs != 1 || origin.lastFailureLog.Code != failure.BadAEADTag.LogKey() {
+		t.Fatalf("redacted sidecar failure log mismatch: %+v", origin)
+	}
+	if len(origin.lastFailureLog.Body) != 0 {
+		t.Fatalf("sidecar failure log retained raw body: %+v", origin.lastFailureLog)
+	}
+}
+
 type recordingOrigin struct {
-	normal    Response
-	forwarded int
-	lastBody  []byte
+	normal           Response
+	forwarded        int
+	lastBody         []byte
+	sidecarForwarded int
+	sidecarBody      []byte
+	failureLogs      int
+	lastFailureLog   RedactedFailureLog
 }
 
 func (o *recordingOrigin) NormalResponse() Response {
@@ -326,6 +369,17 @@ func (o *recordingOrigin) ForwardRequest(body []byte) Response {
 	return Response{Status: 204}
 }
 
+func (o *recordingOrigin) ForwardSidecarRequest(body []byte) Response {
+	o.sidecarForwarded++
+	o.sidecarBody = append([]byte(nil), body...)
+	return Response{Status: 206}
+}
+
+func (o *recordingOrigin) RecordSidecarFailure(log RedactedFailureLog) {
+	o.failureLogs++
+	o.lastFailureLog = log
+}
+
 func coverTemplateForRelayTest() protocol.CoverTemplate {
 	return protocol.CoverTemplate{RequestClasses: []protocol.RequestClass{{
 		ClassID:         1,
@@ -335,6 +389,11 @@ func coverTemplateForRelayTest() protocol.CoverTemplate {
 	}, {
 		ClassID:   2,
 		ClassType: registry.RequestOriginPassThrough,
+	}, {
+		ClassID:         3,
+		ClassType:       registry.RequestSidecarOriginSlot,
+		MayCarryPrelude: true,
+		MayCarryCapsule: true,
 	}}}
 }
 

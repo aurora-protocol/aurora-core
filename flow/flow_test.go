@@ -340,6 +340,39 @@ func TestFlowTTLIsHardCapEvenWhenActive(t *testing.T) {
 	}
 }
 
+func TestRealtimeDatagramAgeDropDoesNotRefreshFlow(t *testing.T) {
+	m := NewManager()
+	open := protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           14,
+		FlowKind:         FlowKindUDPAssociation,
+		TargetKind:       TargetKindIPv4,
+		TargetHost:       []byte{203, 0, 113, 11},
+		TargetPort:       443,
+		UDPFQDNMode:      UDPFQDNClientResolvedNameBinding,
+		NameBindingID:    fb(0xaa, 16),
+		DNSAnswerSetHash: fb(0xbb, 48),
+		LocalBindingMode: LocalBindingTransparentFakeIP,
+		PriorityClass:    PriorityRealtime,
+	}
+	if err := m.OpenWithOptions(open, FlowOptions{NowUnix: 100, TTLSeconds: 100, IdleTimeoutSeconds: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.AcceptDatagramWithOptions(14, DatagramOptions{NowUnix: 110, SentAtUnix: 100, MaxRealtimeAgeSeconds: 5}); ok {
+		t.Fatalf("stale realtime datagram was accepted")
+	}
+	state, ok := m.DemuxInbound(14)
+	if !ok {
+		t.Fatalf("stale datagram should not remove an otherwise live flow")
+	}
+	if state.LastActivityUnix != 100 {
+		t.Fatalf("stale datagram refreshed activity time to %d", state.LastActivityUnix)
+	}
+	if _, ok := m.AcceptDatagramWithOptions(14, DatagramOptions{NowUnix: 111, SentAtUnix: 108, MaxRealtimeAgeSeconds: 5}); !ok {
+		t.Fatalf("fresh realtime datagram was dropped")
+	}
+}
+
 func TestFlowCloseTracksHalfCloseUntilBothSidesClose(t *testing.T) {
 	m := NewManager()
 	if err := m.Open(protocol.FlowOpen{

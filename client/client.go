@@ -53,6 +53,13 @@ type LocalProxyOptions struct {
 	MaxBufferedTCPBytes int
 }
 
+type UDPSendOptions struct {
+	NowUnix               uint64
+	SentAtUnix            uint64
+	UDPMode               transport.UDPMode
+	MaxRealtimeAgeSeconds uint64
+}
+
 func NewLocalProxy() *LocalProxy {
 	return NewLocalProxyWithOptions(LocalProxyOptions{})
 }
@@ -165,19 +172,27 @@ func (p *LocalProxy) SendUDP(flowID uint64, data []byte, now uint64) (protocol.A
 }
 
 func (p *LocalProxy) SendUDPWithMode(flowID uint64, data []byte, now uint64, udpMode transport.UDPMode) (protocol.AuroraFrame, error) {
-	switch udpMode {
+	return p.SendUDPWithOptions(flowID, data, UDPSendOptions{NowUnix: now, UDPMode: udpMode})
+}
+
+func (p *LocalProxy) SendUDPWithOptions(flowID uint64, data []byte, opts UDPSendOptions) (protocol.AuroraFrame, error) {
+	switch opts.UDPMode {
 	case transport.UDPNativeDatagram, transport.UDPOverStreamFallback:
 	default:
-		return protocol.AuroraFrame{}, fmt.Errorf("client: UDP mode %d is unsupported", udpMode)
+		return protocol.AuroraFrame{}, fmt.Errorf("client: UDP mode %d is unsupported", opts.UDPMode)
 	}
-	state, ok := p.flows.AcceptDatagram(flowID, now)
+	state, ok := p.flows.AcceptDatagramWithOptions(flowID, flow.DatagramOptions{
+		NowUnix:               opts.NowUnix,
+		SentAtUnix:            opts.SentAtUnix,
+		MaxRealtimeAgeSeconds: opts.MaxRealtimeAgeSeconds,
+	})
 	if !ok {
 		return protocol.AuroraFrame{}, fmt.Errorf("client: UDP flow %d is unavailable", flowID)
 	}
 	if state.Kind != flow.FlowKindUDPAssociation {
 		return protocol.AuroraFrame{}, fmt.Errorf("client: flow %d is not UDP", flowID)
 	}
-	if udpMode == transport.UDPNativeDatagram {
+	if opts.UDPMode == transport.UDPNativeDatagram {
 		return protocol.NewDatagramDataFrame(flowID, data, 0)
 	}
 	return protocol.NewStreamDataFrame(flowID, data, 0)

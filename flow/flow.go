@@ -73,6 +73,12 @@ type FlowOptions struct {
 	IdleTimeoutSeconds uint64
 }
 
+type DatagramOptions struct {
+	NowUnix               uint64
+	SentAtUnix            uint64
+	MaxRealtimeAgeSeconds uint64
+}
+
 type CloseOptions struct {
 	NowUnix      uint64
 	DrainSeconds uint64
@@ -171,6 +177,11 @@ func (m *Manager) DemuxInbound(flowID uint64) (FlowState, bool) {
 }
 
 func (m *Manager) AcceptDatagram(flowID uint64, now uint64) (FlowState, bool) {
+	return m.AcceptDatagramWithOptions(flowID, DatagramOptions{NowUnix: now})
+}
+
+func (m *Manager) AcceptDatagramWithOptions(flowID uint64, opts DatagramOptions) (FlowState, bool) {
+	now := opts.NowUnix
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state, ok := m.flows[flowID]
@@ -184,7 +195,10 @@ func (m *Manager) AcceptDatagram(flowID uint64, now uint64) (FlowState, bool) {
 		delete(m.flows, flowID)
 		return FlowState{}, false
 	}
-	state.LastActivityUnix = now
+	if state.staleRealtimeDatagram(opts) {
+		return FlowState{}, false
+	}
+	state.LastActivityUnix = opts.NowUnix
 	m.flows[flowID] = state
 	return state, true
 }
@@ -299,6 +313,16 @@ func (s FlowState) expired(now uint64) bool {
 		return true
 	}
 	return false
+}
+
+func (s FlowState) staleRealtimeDatagram(opts DatagramOptions) bool {
+	if s.PriorityClass != PriorityRealtime || opts.MaxRealtimeAgeSeconds == 0 || opts.SentAtUnix == 0 {
+		return false
+	}
+	if opts.NowUnix <= opts.SentAtUnix {
+		return false
+	}
+	return opts.NowUnix-opts.SentAtUnix > opts.MaxRealtimeAgeSeconds
 }
 
 type FakeIPAllocator struct {

@@ -162,6 +162,41 @@ func TestLocalProxyBuildsUDPStreamFrameForFallbackCarrier(t *testing.T) {
 	}
 }
 
+func TestLocalProxyDropsStaleRealtimeUDPInStreamFallback(t *testing.T) {
+	p := NewLocalProxy()
+	if _, err := p.OpenUDPWithFakeDNS(43, "example.com", []string{"93.184.216.34"}, 443, 100); err != nil {
+		t.Fatal(err)
+	}
+	_, err := p.SendUDPWithOptions(43, []byte("late"), UDPSendOptions{
+		NowUnix:               110,
+		SentAtUnix:            100,
+		UDPMode:               transport.UDPOverStreamFallback,
+		MaxRealtimeAgeSeconds: 5,
+	})
+	if err == nil {
+		t.Fatalf("stale realtime UDP fallback datagram was accepted")
+	}
+	state, ok := p.FlowState(43)
+	if !ok {
+		t.Fatalf("stale UDP datagram should not remove an otherwise live flow")
+	}
+	if state.LastActivityUnix != 100 {
+		t.Fatalf("stale UDP datagram refreshed flow activity to %d", state.LastActivityUnix)
+	}
+	frame, err := p.SendUDPWithOptions(43, []byte("fresh"), UDPSendOptions{
+		NowUnix:               111,
+		SentAtUnix:            109,
+		UDPMode:               transport.UDPOverStreamFallback,
+		MaxRealtimeAgeSeconds: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.FrameType != registry.FrameStreamData || !bytes.Equal(frame.Payload, []byte("fresh")) {
+		t.Fatalf("fresh fallback datagram was not framed as stream data: %+v", frame)
+	}
+}
+
 func TestLocalProxyRejectsUnsupportedUDPModeWithoutRefreshingFlow(t *testing.T) {
 	p := NewLocalProxy()
 	if _, err := p.OpenUDPWithFakeDNS(42, "example.com", []string{"93.184.216.34"}, 443, 100); err != nil {

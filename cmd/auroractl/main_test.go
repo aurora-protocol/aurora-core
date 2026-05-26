@@ -16,6 +16,7 @@ func TestActiveProbesCommandPrintsBaselineReport(t *testing.T) {
 	text := out.String()
 	for _, want := range []string{
 		"active_probe_baseline passed=true cases=14\n",
+		"gateway_active_probe passed=true cases=14 normal_responses=14 forwarded=0 sidecar_forwarded=0 failure_logs=0\n",
 		"canonical http_status=0 close_code=0 tls_alert=0 quic_close=0 websocket_close=0 timing_class= reflected_log=\n",
 		"case bad-access-hint passed=true http_status=0 close_code=0 tls_alert=0 quic_close=0 websocket_close=0 timing_class= reflected_log=\n",
 		"case verifier-unavailable passed=true http_status=0 close_code=0 tls_alert=0 quic_close=0 websocket_close=0 timing_class= reflected_log=\n",
@@ -87,13 +88,16 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "ML-KEM provider agreement") {
 		t.Fatalf("capabilities output missing ML-KEM provider agreement:\n%s", text)
 	}
+	if !strings.Contains(text, "gateway-backed active-probe harness") {
+		t.Fatalf("capabilities output missing gateway-backed active-probe harness:\n%s", text)
+	}
 	if strings.Contains(text, "not production-complete:\n- ML-DSA") {
 		t.Fatalf("capabilities output still reports ML-DSA work as the first missing item:\n%s", text)
 	}
 	if strings.Contains(text, "full real-crypto vector package") {
 		t.Fatalf("capabilities output still lists the real-crypto vector package as remaining:\n%s", text)
 	}
-	if !strings.Contains(text, "Privacy Pass production proof verification, cover-origin gateway, active-probe harness, platform adapters, DPI evaluation") {
+	if !strings.Contains(text, "Privacy Pass production proof verification, cover-origin gateway, platform adapters, DPI/classifier evaluation, external active-probe evaluation") {
 		t.Fatalf("capabilities output stopped tracking remaining production work:\n%s", text)
 	}
 }
@@ -270,6 +274,7 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go run ./cmd/auroractl vectors --real-crypto --check",
 		"go run ./cmd/auroractl crypto-check",
 		"go run ./cmd/auroractl wire-check",
+		"go run ./cmd/auroractl active-probes",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("CI workflow missing %q:\n%s", want, text)

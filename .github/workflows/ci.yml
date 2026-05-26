@@ -26,3 +26,5 @@ jobs:
         run: go run ./cmd/auroractl crypto-check
       - name: Check public wire markers
         run: go run ./cmd/auroractl wire-check
+      - name: Check active-probe neutrality
+        run: go run ./cmd/auroractl active-probes

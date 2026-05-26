@@ -48,6 +48,27 @@ func TestInvalidProbeResponsesAreCoverNeutral(t *testing.T) {
 	}
 }
 
+func TestGatewayActiveProbeHarnessConsumesFailuresAsCoverOrigin(t *testing.T) {
+	report, err := RunGatewayActiveProbeHarness(failure.ActiveProbeCases())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Passed {
+		t.Fatalf("gateway active-probe harness failed: %+v", report)
+	}
+	if report.NormalResponses != len(failure.ActiveProbeCases()) || report.ForwardedRequests != 0 || report.SidecarForwardedRequests != 0 || report.FailureLogs != 0 {
+		t.Fatalf("gateway active-probe side effects were not cover-neutral: %+v", report)
+	}
+	for _, finding := range report.Cases {
+		if !finding.Passed {
+			t.Fatalf("gateway active-probe case failed: %+v", finding)
+		}
+		if finding.Response.Status != report.CanonicalResponse.Status || !bytes.Equal(finding.Response.Body, report.CanonicalResponse.Body) || finding.Response.CloseCode != report.CanonicalResponse.CloseCode {
+			t.Fatalf("gateway active-probe case was distinguishable: %+v canonical=%+v", finding, report.CanonicalResponse)
+		}
+	}
+}
+
 func TestRelaySessionDoesNotReleaseAdmissionBeforePreludeVerification(t *testing.T) {
 	s := NewSession()
 	if err := s.ReceiveAdmission([]byte("proof")); err == nil {

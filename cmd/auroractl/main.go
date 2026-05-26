@@ -14,6 +14,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/aurora-protocol/aurora-core/relay"
 	"github.com/aurora-protocol/aurora-core/transport"
 	corevectors "github.com/aurora-protocol/aurora-core/vectors"
 	"github.com/aurora-protocol/aurora-core/wire"
@@ -317,9 +318,9 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- signed directory, relay descriptor, and cover-template real-crypto vectors")
 	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, exit-layer packet, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
-	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing")
+	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, gateway-backed active-probe harness")
 	fmt.Fprintln(w, "not production-complete:")
-	fmt.Fprintln(w, "- Privacy Pass production proof verification, cover-origin gateway, active-probe harness, platform adapters, DPI evaluation")
+	fmt.Fprintln(w, "- Privacy Pass production proof verification, cover-origin gateway, platform adapters, DPI/classifier evaluation, external active-probe evaluation")
 }
 
 func cryptoCheck(w io.Writer) error {
@@ -352,16 +353,31 @@ func cryptoCheck(w io.Writer) error {
 }
 
 func activeProbes(w io.Writer) error {
-	report, err := failure.RunActiveProbeHarness(failure.ActiveProbeCases())
+	cases := failure.ActiveProbeCases()
+	report, err := failure.RunActiveProbeHarness(cases)
+	if err != nil {
+		return err
+	}
+	gatewayReport, err := relay.RunGatewayActiveProbeHarness(cases)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "active_probe_baseline passed=%t cases=%d\n", report.Passed, len(report.Cases))
+	fmt.Fprintf(
+		w,
+		"gateway_active_probe passed=%t cases=%d normal_responses=%d forwarded=%d sidecar_forwarded=%d failure_logs=%d\n",
+		gatewayReport.Passed,
+		len(gatewayReport.Cases),
+		gatewayReport.NormalResponses,
+		gatewayReport.ForwardedRequests,
+		gatewayReport.SidecarForwardedRequests,
+		gatewayReport.FailureLogs,
+	)
 	fmt.Fprintf(w, "canonical %s\n", formatProbeSurface(report.CanonicalSurface))
 	for _, finding := range report.Cases {
 		fmt.Fprintf(w, "case %s passed=%t %s\n", finding.Name, finding.Passed, formatProbeSurface(finding.Surface))
 	}
-	if !report.Passed {
+	if !report.Passed || !gatewayReport.Passed {
 		return fmt.Errorf("active-probes failed neutrality check")
 	}
 	return nil

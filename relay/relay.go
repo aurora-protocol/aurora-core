@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"fmt"
 	"net/netip"
 
@@ -52,6 +53,23 @@ type SidecarOrigin interface {
 type RedactedFailureLog struct {
 	Code string
 	Body []byte
+}
+
+type GatewayProbeReport struct {
+	Passed                   bool
+	CanonicalResponse        Response
+	Cases                    []GatewayProbeFinding
+	NormalResponses          int
+	ForwardedRequests        int
+	SidecarForwardedRequests int
+	FailureLogs              int
+}
+
+type GatewayProbeFinding struct {
+	Name     string
+	Kind     FailureKind
+	Response Response
+	Passed   bool
 }
 
 type StaticOrigin struct {
@@ -177,6 +195,95 @@ func findRequestClass(t protocol.CoverTemplate, classID uint64) (protocol.Reques
 		}
 	}
 	return protocol.RequestClass{}, false
+}
+
+func RunGatewayActiveProbeHarness(cases []failure.ProbeCase) (GatewayProbeReport, error) {
+	if len(cases) == 0 {
+		return GatewayProbeReport{}, fmt.Errorf("relay: no gateway active-probe cases")
+	}
+	origin := &gatewayProbeOrigin{normal: Response{Status: 200, Body: []byte("<html>cover</html>")}}
+	gateway := Gateway{Origin: origin}
+	template := gatewayProbeTemplate()
+	canonical := Response{Status: origin.normal.Status, Body: append([]byte(nil), origin.normal.Body...), CloseCode: origin.normal.CloseCode}
+	report := GatewayProbeReport{
+		Passed:            true,
+		CanonicalResponse: canonical,
+		Cases:             make([]GatewayProbeFinding, 0, len(cases)),
+	}
+	for _, tc := range cases {
+		beforeNormal := origin.normalResponses
+		beforeForwarded := origin.forwardedRequests
+		beforeSidecar := origin.sidecarForwardedRequests
+		beforeLogs := origin.failureLogs
+		resp := gateway.HandleCoverRequest(CoverRequest{
+			Template: template,
+			ClassID:  1,
+			Kind:     CoverRequestCapsule,
+			Body:     []byte("opaque active-probe body"),
+			Failure:  tc.Kind,
+		})
+		normalDelta := origin.normalResponses - beforeNormal
+		forwardedDelta := origin.forwardedRequests - beforeForwarded
+		sidecarDelta := origin.sidecarForwardedRequests - beforeSidecar
+		logDelta := origin.failureLogs - beforeLogs
+		passed := normalDelta == 1 &&
+			forwardedDelta == 0 &&
+			sidecarDelta == 0 &&
+			logDelta == 0 &&
+			sameGatewayResponse(resp, canonical)
+		report.Passed = report.Passed && passed
+		report.Cases = append(report.Cases, GatewayProbeFinding{
+			Name:     tc.Name,
+			Kind:     tc.Kind,
+			Response: resp,
+			Passed:   passed,
+		})
+	}
+	report.NormalResponses = origin.normalResponses
+	report.ForwardedRequests = origin.forwardedRequests
+	report.SidecarForwardedRequests = origin.sidecarForwardedRequests
+	report.FailureLogs = origin.failureLogs
+	return report, nil
+}
+
+type gatewayProbeOrigin struct {
+	normal                   Response
+	normalResponses          int
+	forwardedRequests        int
+	sidecarForwardedRequests int
+	failureLogs              int
+}
+
+func (o *gatewayProbeOrigin) NormalResponse() Response {
+	o.normalResponses++
+	return Response{Status: o.normal.Status, Body: append([]byte(nil), o.normal.Body...), CloseCode: o.normal.CloseCode}
+}
+
+func (o *gatewayProbeOrigin) ForwardRequest(_ []byte) Response {
+	o.forwardedRequests++
+	return Response{Status: 204}
+}
+
+func (o *gatewayProbeOrigin) ForwardSidecarRequest(_ []byte) Response {
+	o.sidecarForwardedRequests++
+	return Response{Status: 206}
+}
+
+func (o *gatewayProbeOrigin) RecordSidecarFailure(_ RedactedFailureLog) {
+	o.failureLogs++
+}
+
+func gatewayProbeTemplate() protocol.CoverTemplate {
+	return protocol.CoverTemplate{RequestClasses: []protocol.RequestClass{{
+		ClassID:         1,
+		ClassType:       registry.RequestGatewayOwnedSlot,
+		MayCarryPrelude: true,
+		MayCarryCapsule: true,
+	}}}
+}
+
+func sameGatewayResponse(a, b Response) bool {
+	return a.Status == b.Status && a.CloseCode == b.CloseCode && bytes.Equal(a.Body, b.Body)
 }
 
 type Session struct {

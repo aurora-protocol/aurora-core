@@ -352,10 +352,15 @@ func validateHintEpochProvision(provision HintEpochProvision, nowUnix, maxEpochS
 }
 
 func verifyVerifierOperations(profile IssuerOperationsProfile, report *IssuerOperationsReport) bool {
-	if len(profile.Metadata.VerifierServices) == 0 {
-		return true
-	}
 	passed := true
+	if metadataHasUsableProof(profile.Metadata, registry.ProofVOPRFP384SHA384, profile.NowUnix) &&
+		!metadataHasUsableVerifierServiceForProof(profile.Metadata, registry.ProofVOPRFP384SHA384, profile.NowUnix) {
+		report.addFinding("VOPRF proof advertised without usable verifier service")
+		passed = false
+	}
+	if len(profile.Metadata.VerifierServices) == 0 {
+		return passed
+	}
 	if !profile.VerifierOutageFailsClosed {
 		report.addFinding("verifier service outages do not fail closed")
 		passed = false
@@ -405,6 +410,21 @@ func metadataHasUsableProof(metadata protocol.IssuerMetadata, proofType uint64, 
 		}
 		if key.Validate(nowUnix) == nil {
 			return true
+		}
+	}
+	return false
+}
+
+func metadataHasUsableVerifierServiceForProof(metadata protocol.IssuerMetadata, proofType uint64, nowUnix uint64) bool {
+	activeScopes := activeRelayBucketScopes(metadata, nowUnix)
+	if len(activeScopes) == 0 {
+		return false
+	}
+	for _, service := range metadata.VerifierServices {
+		for _, scope := range activeScopes {
+			if service.Allows(proofType, scope.RelayBucketID, nowUnix, true) == nil {
+				return true
+			}
 		}
 	}
 	return false

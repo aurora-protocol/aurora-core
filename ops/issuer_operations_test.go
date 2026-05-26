@@ -93,6 +93,23 @@ func TestVerifyIssuerOperationsProfileRequiresBlindRSAForUncoordinatedPublicRela
 	}
 }
 
+func TestVerifyIssuerOperationsProfileRejectsAdvertisedVOPRFWithoutVerifierService(t *testing.T) {
+	profile, authoritySigner := issuerOperationsProfileFixture(t)
+	profile.Metadata.VerifierServices = nil
+	signIssuerMetadata(t, &profile.Metadata, authoritySigner)
+
+	report, err := VerifyIssuerOperationsProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatalf("VOPRF metadata without verifier service passed: %+v", report)
+	}
+	if !reportHasFinding(report, "VOPRF proof advertised without usable verifier service") {
+		t.Fatalf("issuer operations report missing verifier service finding: %+v", report)
+	}
+}
+
 func TestBuildAccessHintCredentialRejectsInvalidEpochUse(t *testing.T) {
 	profile, _ := issuerOperationsProfileFixture(t)
 	provision := profile.HintEpochs[0]

@@ -136,10 +136,21 @@ func checkVectorSnapshot(kind, path string, write func(io.Writer) error) error {
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(snapshot, generated.Bytes()) {
+	if !equalTextSnapshot(snapshot, generated.Bytes()) {
 		return fmt.Errorf("vectors: %s vector snapshot drift; regenerate %s", kind, path)
 	}
 	return nil
+}
+
+func equalTextSnapshot(snapshot, generated []byte) bool {
+	if bytes.Equal(snapshot, generated) {
+		return true
+	}
+	return bytes.Equal(normalizeLineEndings(snapshot), normalizeLineEndings(generated))
+}
+
+func normalizeLineEndings(data []byte) []byte {
+	return bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
 }
 
 func writeRealCryptoVectors(w io.Writer) error {

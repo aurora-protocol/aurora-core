@@ -122,6 +122,10 @@ func BuildIssuerVerifierRequest(in IssuerVerifierRequestInput) (protocol.IssuerV
 	if err != nil {
 		return protocol.IssuerVerifierRequest{}, nil, err
 	}
+	challengeDigest, authenticatorInputHash, err := verifierRequestAuthenticatorFields(in.AdmissionProof, in.IssuerMetadataHash, in.ChallengeDigest, in.AuthenticatorInputHash)
+	if err != nil {
+		return protocol.IssuerVerifierRequest{}, nil, err
+	}
 	req := protocol.IssuerVerifierRequest{
 		RequestVersion:            registry.Version20,
 		ServiceID:                 append([]byte(nil), in.Service.ServiceID...),
@@ -134,8 +138,8 @@ func BuildIssuerVerifierRequest(in IssuerVerifierRequestInput) (protocol.IssuerV
 		ProofType:                 in.AdmissionProof.ProofType,
 		TokenKeyID:                append([]byte(nil), in.AdmissionProof.TokenKeyID...),
 		TokenNonce:                append([]byte(nil), in.AdmissionProof.TokenNonce...),
-		ChallengeDigest:           append([]byte(nil), in.ChallengeDigest...),
-		AuthenticatorInputHash:    append([]byte(nil), in.AuthenticatorInputHash...),
+		ChallengeDigest:           challengeDigest,
+		AuthenticatorInputHash:    authenticatorInputHash,
 		TokenAuthenticator:        append([]byte(nil), in.AdmissionProof.TokenAuthenticator...),
 		TokenSpentKey:             tokenSpentKey,
 		ReplayEpochID:             in.ReplayProof.ReplayEpochID,
@@ -148,6 +152,33 @@ func BuildIssuerVerifierRequest(in IssuerVerifierRequestInput) (protocol.IssuerV
 		return protocol.IssuerVerifierRequest{}, nil, err
 	}
 	return req, hash, nil
+}
+
+func verifierRequestAuthenticatorFields(proof protocol.AdmissionProof, issuerMetadataHash, fallbackChallengeDigest, fallbackAuthenticatorInputHash []byte) ([]byte, []byte, error) {
+	switch proof.ProofType {
+	case registry.ProofVOPRFP384SHA384, registry.ProofBlindRSA2048:
+		metadata, err := protocol.DecodeAuroraTokenMetadataBytes(proof.TokenPublicMetadata)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := metadata.ValidateForProof(proof, issuerMetadataHash); err != nil {
+			return nil, nil, err
+		}
+		challengeDigest, err := admission.RFC9577TokenChallengeDigest(proof.ProofType, metadata.IssuerName, metadata.OriginInfo, proof.RedemptionContextHash)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !bytes.Equal(metadata.RFC9577ChallengeDigest, challengeDigest) {
+			return nil, nil, fmt.Errorf("ops: token metadata challenge digest mismatch")
+		}
+		authenticatorInputHash, err := admission.RFC9577AuthenticatorInputHash(proof, challengeDigest)
+		if err != nil {
+			return nil, nil, err
+		}
+		return challengeDigest, authenticatorInputHash, nil
+	default:
+		return append([]byte(nil), fallbackChallengeDigest...), append([]byte(nil), fallbackAuthenticatorInputHash...), nil
+	}
 }
 
 func IssuerVerifierRequestHash(req protocol.IssuerVerifierRequest) ([]byte, error) {

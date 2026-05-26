@@ -5,12 +5,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"testing"
 
 	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	auroratrust "github.com/aurora-protocol/aurora-core/trust"
+	"github.com/aurora-protocol/aurora-core/wire"
 )
 
 func TestDirectoryPublisherRejectsUnsignedConsensus(t *testing.T) {
@@ -120,6 +122,50 @@ func TestBuildIssuerVerifierRequestRecomputesTokenSpentKey(t *testing.T) {
 		RequestAuthImplemented:    true,
 	}); err == nil {
 		t.Fatalf("verifier request built from mismatched ReplayProof")
+	}
+}
+
+func TestBuildIssuerVerifierRequestRecomputesAuthenticatorFields(t *testing.T) {
+	service := verifierServiceRecord()
+	proof, replay, admissionContextHash, handshakeBinding := verifierProofReplay(t)
+	metadataHash := rb(0x30, 48)
+	metadata, wantChallenge, wantAuthenticatorHash := verifierTokenMetadataForTest(t, proof, metadataHash, []byte("issuer.example"), []byte("origin.example"))
+	proof.TokenPublicMetadata = metadata
+	redemption, err := admission.TokenRedemptionHash(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay.TokenRedemptionHash = redemption
+	replay.ReplayContextHash, err = admission.ReplayContextHash(redemption, replay, 77, 1, handshakeBinding, admissionContextHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _, err := BuildIssuerVerifierRequest(IssuerVerifierRequestInput{
+		Service:                   service,
+		AdmissionProof:            proof,
+		ReplayProof:               replay,
+		IssuerMetadataHash:        metadataHash,
+		RelayDescriptorHash:       rb(0x31, 48),
+		RouteInstanceID:           77,
+		HopIndex:                  1,
+		ReplayEpochValidUntilUnix: 800,
+		HandshakeBindingContext:   handshakeBinding,
+		AdmissionContextHash:      admissionContextHash,
+		ChallengeDigest:           rb(0xee, 32),
+		AuthenticatorInputHash:    rb(0xef, 48),
+		RequestNonce:              rb(0x34, 32),
+		RequestTimeUnix:           100,
+		NowUnix:                   100,
+		RequestAuthImplemented:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(req.ChallengeDigest, wantChallenge) {
+		t.Fatalf("request challenge digest was not recomputed")
+	}
+	if !bytes.Equal(req.AuthenticatorInputHash, wantAuthenticatorHash) {
+		t.Fatalf("request authenticator input hash was not recomputed")
 	}
 }
 
@@ -344,6 +390,7 @@ func verifierProofReplay(t *testing.T) (protocol.AdmissionProof, protocol.Replay
 		TokenAuthenticator:    []byte("authenticator"),
 		BindingProof:          []byte("binding"),
 	}
+	proof.TokenPublicMetadata, _, _ = verifierTokenMetadataForTest(t, proof, rb(0x30, 48), []byte("issuer.example"), []byte("origin.example"))
 	redemptionHash, err := admission.TokenRedemptionHash(proof)
 	if err != nil {
 		t.Fatal(err)
@@ -387,6 +434,46 @@ func signVerifierResponse(t *testing.T, priv *ecdsa.PrivateKey, resp *protocol.I
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func verifierTokenMetadataForTest(t *testing.T, proof protocol.AdmissionProof, issuerMetadataHash, issuerName, originInfo []byte) (metadata, challengeDigest, authenticatorHash []byte) {
+	t.Helper()
+	redemptionContext := sha256.Sum256(append([]byte("aurora v2.0 token redemption context"), proof.RedemptionContextHash...))
+	challenge := wire.NewEncoder()
+	challenge.WriteUint16(uint16(proof.ProofType))
+	challenge.WriteOpaque16(issuerName)
+	challenge.WriteOpaque8(redemptionContext[:])
+	challenge.WriteOpaque16(originInfo)
+	challengeBytes, err := challenge.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(challengeBytes)
+	challengeDigest = sum[:]
+
+	metadataEncoder := wire.NewEncoder()
+	metadataEncoder.WriteUint16(uint16(proof.ProofType))
+	metadataEncoder.WriteOpaqueFixed(challengeDigest, 32)
+	metadataEncoder.WriteOpaqueFixed(proof.TokenKeyID, 32)
+	metadataEncoder.WriteOpaque16(issuerName)
+	metadataEncoder.WriteOpaque16(originInfo)
+	metadataEncoder.WritePreHash(issuerMetadataHash)
+	metadata, err = metadataEncoder.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	authenticatorInput := wire.NewEncoder()
+	authenticatorInput.WriteUint16(uint16(proof.ProofType))
+	authenticatorInput.WriteOpaqueFixed(proof.TokenNonce, 32)
+	authenticatorInput.WriteOpaqueFixed(challengeDigest, 32)
+	authenticatorInput.WriteOpaqueFixed(proof.TokenKeyID, 32)
+	authenticatorInputBytes, err := authenticatorInput.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticatorHash = auroratrust.AuthenticatorInputHash(authenticatorInputBytes)
+	return metadata, challengeDigest, authenticatorHash
 }
 
 func rb(b byte, n int) []byte {

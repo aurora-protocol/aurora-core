@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"fmt"
 
 	"github.com/aurora-protocol/aurora-core/registry"
@@ -93,6 +94,69 @@ func (p AdmissionProof) ValidateStructural(now uint64, allowLab bool) error {
 	}
 	if err := ValidateExtensions(p.Extensions, nil); err != nil {
 		return err
+	}
+	return nil
+}
+
+type AuroraTokenMetadata struct {
+	RFC9577TokenType       uint16
+	RFC9577ChallengeDigest []byte
+	RFC9577TokenKeyID      []byte
+	IssuerName             []byte
+	OriginInfo             []byte
+	IssuerMetadataHash     []byte
+}
+
+func (m AuroraTokenMetadata) EncodeTo(e *wire.Encoder) {
+	e.WriteUint16(m.RFC9577TokenType)
+	e.WriteOpaqueFixed(m.RFC9577ChallengeDigest, 32)
+	e.WriteOpaqueFixed(m.RFC9577TokenKeyID, 32)
+	e.WriteOpaque16(m.IssuerName)
+	e.WriteOpaque16(m.OriginInfo)
+	e.WritePreHash(m.IssuerMetadataHash)
+}
+
+func DecodeAuroraTokenMetadata(r *wire.Reader) AuroraTokenMetadata {
+	return AuroraTokenMetadata{
+		RFC9577TokenType:       r.ReadUint16(),
+		RFC9577ChallengeDigest: r.ReadOpaqueFixed(32),
+		RFC9577TokenKeyID:      r.ReadOpaqueFixed(32),
+		IssuerName:             r.ReadOpaque16(),
+		OriginInfo:             r.ReadOpaque16(),
+		IssuerMetadataHash:     r.ReadPreHash(),
+	}
+}
+
+func DecodeAuroraTokenMetadataBytes(encoded []byte) (AuroraTokenMetadata, error) {
+	r := wire.NewReader(encoded)
+	out := DecodeAuroraTokenMetadata(r)
+	if err := r.Err(); err != nil {
+		return AuroraTokenMetadata{}, err
+	}
+	if !r.EOF() {
+		return AuroraTokenMetadata{}, fmt.Errorf("protocol: trailing token metadata bytes")
+	}
+	return out, nil
+}
+
+func (m AuroraTokenMetadata) ValidateForProof(proof AdmissionProof, issuerMetadataHash []byte) error {
+	if proof.ProofType > 0xffff {
+		return fmt.Errorf("protocol: proof type 0x%x does not fit RFC token type", proof.ProofType)
+	}
+	if uint64(m.RFC9577TokenType) != proof.ProofType {
+		return fmt.Errorf("protocol: token metadata proof type mismatch")
+	}
+	if len(m.RFC9577ChallengeDigest) != 32 {
+		return fmt.Errorf("protocol: token metadata challenge digest must be 32 bytes")
+	}
+	if !bytes.Equal(m.RFC9577TokenKeyID, proof.TokenKeyID) {
+		return fmt.Errorf("protocol: token metadata token key id mismatch")
+	}
+	if len(m.IssuerName) == 0 {
+		return fmt.Errorf("protocol: token metadata issuer name is empty")
+	}
+	if !bytes.Equal(m.IssuerMetadataHash, issuerMetadataHash) {
+		return fmt.Errorf("protocol: token metadata issuer metadata hash mismatch")
 	}
 	return nil
 }

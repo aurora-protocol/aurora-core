@@ -187,3 +187,64 @@ func TestVerifyAndSpendReplayRejectsSecondSpendWithChangedReplayNonce(t *testing
 		t.Fatalf("expected changed replay nonce to fail primary token-spent cache")
 	}
 }
+
+func TestVerifyAndSpendReplayRejectsStructurallyInvalidReplayProof(t *testing.T) {
+	for name, mutate := range map[string]func(*protocol.ReplayProof){
+		"unsupported version": func(replay *protocol.ReplayProof) {
+			replay.ProofVersion = 0
+		},
+		"unknown critical extension": func(replay *protocol.ReplayProof) {
+			replay.Extensions = []protocol.Extension{{
+				ExtensionType: 0x7001,
+				Critical:      true,
+				Body:          []byte("required"),
+			}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			admissionContext := rep(0x40, 48)
+			handshakeBinding := rep(0x41, 48)
+			proof := protocol.AdmissionProof{
+				ProofVersion:          registry.Version20,
+				ProofType:             registry.ProofBlindRSA2048,
+				IssuerID:              rep(0x01, 16),
+				TokenKeyID:            rep(0x02, 32),
+				RelayBucketID:         rep(0x03, 16),
+				TokenScopeID:          rep(0x04, 16),
+				ExpiryUnix:            2000000000,
+				TokenNonce:            rep(0x05, 32),
+				RedemptionContextHash: admissionContext,
+				TokenAuthenticator:    []byte("token"),
+				BindingProof:          []byte("binding"),
+			}
+			redemption, err := TokenRedemptionHash(proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replay := protocol.ReplayProof{
+				ProofVersion:        registry.Version20,
+				ReplayEpochID:       10,
+				TokenRedemptionHash: redemption,
+				ClientReplayNonce:   rep(0x06, 32),
+				ReplayWindowID:      rep(0x07, 16),
+			}
+			replay.ReplayContextHash, err = ReplayContextHash(redemption, replay, 0x42, 1, handshakeBinding, admissionContext)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutate(&replay)
+			if _, _, err := VerifyAndSpendReplay(ReplayVerificationInput{
+				AdmissionProof:          proof,
+				ReplayProof:             replay,
+				RouteInstanceID:         0x42,
+				HopIndex:                1,
+				HandshakeBindingContext: handshakeBinding,
+				AdmissionContextHash:    admissionContext,
+				TokenSpentCache:         NewMemoryReplayCache(),
+				BootstrapDedupCache:     NewMemoryReplayCache(),
+			}); err == nil {
+				t.Fatalf("structurally invalid replay proof accepted")
+			}
+		})
+	}
+}

@@ -111,6 +111,28 @@ func DecodeReplayProof(r *wire.Reader) ReplayProof {
 	}
 }
 
+func (p ReplayProof) ValidateStructural() error {
+	if p.ProofVersion != registry.Version20 {
+		return fmt.Errorf("protocol: unsupported replay proof version 0x%x", p.ProofVersion)
+	}
+	if len(p.TokenRedemptionHash) != 48 {
+		return fmt.Errorf("protocol: replay token redemption hash must be 48 bytes")
+	}
+	if len(p.ClientReplayNonce) != 32 {
+		return fmt.Errorf("protocol: client replay nonce must be 32 bytes")
+	}
+	if len(p.ReplayContextHash) != 48 {
+		return fmt.Errorf("protocol: replay context hash must be 48 bytes")
+	}
+	if len(p.ReplayWindowID) != 16 {
+		return fmt.Errorf("protocol: replay window id must be 16 bytes")
+	}
+	if err := ValidateExtensions(p.Extensions, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
 type ClientTransportHints struct {
 	HintFlags              uint16
 	ObservedPathMTUBucket  uint8

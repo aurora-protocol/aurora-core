@@ -144,6 +144,9 @@ type ReplayVerificationInput struct {
 }
 
 func VerifyAndSpendReplay(in ReplayVerificationInput) (tokenSpentKey, bootstrapDedupKey []byte, err error) {
+	if err := in.ReplayProof.ValidateStructural(); err != nil {
+		return nil, nil, err
+	}
 	tokenRedemptionHash, err := TokenRedemptionHash(in.AdmissionProof)
 	if err != nil {
 		return nil, nil, err

@@ -193,13 +193,13 @@ func TestValidateIssuerVerifierResponseRequiresFreshMatchingAccept(t *testing.T)
 		t.Fatal(err)
 	}
 	resp := protocol.IssuerVerifierResponse{
-		ResponseVersion:  registry.Version20,
-		ServiceID:        append([]byte(nil), service.ServiceID...),
-		RequestHash:      requestHash,
-		Decision:         registry.VerifierDecisionAccept,
-		TokenSpentKey:    append([]byte(nil), req.TokenSpentKey...),
-		ValidUntilUnix:   200,
-		ResponseNonce:    rb(0x40, 32),
+		ResponseVersion: registry.Version20,
+		ServiceID:       append([]byte(nil), service.ServiceID...),
+		RequestHash:     requestHash,
+		Decision:        registry.VerifierDecisionAccept,
+		TokenSpentKey:   append([]byte(nil), req.TokenSpentKey...),
+		ValidUntilUnix:  200,
+		ResponseNonce:   rb(0x40, 32),
 	}
 	signVerifierResponse(t, serviceSigner, &resp)
 	if err := ValidateIssuerVerifierResponse(service, req, resp, 150); err != nil {
@@ -308,6 +308,7 @@ func verifierProofReplay(t *testing.T) (protocol.AdmissionProof, protocol.Replay
 		t.Fatal(err)
 	}
 	replay := protocol.ReplayProof{
+		ProofVersion:        registry.Version20,
 		TokenRedemptionHash: redemptionHash,
 		ClientReplayNonce:   rb(0x14, 32),
 		ReplayEpochID:       22,

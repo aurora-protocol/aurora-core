@@ -16,25 +16,30 @@ import (
 )
 
 type CarrierRequestInput struct {
-	Plan             CarrierPlan
-	Template         protocol.CoverTemplate
-	RequestClassID   uint64
-	NeedCapsule      bool
-	Scheme           string
-	Authority        string
-	Path             string
-	Header           http.Header
-	Payload          []byte
-	WebSocketKeySeed []byte
+	Plan                     CarrierPlan
+	Template                 protocol.CoverTemplate
+	RequestClassID           uint64
+	NeedCapsule              bool
+	Scheme                   string
+	Authority                string
+	Path                     string
+	Header                   http.Header
+	Payload                  []byte
+	WebSocketKeySeed         []byte
+	H3DatagramSettingsOK     bool
+	QUICMaxDatagramFrameSize uint64
+	ResetStreamAtNegotiated  bool
 }
 
 type BuiltCarrierRequest struct {
-	MethodID        uint64
-	RequestClassID  uint64
-	Request         *http.Request
-	InitialMessages [][]byte
-	StreamFallback  bool
-	NativeDatagrams bool
+	MethodID         uint64
+	RequestClassID   uint64
+	Request          *http.Request
+	ProtocolToken    string
+	InitialMessages  [][]byte
+	InitialDatagrams [][]byte
+	StreamFallback   bool
+	NativeDatagrams  bool
 }
 
 func BuildCarrierRequest(in CarrierRequestInput) (BuiltCarrierRequest, error) {
@@ -98,9 +103,59 @@ func BuildCarrierRequest(in CarrierRequestInput) (BuiltCarrierRequest, error) {
 			StreamFallback:  in.Plan.UDPMode == UDPOverStreamFallback,
 			NativeDatagrams: in.Plan.UDPMode == UDPNativeDatagram,
 		}, nil
+	case registry.MethodWebH3ExtDgram:
+		if err := validateH3ExtDatagram(in); err != nil {
+			return BuiltCarrierRequest{}, err
+		}
+		req, err := newCarrierHTTPRequest(http.MethodConnect, target, in.Authority, cloneHeader(in.Header), nil)
+		if err != nil {
+			return BuiltCarrierRequest{}, err
+		}
+		return BuiltCarrierRequest{
+			MethodID:         method,
+			RequestClassID:   class.ClassID,
+			Request:          req,
+			ProtocolToken:    "webtransport-h3",
+			InitialDatagrams: initialDatagrams(payload),
+			StreamFallback:   in.Plan.UDPMode == UDPOverStreamFallback,
+			NativeDatagrams:  in.Plan.UDPMode == UDPNativeDatagram,
+		}, nil
 	default:
 		return BuiltCarrierRequest{}, fmt.Errorf("transport: carrier request builder unsupported for method 0x%x", method)
 	}
+}
+
+func validateH3ExtDatagram(in CarrierRequestInput) error {
+	if in.Plan.UDPMode != UDPNativeDatagram {
+		return fmt.Errorf("transport: H3 extension datagram carrier requires native datagram mode")
+	}
+	profile := in.Template.H3Profile
+	if !profile.SupportsH3Datagram {
+		return fmt.Errorf("transport: H3 cover profile does not support datagrams")
+	}
+	if !profile.SupportsWebTransportH3 {
+		return fmt.Errorf("transport: H3 cover profile does not support WebTransport")
+	}
+	if profile.WebTransportProfileID == 0 {
+		return fmt.Errorf("transport: H3 cover profile missing WebTransport profile id")
+	}
+	if !in.H3DatagramSettingsOK {
+		return fmt.Errorf("transport: H3 datagram settings were not negotiated")
+	}
+	if in.QUICMaxDatagramFrameSize == 0 {
+		return fmt.Errorf("transport: QUIC max_datagram_frame_size was not negotiated")
+	}
+	if profile.ResetStreamAtRequired && !in.ResetStreamAtNegotiated {
+		return fmt.Errorf("transport: reset_stream_at was not negotiated")
+	}
+	return nil
+}
+
+func initialDatagrams(payload []byte) [][]byte {
+	if len(payload) == 0 {
+		return nil
+	}
+	return [][]byte{append([]byte(nil), payload...)}
 }
 
 func carrierURL(scheme, authority, path string) (*url.URL, error) {

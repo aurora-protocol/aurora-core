@@ -284,6 +284,90 @@ func TestBuildShadowOriginCarrierRequestRejectsOriginPassThroughAndPublicMarkers
 	}
 }
 
+func TestBuildH3ExtDatagramCarrierRequestUsesWebTransportAssociation(t *testing.T) {
+	tpl := h3DatagramTemplate()
+	plan := CarrierPlan{
+		Carrier:              Carrier{MethodID: registry.MethodWebH3ExtDgram, Name: "web.h3.ext-dgram"},
+		UDPMode:              UDPNativeDatagram,
+		PerformanceDowngrade: false,
+	}
+	built, err := BuildCarrierRequest(CarrierRequestInput{
+		Plan:                     plan,
+		Template:                 tpl,
+		RequestClassID:           1,
+		NeedCapsule:              true,
+		Scheme:                   "https",
+		Authority:                "cover.example",
+		Path:                     "/session/42",
+		Payload:                  []byte{0x80, 0x01, 0x02},
+		H3DatagramSettingsOK:     true,
+		QUICMaxDatagramFrameSize: 1200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built.MethodID != registry.MethodWebH3ExtDgram || built.RequestClassID != 1 {
+		t.Fatalf("unexpected H3 metadata: %+v", built)
+	}
+	if built.Request.Method != http.MethodConnect || built.Request.URL.Scheme != "https" || built.Request.URL.Host != "cover.example" || built.Request.URL.Path != "/session/42" {
+		t.Fatalf("unexpected H3 CONNECT request: %+v", built.Request)
+	}
+	if built.ProtocolToken != "webtransport-h3" {
+		t.Fatalf("unexpected H3 protocol token %q", built.ProtocolToken)
+	}
+	if built.Request.Body != nil || built.Request.ContentLength != 0 {
+		t.Fatalf("H3 datagram association must not put protocol payload in request body")
+	}
+	if len(built.InitialDatagrams) != 1 || !bytes.Equal(built.InitialDatagrams[0], []byte{0x80, 0x01, 0x02}) {
+		t.Fatalf("H3 payload was not staged as an initial datagram: %+v", built.InitialDatagrams)
+	}
+	if !built.NativeDatagrams || built.StreamFallback {
+		t.Fatalf("H3 datagram carrier flags wrong: %+v", built)
+	}
+}
+
+func TestBuildH3ExtDatagramCarrierRequestRequiresProfileAndNegotiation(t *testing.T) {
+	tpl := h3DatagramTemplate()
+	plan := CarrierPlan{Carrier: Carrier{MethodID: registry.MethodWebH3ExtDgram, Name: "web.h3.ext-dgram"}, UDPMode: UDPNativeDatagram}
+
+	tpl.H3Profile.SupportsH3Datagram = false
+	if _, err := BuildCarrierRequest(h3CarrierInput(plan, tpl)); err == nil {
+		t.Fatalf("H3 ext-dgram accepted a profile without datagram support")
+	}
+
+	tpl = h3DatagramTemplate()
+	tpl.H3Profile.SupportsWebTransportH3 = false
+	if _, err := BuildCarrierRequest(h3CarrierInput(plan, tpl)); err == nil {
+		t.Fatalf("H3 ext-dgram accepted a profile without WebTransport support")
+	}
+
+	tpl = h3DatagramTemplate()
+	in := h3CarrierInput(plan, tpl)
+	in.H3DatagramSettingsOK = false
+	if _, err := BuildCarrierRequest(in); err == nil {
+		t.Fatalf("H3 ext-dgram accepted missing H3 datagram settings")
+	}
+
+	tpl = h3DatagramTemplate()
+	in = h3CarrierInput(plan, tpl)
+	in.QUICMaxDatagramFrameSize = 0
+	if _, err := BuildCarrierRequest(in); err == nil {
+		t.Fatalf("H3 ext-dgram accepted missing QUIC max_datagram_frame_size")
+	}
+
+	tpl = h3DatagramTemplate()
+	tpl.H3Profile.ResetStreamAtRequired = true
+	in = h3CarrierInput(plan, tpl)
+	in.ResetStreamAtNegotiated = false
+	if _, err := BuildCarrierRequest(in); err == nil {
+		t.Fatalf("H3 ext-dgram accepted missing reset_stream_at negotiation")
+	}
+	in.ResetStreamAtNegotiated = true
+	if _, err := BuildCarrierRequest(in); err != nil {
+		t.Fatalf("H3 ext-dgram rejected negotiated reset_stream_at: %v", err)
+	}
+}
+
 func transportTemplate(method uint64) protocol.CoverTemplate {
 	return protocol.CoverTemplate{
 		RequestClasses: []protocol.RequestClass{{
@@ -294,5 +378,34 @@ func transportTemplate(method uint64) protocol.CoverTemplate {
 			MayCarryPrelude:     true,
 			MayCarryCapsule:     true,
 		}},
+	}
+}
+
+func h3DatagramTemplate() protocol.CoverTemplate {
+	tpl := transportTemplate(registry.MethodWebH3ExtDgram)
+	tpl.H3Profile = protocol.H3CoverProfile{
+		ProfileID:                  7,
+		SupportsH3Datagram:         true,
+		SupportsWebTransportH3:     true,
+		WebTransportProfileID:      1,
+		QUICDatagramRequired:       true,
+		DatagramSizeDistributionID: bytes.Repeat([]byte{0x22}, 16),
+		DatagramRateDistributionID: bytes.Repeat([]byte{0x33}, 16),
+	}
+	return tpl
+}
+
+func h3CarrierInput(plan CarrierPlan, tpl protocol.CoverTemplate) CarrierRequestInput {
+	return CarrierRequestInput{
+		Plan:                     plan,
+		Template:                 tpl,
+		RequestClassID:           1,
+		NeedCapsule:              true,
+		Scheme:                   "https",
+		Authority:                "cover.example",
+		Path:                     "/session/42",
+		Payload:                  []byte{0x80},
+		H3DatagramSettingsOK:     true,
+		QUICMaxDatagramFrameSize: 1200,
 	}
 }

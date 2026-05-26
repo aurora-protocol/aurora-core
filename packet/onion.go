@@ -5,11 +5,15 @@ import (
 
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/aurora-protocol/aurora-core/wire"
 )
 
-func SealSplit2Onion(exitBlock protocol.FrameBlock, entry *Protector, exit *Protector) (AuroraPacket, error) {
+func SealSplit2Onion(exitBlock protocol.FrameBlock, entry *Protector, exit *Protector, forward protocol.RouteForwardFrame) (AuroraPacket, error) {
 	if entry == nil || exit == nil {
 		return AuroraPacket{}, fmt.Errorf("packet: split-2 protectors are required")
+	}
+	if forward.RouteInstanceID != exit.RouteInstanceID || forward.HopIndex != exit.HopLayer {
+		return AuroraPacket{}, fmt.Errorf("packet: route-forward metadata does not match exit layer")
 	}
 	inner, err := exit.Seal(exitBlock)
 	if err != nil {
@@ -19,10 +23,15 @@ func SealSplit2Onion(exitBlock protocol.FrameBlock, entry *Protector, exit *Prot
 	if err != nil {
 		return AuroraPacket{}, err
 	}
+	forward.OpaqueNextHopPrelude = encodedInner
+	forwardPayload, err := protocol.Encode(forward)
+	if err != nil {
+		return AuroraPacket{}, err
+	}
 	outer := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{
 		FrameType: registry.FrameRouteForward,
 		FlowID:    0,
-		Payload:   encodedInner,
+		Payload:   forwardPayload,
 	}}}
 	return entry.Seal(outer)
 }
@@ -35,5 +44,21 @@ func DecodeForwardedPacket(block protocol.FrameBlock) (AuroraPacket, error) {
 	if frame.FrameType != registry.FrameRouteForward {
 		return AuroraPacket{}, fmt.Errorf("packet: frame is not route-forward")
 	}
-	return DecodeAuroraPacket(frame.Payload)
+	forward, err := decodeRouteForwardPayload(frame.Payload)
+	if err != nil {
+		return AuroraPacket{}, err
+	}
+	return DecodeAuroraPacket(forward.OpaqueNextHopPrelude)
+}
+
+func decodeRouteForwardPayload(payload []byte) (protocol.RouteForwardFrame, error) {
+	r := wire.NewReader(payload)
+	forward := protocol.DecodeRouteForwardFrame(r)
+	if r.Err() != nil {
+		return protocol.RouteForwardFrame{}, r.Err()
+	}
+	if !r.EOF() {
+		return protocol.RouteForwardFrame{}, fmt.Errorf("packet: trailing route-forward payload bytes")
+	}
+	return forward, nil
 }

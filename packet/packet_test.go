@@ -7,6 +7,7 @@ import (
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/aurora-protocol/aurora-core/wire"
 )
 
 func bytesOf(b byte, n int) []byte {
@@ -223,7 +224,7 @@ func TestSplit2OnionEntrySeesOnlyOpaqueForwardFrame(t *testing.T) {
 		Key:             bytesOf(0x41, 32),
 		StaticIV:        bytesOf(0x42, 12),
 	}
-	outer, err := SealSplit2Onion(exitBlock, entry, exit)
+	outer, err := SealSplit2Onion(exitBlock, entry, exit, routeForwardForPacketTest(7, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,6 +237,14 @@ func TestSplit2OnionEntrySeesOnlyOpaqueForwardFrame(t *testing.T) {
 	}
 	if bytes.Contains(entryBlock.Frames[0].Payload, []byte("secret.example")) {
 		t.Fatalf("entry-visible route-forward payload leaked exit flow metadata")
+	}
+	forwardReader := wire.NewReader(entryBlock.Frames[0].Payload)
+	forward := protocol.DecodeRouteForwardFrame(forwardReader)
+	if forwardReader.Err() != nil || !forwardReader.EOF() {
+		t.Fatalf("route-forward payload was not a canonical RouteForwardFrame: err=%v", forwardReader.Err())
+	}
+	if forward.RouteInstanceID != 7 || forward.HopIndex != 1 {
+		t.Fatalf("route-forward metadata did not identify exit hop: %+v", forward)
 	}
 	if _, err := protocol.DecodeFrameBlock(entryBlock.Frames[0].Payload); err == nil {
 		t.Fatalf("entry route-forward payload decoded as plaintext frame block")
@@ -257,10 +266,10 @@ func TestSplit2OnionMaintainsIndependentHopCounters(t *testing.T) {
 	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
 	entry := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 8, HopLayer: 0, Key: bytesOf(0x51, 32), StaticIV: bytesOf(0x52, 12)}
 	exit := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 8, HopLayer: 1, Key: bytesOf(0x61, 32), StaticIV: bytesOf(0x62, 12)}
-	if _, err := SealSplit2Onion(block, entry, exit); err != nil {
+	if _, err := SealSplit2Onion(block, entry, exit, routeForwardForPacketTest(8, 1)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SealSplit2Onion(block, entry, exit); err != nil {
+	if _, err := SealSplit2Onion(block, entry, exit, routeForwardForPacketTest(8, 1)); err != nil {
 		t.Fatal(err)
 	}
 	if entry.NextPacket != 2 || exit.NextPacket != 2 {
@@ -272,7 +281,7 @@ func TestSplit2OnionWrongInnerHopLayerFails(t *testing.T) {
 	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
 	entry := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 9, HopLayer: 0, Key: bytesOf(0x71, 32), StaticIV: bytesOf(0x72, 12)}
 	exit := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 9, HopLayer: 1, Key: bytesOf(0x81, 32), StaticIV: bytesOf(0x82, 12)}
-	outer, err := SealSplit2Onion(block, entry, exit)
+	outer, err := SealSplit2Onion(block, entry, exit, routeForwardForPacketTest(9, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,5 +483,17 @@ func TestAuroraPacketEncodeDecode(t *testing.T) {
 	}
 	if !bytes.Equal(got.Ciphertext, pkt.Ciphertext) || got.KeyPhase != pkt.KeyPhase || got.PacketNumber != pkt.PacketNumber {
 		t.Fatalf("decoded packet mismatch: %+v", got)
+	}
+}
+
+func routeForwardForPacketTest(routeInstanceID uint64, hopIndex uint8) protocol.RouteForwardFrame {
+	return protocol.RouteForwardFrame{
+		RouteInstanceID:                routeInstanceID,
+		HopIndex:                       hopIndex,
+		NextRelayDescriptorHash:        bytesOf(0x91, 48),
+		PreviousHopRelayDescriptorHash: bytesOf(0x92, 48),
+		NextRelayRoutingRecordID:       bytesOf(0x93, 16),
+		NextRelayLocatorType:           registry.LocatorAuthority,
+		NextRelayLocator:               []byte("exit.example:443"),
 	}
 }

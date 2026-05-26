@@ -11,6 +11,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
+	corevectors "github.com/aurora-protocol/aurora-core/vectors"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
@@ -22,7 +23,7 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "vectors":
-		err = vectors()
+		err = vectors(os.Stdout)
 	case "capabilities":
 		capabilities()
 	case "active-probes":
@@ -46,7 +47,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors|capabilities|active-probes|check-config>")
 }
 
-func vectors() error {
+func vectors(w io.Writer) error {
 	control := auroracrypto.ControlAADInput{
 		SelectedVersion:                 registry.Version20,
 		SelectedSuite:                   registry.SuiteHybrid768AESGCM,
@@ -63,8 +64,8 @@ func vectors() error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("control_aad_preimage:", hex.EncodeToString(preimage))
-	fmt.Println("control_aad:", hex.EncodeToString(aad))
+	fmt.Fprintln(w, "control_aad_preimage:", hex.EncodeToString(preimage))
+	fmt.Fprintln(w, "control_aad:", hex.EncodeToString(aad))
 
 	route := auroracrypto.RouteWrapInput{
 		RouteInstanceID:                1,
@@ -83,11 +84,11 @@ func vectors() error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("route_prelude_wrap_context:", hex.EncodeToString(context))
-	fmt.Println("route_prelude_wrap_key:", hex.EncodeToString(key))
-	fmt.Println("route_prelude_wrap_iv:", hex.EncodeToString(iv))
-	fmt.Println("route_wrap_aad:", hex.EncodeToString(wrapAAD))
-	fmt.Println("route_wrap_ciphertext_tag:", hex.EncodeToString(sealed))
+	fmt.Fprintln(w, "route_prelude_wrap_context:", hex.EncodeToString(context))
+	fmt.Fprintln(w, "route_prelude_wrap_key:", hex.EncodeToString(key))
+	fmt.Fprintln(w, "route_prelude_wrap_iv:", hex.EncodeToString(iv))
+	fmt.Fprintln(w, "route_wrap_aad:", hex.EncodeToString(wrapAAD))
+	fmt.Fprintln(w, "route_wrap_ciphertext_tag:", hex.EncodeToString(sealed))
 
 	pk := protocol.PublicKeyRecord{
 		SignatureScheme: registry.SigECDSAP256SHA384DER,
@@ -113,9 +114,16 @@ func vectors() error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("public_key_record:", hex.EncodeToString(encodedPK))
-	fmt.Println("authority_key_id:", hex.EncodeToString(keyID))
-	fmt.Println("authority_key_record:", hex.EncodeToString(encodedAKR))
+	fmt.Fprintln(w, "public_key_record:", hex.EncodeToString(encodedPK))
+	fmt.Fprintln(w, "authority_key_id:", hex.EncodeToString(keyID))
+	fmt.Fprintln(w, "authority_key_record:", hex.EncodeToString(encodedAKR))
+	bundle, err := corevectors.GenerateStructuralBundle()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "flow_open:", bundle.FlowOpen)
+	fmt.Fprintln(w, "udp_target_confirm:", bundle.UDPTargetConfirm)
+	fmt.Fprintln(w, "flow_close:", bundle.FlowClose)
 	return nil
 }
 

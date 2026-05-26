@@ -79,5 +79,8 @@ func decodeRouteForwardPayload(payload []byte) (protocol.RouteForwardFrame, erro
 	if !r.EOF() {
 		return protocol.RouteForwardFrame{}, fmt.Errorf("packet: trailing route-forward payload bytes")
 	}
+	if err := protocol.ValidateRouteForwardFrame(forward); err != nil {
+		return protocol.RouteForwardFrame{}, err
+	}
 	return forward, nil
 }

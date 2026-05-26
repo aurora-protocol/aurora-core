@@ -472,6 +472,37 @@ func TestSplit2OnionRejectsMalformedRouteForwardBeforeCounters(t *testing.T) {
 	}
 }
 
+func TestDecodeForwardedPacketRejectsMalformedRouteForwardMetadata(t *testing.T) {
+	inner := AuroraPacket{
+		RouteInstanceID: 8,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        0,
+		PacketNumber:    1,
+		Ciphertext:      []byte{0x41},
+		AuthTag:         bytesOf(0x42, 16),
+	}
+	encodedInner, err := protocol.Encode(inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forward := routeForwardForPacketTest(t, 8, 1)
+	forward.NextRelayLocatorType = 0x05
+	forward.OpaqueNextHopPrelude = encodedInner
+	payload, err := protocol.Encode(forward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{
+		FrameType: registry.FrameRouteForward,
+		Payload:   payload,
+	}}}
+
+	if _, err := DecodeForwardedPacket(block); err == nil {
+		t.Fatalf("malformed route-forward metadata was accepted")
+	}
+}
+
 func TestSplit2OnionWrongInnerHopLayerFails(t *testing.T) {
 	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
 	entry := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 9, HopLayer: 0, Key: bytesOf(0x71, 32), StaticIV: bytesOf(0x72, 12)}

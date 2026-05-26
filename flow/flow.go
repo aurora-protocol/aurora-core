@@ -57,12 +57,23 @@ type FlowState struct {
 	ConfirmedDNSAnswerSetHash []byte
 	ConfirmedTTLSeconds       uint32
 	ConfirmedResolutionSource uint8
+	LocalClosed               bool
+	PeerClosed                bool
+	CloseCode                 uint64
+	FinalSequenceHintPresent  bool
+	FinalSequenceHint         uint64
+	DrainUntilUnix            uint64
 }
 
 type FlowOptions struct {
 	NowUnix            uint64
 	TTLSeconds         uint64
 	IdleTimeoutSeconds uint64
+}
+
+type CloseOptions struct {
+	NowUnix      uint64
+	DrainSeconds uint64
 }
 
 type Manager struct {
@@ -146,6 +157,9 @@ func (m *Manager) AcceptDatagram(flowID uint64, now uint64) (FlowState, bool) {
 	if !ok || state.Kind != FlowKindUDPAssociation {
 		return FlowState{}, false
 	}
+	if state.LocalClosed || state.PeerClosed {
+		return FlowState{}, false
+	}
 	if state.expired(now) {
 		delete(m.flows, flowID)
 		return FlowState{}, false
@@ -163,6 +177,51 @@ func (m *Manager) Close(close protocol.FlowClose) error {
 	}
 	delete(m.flows, close.FlowID)
 	return nil
+}
+
+func (m *Manager) MarkLocalClose(close protocol.FlowClose, opts CloseOptions) error {
+	return m.markClose(close, opts, true)
+}
+
+func (m *Manager) MarkPeerClose(close protocol.FlowClose, opts CloseOptions) error {
+	return m.markClose(close, opts, false)
+}
+
+func (m *Manager) markClose(close protocol.FlowClose, opts CloseOptions, local bool) error {
+	if err := protocol.ValidateFlowClose(close); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state, ok := m.flows[close.FlowID]
+	if !ok {
+		return fmt.Errorf("flow: unknown flow_id %d", close.FlowID)
+	}
+	if local {
+		state.LocalClosed = true
+	} else {
+		state.PeerClosed = true
+	}
+	state.CloseCode = close.CloseCode
+	state.FinalSequenceHintPresent = close.FinalSequenceHintPresent
+	state.FinalSequenceHint = close.FinalSequenceHint
+	state.DrainUntilUnix = closeDrainUntil(opts)
+	if state.LocalClosed && state.PeerClosed {
+		delete(m.flows, close.FlowID)
+		return nil
+	}
+	m.flows[close.FlowID] = state
+	return nil
+}
+
+func (m *Manager) PurgeClosed(now uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for flowID, state := range m.flows {
+		if (state.LocalClosed || state.PeerClosed) && now >= state.DrainUntilUnix {
+			delete(m.flows, flowID)
+		}
+	}
 }
 
 func validateOpen(open protocol.FlowOpen) error {
@@ -196,6 +255,10 @@ func validateOpen(open protocol.FlowOpen) error {
 		return fmt.Errorf("flow: relay-resolved UDP disabled by default for transparent fake-IP mode")
 	}
 	return nil
+}
+
+func closeDrainUntil(opts CloseOptions) uint64 {
+	return opts.NowUnix + opts.DrainSeconds
 }
 
 func (s FlowState) expired(now uint64) bool {

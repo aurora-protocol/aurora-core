@@ -182,3 +182,97 @@ func TestFlowTTLIsHardCapEvenWhenActive(t *testing.T) {
 		t.Fatalf("datagram accepted after flow TTL")
 	}
 }
+
+func TestFlowCloseTracksHalfCloseUntilBothSidesClose(t *testing.T) {
+	m := NewManager()
+	if err := m.Open(protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           15,
+		FlowKind:         FlowKindTCPStream,
+		TargetKind:       TargetKindDomainName,
+		TargetHost:       []byte("example.com"),
+		TargetPort:       443,
+		NameBindingID:    fb(0xaa, 16),
+		DNSAnswerSetHash: fb(0xbb, 48),
+		LocalBindingMode: LocalBindingExplicitProxyAPI,
+		PriorityClass:    PriorityInteractive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.MarkLocalClose(protocol.FlowClose{FlowID: 15, CloseCode: protocol.CloseNormal, FinalSequenceHintPresent: true, FinalSequenceHint: 42}, CloseOptions{NowUnix: 100, DrainSeconds: 5}); err != nil {
+		t.Fatal(err)
+	}
+	state, ok := m.DemuxInbound(15)
+	if !ok {
+		t.Fatalf("half-closed flow was released before peer close")
+	}
+	if !state.LocalClosed || state.PeerClosed || state.FinalSequenceHint != 42 || state.DrainUntilUnix != 105 {
+		t.Fatalf("local half-close state mismatch: %+v", state)
+	}
+	if err := m.MarkPeerClose(protocol.FlowClose{FlowID: 15, CloseCode: protocol.CloseNormal}, CloseOptions{NowUnix: 101, DrainSeconds: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.DemuxInbound(15); ok {
+		t.Fatalf("fully closed flow remained tracked")
+	}
+}
+
+func TestFlowClosePurgeReleasesHalfClosedAfterDrain(t *testing.T) {
+	m := NewManager()
+	if err := m.Open(protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           16,
+		FlowKind:         FlowKindTCPStream,
+		TargetKind:       TargetKindDomainName,
+		TargetHost:       []byte("example.com"),
+		TargetPort:       443,
+		NameBindingID:    fb(0xaa, 16),
+		DNSAnswerSetHash: fb(0xbb, 48),
+		LocalBindingMode: LocalBindingExplicitProxyAPI,
+		PriorityClass:    PriorityInteractive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.MarkPeerClose(protocol.FlowClose{FlowID: 16, CloseCode: protocol.CloseNormal}, CloseOptions{NowUnix: 200, DrainSeconds: 3}); err != nil {
+		t.Fatal(err)
+	}
+	state, ok := m.DemuxInbound(16)
+	if !ok {
+		t.Fatalf("peer half-close was released before drain expiry")
+	}
+	if state.LocalClosed || !state.PeerClosed || state.DrainUntilUnix != 203 {
+		t.Fatalf("peer half-close state mismatch: %+v", state)
+	}
+	m.PurgeClosed(202)
+	if _, ok := m.DemuxInbound(16); !ok {
+		t.Fatalf("half-closed flow was purged before drain expiry")
+	}
+	m.PurgeClosed(203)
+	if _, ok := m.DemuxInbound(16); ok {
+		t.Fatalf("half-closed flow survived drain expiry")
+	}
+}
+
+func TestClosedUDPFlowRejectsDatagrams(t *testing.T) {
+	m := NewManager()
+	if err := m.Open(protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           17,
+		FlowKind:         FlowKindUDPAssociation,
+		TargetKind:       TargetKindIPv4,
+		TargetHost:       []byte{203, 0, 113, 17},
+		TargetPort:       443,
+		UDPFQDNMode:      UDPFQDNClientResolvedNameBinding,
+		NameBindingID:    fb(0xaa, 16),
+		DNSAnswerSetHash: fb(0xbb, 48),
+		LocalBindingMode: LocalBindingTransparentFakeIP,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.MarkLocalClose(protocol.FlowClose{FlowID: 17, CloseCode: protocol.CloseNormal}, CloseOptions{NowUnix: 300, DrainSeconds: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.AcceptDatagram(17, 301); ok {
+		t.Fatalf("datagram accepted after local FLOW_CLOSE")
+	}
+}

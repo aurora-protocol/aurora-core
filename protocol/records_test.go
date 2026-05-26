@@ -94,6 +94,30 @@ func TestPublicKeyCompatibilityRejectsMismatches(t *testing.T) {
 	}
 }
 
+func TestAuthorityKeyValidateRequiresAllRequestedUsageBits(t *testing.T) {
+	key := AuthorityKeyRecord{
+		AuthorityID:    fill(0x01, 16),
+		AuthorityKeyID: fill(0x02, 16),
+		PublicKey: PublicKeyRecord{
+			SignatureScheme: registry.SigECDSAP256SHA384DER,
+			KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+			PublicKey:       fill(0x04, 65),
+		},
+		ValidFromUnix:  10,
+		ValidUntilUnix: 30,
+		KeyStatus:      registry.AuthorityActive,
+		UsageFlags:     registry.UsageMaySignDirectoryConsensus,
+	}
+	required := registry.UsageMaySignDirectoryConsensus | registry.UsageMayRotateDirectoryAuthority
+	if err := key.Validate(20, required); err == nil {
+		t.Fatalf("authority key with only one requested usage bit accepted")
+	}
+	key.UsageFlags |= registry.UsageMayRotateDirectoryAuthority
+	if err := key.Validate(20, required); err != nil {
+		t.Fatalf("authority key with all requested usage bits rejected: %v", err)
+	}
+}
+
 func TestValidateExtensionsRejectsUnknownCritical(t *testing.T) {
 	known := map[uint64]bool{0x7001: true}
 	if err := ValidateExtensions([]Extension{{ExtensionType: 0x7001, Critical: true}}, known); err != nil {

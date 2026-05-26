@@ -104,7 +104,7 @@ func (r AuthorityKeyRecord) Validate(now uint64, requiredUsage uint32) error {
 	if r.UsageFlags&^registry.UsageAllKnownAuthority != 0 {
 		return fmt.Errorf("protocol: authority usage has reserved bits set")
 	}
-	if requiredUsage != 0 && r.UsageFlags&requiredUsage == 0 {
+	if requiredUsage != 0 && r.UsageFlags&requiredUsage != requiredUsage {
 		return fmt.Errorf("protocol: authority key lacks required usage 0x%x", requiredUsage)
 	}
 	if err := r.PublicKey.ValidateCompatibility(); err != nil {

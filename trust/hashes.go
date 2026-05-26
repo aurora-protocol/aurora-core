@@ -58,6 +58,10 @@ func LocateAuthorityKey(keys []protocol.AuthorityKeyRecord, entry protocol.Signa
 }
 
 func VerifyDirectoryConsensusSignatures(c protocol.DirectoryConsensus, keys []protocol.AuthorityKeyRecord, now uint64, minValidDistinctAuthorities int) error {
+	return verifyDirectoryConsensusSignaturesWithUsage(c, keys, now, minValidDistinctAuthorities, registry.UsageMaySignDirectoryConsensus)
+}
+
+func verifyDirectoryConsensusSignaturesWithUsage(c protocol.DirectoryConsensus, keys []protocol.AuthorityKeyRecord, now uint64, minValidDistinctAuthorities int, requiredUsage uint32) error {
 	if minValidDistinctAuthorities <= 0 {
 		minValidDistinctAuthorities = 1
 	}
@@ -66,7 +70,7 @@ func VerifyDirectoryConsensusSignatures(c protocol.DirectoryConsensus, keys []pr
 	}
 	validAuthorities := make(map[string]struct{}, len(c.AuthoritySignatures))
 	for _, entry := range c.AuthoritySignatures {
-		key, err := LocateAuthorityKey(keys, entry, now, registry.UsageMaySignDirectoryConsensus)
+		key, err := LocateAuthorityKey(keys, entry, now, requiredUsage)
 		if err != nil {
 			return err
 		}
@@ -83,6 +87,61 @@ func VerifyDirectoryConsensusSignatures(c protocol.DirectoryConsensus, keys []pr
 		return fmt.Errorf("trust: directory consensus has %d valid authority signatures, want %d", len(validAuthorities), minValidDistinctAuthorities)
 	}
 	return nil
+}
+
+type AuthorityKeyRotationInput struct {
+	PreviousKeys                  []protocol.AuthorityKeyRecord
+	NextKeys                      []protocol.AuthorityKeyRecord
+	NextConsensus                 protocol.DirectoryConsensus
+	NowUnix                       uint64
+	MinValidDistinctAuthorities   int
+	PinnedBootstrapRootAuthorized bool
+}
+
+func ValidateAuthorityKeyRotation(in AuthorityKeyRotationInput) error {
+	if len(in.NextKeys) == 0 {
+		return fmt.Errorf("trust: authority rotation produced empty next key set")
+	}
+	for _, key := range in.NextKeys {
+		if err := key.Validate(in.NowUnix, 0); err != nil {
+			return fmt.Errorf("trust: next authority key invalid: %w", err)
+		}
+	}
+	if in.PinnedBootstrapRootAuthorized {
+		return nil
+	}
+	requiredUsage := registry.UsageMaySignDirectoryConsensus | registry.UsageMayRotateDirectoryAuthority
+	if err := verifyDirectoryConsensusSignaturesWithUsage(in.NextConsensus, in.PreviousKeys, in.NowUnix, in.MinValidDistinctAuthorities, requiredUsage); err != nil {
+		return fmt.Errorf("trust: authority rotation lacks previous quorum path: %w", err)
+	}
+	for _, previous := range currentPreviousDirectoryKeys(in.PreviousKeys, in.NowUnix) {
+		if !authorityKeySetContains(in.NextKeys, previous) {
+			return fmt.Errorf("trust: authority rotation removed previous key without pinned root authorization")
+		}
+	}
+	return nil
+}
+
+func currentPreviousDirectoryKeys(keys []protocol.AuthorityKeyRecord, now uint64) []protocol.AuthorityKeyRecord {
+	out := make([]protocol.AuthorityKeyRecord, 0, len(keys))
+	for _, key := range keys {
+		if err := key.Validate(now, registry.UsageMaySignDirectoryConsensus); err == nil {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+func authorityKeySetContains(keys []protocol.AuthorityKeyRecord, want protocol.AuthorityKeyRecord) bool {
+	for _, key := range keys {
+		if bytes.Equal(key.AuthorityID, want.AuthorityID) &&
+			bytes.Equal(key.AuthorityKeyID, want.AuthorityKeyID) &&
+			key.PublicKey.SignatureScheme == want.PublicKey.SignatureScheme &&
+			key.PublicKey.KeyEncoding == want.PublicKey.KeyEncoding {
+			return true
+		}
+	}
+	return false
 }
 
 func RelayDescriptorHash(d protocol.RelayDescriptor) ([]byte, error) {

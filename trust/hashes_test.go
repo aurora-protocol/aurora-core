@@ -144,6 +144,63 @@ func TestVerifyDirectoryConsensusSignaturesRequiresDistinctAuthoritiesForThresho
 	}
 }
 
+func TestValidateAuthorityKeyRotationRequiresOverlapUnlessPinned(t *testing.T) {
+	oldPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldKey := authorityKeyForECDSA(rb(0xa0, 16), rb(0x01, 16), oldPriv, registry.AuthorityActive, registry.UsageMaySignDirectoryConsensus|registry.UsageMayRotateDirectoryAuthority)
+	newKey := authorityKeyForECDSA(rb(0xa1, 16), rb(0x02, 16), newPriv, registry.AuthorityActive, registry.UsageMaySignDirectoryConsensus|registry.UsageMayRotateDirectoryAuthority)
+
+	next := directoryConsensusForSignatureTest(protocol.SignatureEntry{
+		AuthorityID:     oldKey.AuthorityID,
+		AuthorityKeyID:  oldKey.AuthorityKeyID,
+		SignatureScheme: oldKey.PublicKey.SignatureScheme,
+		KeyEncoding:     oldKey.PublicKey.KeyEncoding,
+	})
+	next.Epoch = 2
+	next.AuthoritySignatures[0].Signature = signDirectoryEntry(t, next, next.AuthoritySignatures[0], oldPriv)
+
+	retiringOld := oldKey
+	retiringOld.KeyStatus = registry.AuthorityRetiringVerifyOnly
+	if err := ValidateAuthorityKeyRotation(AuthorityKeyRotationInput{
+		PreviousKeys:                  []protocol.AuthorityKeyRecord{oldKey},
+		NextKeys:                      []protocol.AuthorityKeyRecord{retiringOld, newKey},
+		NextConsensus:                 next,
+		NowUnix:                       20,
+		MinValidDistinctAuthorities:   1,
+		PinnedBootstrapRootAuthorized: false,
+	}); err != nil {
+		t.Fatalf("overlapping authority rotation rejected: %v", err)
+	}
+
+	if err := ValidateAuthorityKeyRotation(AuthorityKeyRotationInput{
+		PreviousKeys:                  []protocol.AuthorityKeyRecord{oldKey},
+		NextKeys:                      []protocol.AuthorityKeyRecord{newKey},
+		NextConsensus:                 next,
+		NowUnix:                       20,
+		MinValidDistinctAuthorities:   1,
+		PinnedBootstrapRootAuthorized: false,
+	}); err == nil {
+		t.Fatalf("same-transition old-key removal without pinned root accepted")
+	}
+
+	if err := ValidateAuthorityKeyRotation(AuthorityKeyRotationInput{
+		PreviousKeys:                  []protocol.AuthorityKeyRecord{oldKey},
+		NextKeys:                      []protocol.AuthorityKeyRecord{newKey},
+		NextConsensus:                 next,
+		NowUnix:                       20,
+		MinValidDistinctAuthorities:   1,
+		PinnedBootstrapRootAuthorized: true,
+	}); err != nil {
+		t.Fatalf("pinned-root-authorized old-key removal rejected: %v", err)
+	}
+}
+
 func TestRelayDescriptorHashIgnoresSignatureBytes(t *testing.T) {
 	d := protocol.RelayDescriptor{
 		DescriptorVersion:            registry.Version20,
@@ -175,6 +232,35 @@ func TestRelayDescriptorHashIgnoresSignatureBytes(t *testing.T) {
 	if !bytes.Equal(h1, h2) {
 		t.Fatalf("descriptor hash included signature bytes")
 	}
+}
+
+func authorityKeyForECDSA(authorityID, keyID []byte, priv *ecdsa.PrivateKey, status uint8, usage uint32) protocol.AuthorityKeyRecord {
+	return protocol.AuthorityKeyRecord{
+		AuthorityID:    authorityID,
+		AuthorityKeyID: keyID,
+		PublicKey: protocol.PublicKeyRecord{
+			SignatureScheme: registry.SigECDSAP256SHA384DER,
+			KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+			PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+		},
+		ValidFromUnix:  10,
+		ValidUntilUnix: 30,
+		KeyStatus:      status,
+		UsageFlags:     usage,
+	}
+}
+
+func signDirectoryEntry(t *testing.T, c protocol.DirectoryConsensus, entry protocol.SignatureEntry, priv *ecdsa.PrivateKey) []byte {
+	t.Helper()
+	input, err := DirectoryConsensusSignatureInput(c, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sig
 }
 
 func directoryConsensusForSignatureTest(entry protocol.SignatureEntry) protocol.DirectoryConsensus {

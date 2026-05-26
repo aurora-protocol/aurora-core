@@ -2,6 +2,9 @@ package trust
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"testing"
 
 	"github.com/aurora-protocol/aurora-core/protocol"
@@ -59,6 +62,88 @@ func TestDirectoryConsensusHashIgnoresAuthoritySignatureBytes(t *testing.T) {
 	}
 }
 
+func TestVerifyDirectoryConsensusSignaturesAcceptsValidECDSAAuthority(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := protocol.SignatureEntry{
+		AuthorityID:     rb(0xaa, 16),
+		AuthorityKeyID:  rb(0xbb, 16),
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+	}
+	c := directoryConsensusForSignatureTest(entry)
+	input, err := DirectoryConsensusSignatureInput(c, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.Signature, err = ecdsa.SignASN1(rand.Reader, priv, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.AuthoritySignatures = []protocol.SignatureEntry{entry}
+	keys := []protocol.AuthorityKeyRecord{{
+		AuthorityID:    entry.AuthorityID,
+		AuthorityKeyID: entry.AuthorityKeyID,
+		PublicKey: protocol.PublicKeyRecord{
+			SignatureScheme: entry.SignatureScheme,
+			KeyEncoding:     entry.KeyEncoding,
+			PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+		},
+		ValidFromUnix:  10,
+		ValidUntilUnix: 30,
+		KeyStatus:      registry.AuthorityActive,
+		UsageFlags:     registry.UsageMaySignDirectoryConsensus,
+	}}
+	if err := VerifyDirectoryConsensusSignatures(c, keys, 20, 1); err != nil {
+		t.Fatalf("valid directory consensus signature rejected: %v", err)
+	}
+	c.RelayDescriptorRoot = rb(0xee, 48)
+	if err := VerifyDirectoryConsensusSignatures(c, keys, 20, 1); err == nil {
+		t.Fatalf("tampered directory consensus accepted")
+	}
+}
+
+func TestVerifyDirectoryConsensusSignaturesRequiresDistinctAuthoritiesForThreshold(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := protocol.SignatureEntry{
+		AuthorityID:     rb(0xaa, 16),
+		AuthorityKeyID:  rb(0xbb, 16),
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+	}
+	c := directoryConsensusForSignatureTest(entry)
+	input, err := DirectoryConsensusSignatureInput(c, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.Signature, err = ecdsa.SignASN1(rand.Reader, priv, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.AuthoritySignatures = []protocol.SignatureEntry{entry, entry}
+	keys := []protocol.AuthorityKeyRecord{{
+		AuthorityID:    entry.AuthorityID,
+		AuthorityKeyID: entry.AuthorityKeyID,
+		PublicKey: protocol.PublicKeyRecord{
+			SignatureScheme: entry.SignatureScheme,
+			KeyEncoding:     entry.KeyEncoding,
+			PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+		},
+		ValidFromUnix:  10,
+		ValidUntilUnix: 30,
+		KeyStatus:      registry.AuthorityActive,
+		UsageFlags:     registry.UsageMaySignDirectoryConsensus,
+	}}
+	if err := VerifyDirectoryConsensusSignatures(c, keys, 20, 2); err == nil {
+		t.Fatalf("duplicate authority signatures satisfied threshold")
+	}
+}
+
 func TestRelayDescriptorHashIgnoresSignatureBytes(t *testing.T) {
 	d := protocol.RelayDescriptor{
 		DescriptorVersion:            registry.Version20,
@@ -89,6 +174,23 @@ func TestRelayDescriptorHashIgnoresSignatureBytes(t *testing.T) {
 	}
 	if !bytes.Equal(h1, h2) {
 		t.Fatalf("descriptor hash included signature bytes")
+	}
+}
+
+func directoryConsensusForSignatureTest(entry protocol.SignatureEntry) protocol.DirectoryConsensus {
+	return protocol.DirectoryConsensus{
+		Version:                 registry.Version20,
+		Epoch:                   1,
+		ValidFromUnix:           10,
+		ValidUntilUnix:          30,
+		PreviousConsensusHash:   rb(0, 48),
+		RelayDescriptorRoot:     rb(1, 48),
+		CoverTemplateFamilyRoot: rb(2, 48),
+		RevocationRoot:          rb(3, 48),
+		PolicyRoot:              rb(4, 48),
+		BridgeBucketCommitment:  rb(5, 48),
+		IssuerMetadataRoot:      rb(6, 48),
+		AuthoritySignatures:     []protocol.SignatureEntry{entry},
 	}
 }
 

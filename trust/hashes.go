@@ -57,6 +57,34 @@ func LocateAuthorityKey(keys []protocol.AuthorityKeyRecord, entry protocol.Signa
 	return matches[0], nil
 }
 
+func VerifyDirectoryConsensusSignatures(c protocol.DirectoryConsensus, keys []protocol.AuthorityKeyRecord, now uint64, minValidDistinctAuthorities int) error {
+	if minValidDistinctAuthorities <= 0 {
+		minValidDistinctAuthorities = 1
+	}
+	if len(c.AuthoritySignatures) == 0 {
+		return fmt.Errorf("trust: directory consensus has no authority signatures")
+	}
+	validAuthorities := make(map[string]struct{}, len(c.AuthoritySignatures))
+	for _, entry := range c.AuthoritySignatures {
+		key, err := LocateAuthorityKey(keys, entry, now, registry.UsageMaySignDirectoryConsensus)
+		if err != nil {
+			return err
+		}
+		input, err := DirectoryConsensusSignatureInput(c, entry)
+		if err != nil {
+			return err
+		}
+		if err := auroracrypto.VerifySignature(entry.SignatureScheme, entry.KeyEncoding, key.PublicKey.PublicKey, input, entry.Signature); err != nil {
+			return err
+		}
+		validAuthorities[string(entry.AuthorityID)] = struct{}{}
+	}
+	if len(validAuthorities) < minValidDistinctAuthorities {
+		return fmt.Errorf("trust: directory consensus has %d valid authority signatures, want %d", len(validAuthorities), minValidDistinctAuthorities)
+	}
+	return nil
+}
+
 func RelayDescriptorHash(d protocol.RelayDescriptor) ([]byte, error) {
 	encoded, err := protocol.Encode(d.Unsigned())
 	if err != nil {

@@ -42,6 +42,28 @@ func (p CoverPrelude0) EncodeTo(e *wire.Encoder) {
 	EncodeExtensions(e, p.Extensions)
 }
 
+func DecodeCoverPrelude0(r *wire.Reader) CoverPrelude0 {
+	return CoverPrelude0{
+		MsgType:                     r.ReadVarint(),
+		Version:                     r.ReadVarint(),
+		SuiteOffers:                 r.ReadVarintVector(),
+		ClientNonce:                 r.ReadOpaqueFixed(32),
+		ClientClassicalEphPub:       r.ReadOpaque16(),
+		ClientMLKEMEncapsulationKey: r.ReadOpaque16(),
+		RelayDescriptorHash:         r.ReadPreHash(),
+		CoverTemplateHash:           r.ReadPreHash(),
+		RequestClassID:              r.ReadVarint(),
+		HintIssuerID:                r.ReadOpaqueFixed(16),
+		RelayBucketID:               r.ReadOpaqueFixed(16),
+		HintEpochID:                 r.ReadUint64(),
+		HintSelector:                r.ReadOpaqueFixed(16),
+		AccessHint:                  r.ReadOpaqueFixed(16),
+		ClientCoverRandom:           r.ReadOpaqueFixed(32),
+		Padding:                     r.ReadOpaque16(),
+		Extensions:                  DecodeExtensions(r),
+	}
+}
+
 type CoverPrelude1 struct {
 	MsgType                         uint64
 	Version                         uint64
@@ -78,6 +100,26 @@ func (p CoverPrelude1) EncodeTo(e *wire.Encoder) {
 	EncodeExtensions(e, p.Extensions)
 }
 
+func DecodeCoverPrelude1(r *wire.Reader) CoverPrelude1 {
+	return CoverPrelude1{
+		MsgType:                         r.ReadVarint(),
+		Version:                         r.ReadVarint(),
+		SelectedSuite:                   r.ReadVarint(),
+		RelayDescriptorHash:             r.ReadPreHash(),
+		CoverTemplateHash:               r.ReadPreHash(),
+		RelayEpochID:                    r.ReadUint64(),
+		ServerNonce:                     r.ReadOpaqueFixed(32),
+		ServerClassicalEphPub:           r.ReadOpaque16(),
+		ServerMLKEMCiphertextToClient:   r.ReadOpaque16(),
+		SelectedCoverProfileID:          r.ReadOpaqueFixed(16),
+		SelectedBootstrapEnvelopeID:     r.ReadOpaqueFixed(16),
+		ServerPreludeSignatureClassical: r.ReadOpaque16(),
+		ServerPreludeSignaturePQ:        r.ReadOpaque16(),
+		ResponsePadding:                 r.ReadOpaque16(),
+		Extensions:                      DecodeExtensions(r),
+	}
+}
+
 func (p CoverPrelude1) Unsigned() CoverPrelude1 {
 	p.ServerPreludeSignatureClassical = nil
 	p.ServerPreludeSignaturePQ = nil
@@ -108,6 +150,20 @@ func (c CoverCapsule1Plain) EncodeTo(e *wire.Encoder) {
 	EncodeExtensions(e, c.Extensions)
 }
 
+func DecodeCoverCapsule1Plain(r *wire.Reader) CoverCapsule1Plain {
+	return CoverCapsule1Plain{
+		MsgType:              r.ReadVarint(),
+		RouteInstanceID:      r.ReadVarint(),
+		AdmissionProof:       DecodeAdmissionProof(r),
+		ReplayProof:          DecodeReplayProof(r),
+		PolicyOffer:          DecodePolicyOffer(r),
+		ClientTransportHints: DecodeClientTransportHints(r),
+		ClientFinished:       r.ReadOpaque16(),
+		Padding:              r.ReadOpaque16(),
+		Extensions:           DecodeExtensions(r),
+	}
+}
+
 func (c CoverCapsule1Plain) UnsignedClientFinished() CoverCapsule1Plain {
 	c.ClientFinished = nil
 	return c
@@ -129,4 +185,15 @@ func (c CoverCapsule2Plain) EncodeTo(e *wire.Encoder) {
 	e.WriteOpaque16(c.ServerFinished)
 	e.WriteOpaque16(c.Padding)
 	EncodeExtensions(e, c.Extensions)
+}
+
+func DecodeCoverCapsule2Plain(r *wire.Reader) CoverCapsule2Plain {
+	return CoverCapsule2Plain{
+		MsgType:         r.ReadVarint(),
+		RouteInstanceID: r.ReadVarint(),
+		PolicyAccept:    DecodePolicyAccept(r),
+		ServerFinished:  r.ReadOpaque16(),
+		Padding:         r.ReadOpaque16(),
+		Extensions:      DecodeExtensions(r),
+	}
 }

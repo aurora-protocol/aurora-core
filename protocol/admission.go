@@ -139,6 +139,20 @@ func (h ClientTransportHints) EncodeTo(e *wire.Encoder) {
 	EncodeExtensions(e, h.Extensions)
 }
 
+func DecodeClientTransportHints(r *wire.Reader) ClientTransportHints {
+	return ClientTransportHints{
+		HintFlags:              r.ReadUint16(),
+		ObservedPathMTUBucket:  r.ReadUint8(),
+		RecentQUICResult:       r.ReadUint8(),
+		RecentH2Result:         r.ReadUint8(),
+		CongestionClass:        r.ReadUint8(),
+		MaxDatagramPayloadHint: r.ReadUint16(),
+		NetworkCohortHint:      r.ReadOpaque8(),
+		Padding:                r.ReadOpaque16(),
+		Extensions:             DecodeExtensions(r),
+	}
+}
+
 func (h ClientTransportHints) ValidatePrototype() error {
 	if h.HintFlags != 0 {
 		return fmt.Errorf("protocol: client transport hint_flags must be zero")
@@ -177,6 +191,22 @@ func (p PolicyOffer) EncodeTo(e *wire.Encoder) {
 	EncodeExtensions(e, p.Extensions)
 }
 
+func DecodePolicyOffer(r *wire.Reader) PolicyOffer {
+	return PolicyOffer{
+		OfferedVersions:         r.ReadVarintVector(),
+		OfferedSuites:           r.ReadVarintVector(),
+		OfferedMethods:          r.ReadVarintVector(),
+		MinimumPolicyID:         r.ReadVarint(),
+		RequestedPolicyID:       r.ReadVarint(),
+		RequestedRouteModeID:    r.ReadVarint(),
+		RequestedShapeID:        r.ReadVarint(),
+		TunnelPersonalityOffers: r.ReadVarintVector(),
+		FlowCapabilities:        r.ReadUint64(),
+		MaxPaddingOverheadPct:   r.ReadUint8(),
+		Extensions:              DecodeExtensions(r),
+	}
+}
+
 type VirtualAddressAssignment struct {
 	AddressFamily uint8
 	Address       []byte
@@ -192,6 +222,20 @@ func (v VirtualAddressAssignment) EncodeTo(e *wire.Encoder) {
 	for _, resolver := range v.DNSResolvers {
 		e.WriteOpaque16(resolver)
 	}
+}
+
+func DecodeVirtualAddressAssignment(r *wire.Reader) VirtualAddressAssignment {
+	out := VirtualAddressAssignment{
+		AddressFamily: r.ReadUint8(),
+		Address:       r.ReadOpaque16(),
+		PrefixLength:  r.ReadUint8(),
+	}
+	count := r.ReadVarint()
+	out.DNSResolvers = make([][]byte, 0, count)
+	for i := uint64(0); i < count; i++ {
+		out.DNSResolvers = append(out.DNSResolvers, r.ReadOpaque16())
+	}
+	return out
 }
 
 type PolicyAccept struct {
@@ -227,4 +271,25 @@ func (p PolicyAccept) EncodeTo(e *wire.Encoder) {
 		p.VirtualAddressAssignment.EncodeTo(e)
 	}
 	EncodeExtensions(e, p.Extensions)
+}
+
+func DecodePolicyAccept(r *wire.Reader) PolicyAccept {
+	out := PolicyAccept{
+		SelectedVersion:           r.ReadVarint(),
+		SelectedSuite:             r.ReadVarint(),
+		SelectedMethod:            r.ReadVarint(),
+		SelectedPolicy:            r.ReadVarint(),
+		SelectedRouteModeID:       r.ReadVarint(),
+		SelectedShape:             r.ReadVarint(),
+		SelectedTunnelPersonality: r.ReadVarint(),
+		FallbackMethods:           r.ReadVarintVector(),
+		RetryPolicyID:             r.ReadVarint(),
+		PathValidationPolicyID:    r.ReadVarint(),
+	}
+	if r.ReadBool() {
+		assignment := DecodeVirtualAddressAssignment(r)
+		out.VirtualAddressAssignment = &assignment
+	}
+	out.Extensions = DecodeExtensions(r)
+	return out
 }

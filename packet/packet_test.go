@@ -133,6 +133,109 @@ func TestReceiverRejectsPacketsOutsideDrainWindow(t *testing.T) {
 	}
 }
 
+func TestSplit2OnionEntrySeesOnlyOpaqueForwardFrame(t *testing.T) {
+	flow := protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           100,
+		FlowKind:         0x01,
+		TargetKind:       0x03,
+		TargetHost:       []byte("secret.example"),
+		TargetPort:       443,
+		NameBindingID:    bytesOf(0x11, 16),
+		DNSAnswerSetHash: bytesOf(0x22, 48),
+	}
+	payload, err := protocol.Encode(flow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitBlock := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{
+		FrameType: registry.FrameFlowOpen,
+		FlowID:    100,
+		Payload:   payload,
+	}}}
+	entry := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 7,
+		HopLayer:        0,
+		Direction:       0,
+		Key:             bytesOf(0x31, 32),
+		StaticIV:        bytesOf(0x32, 12),
+	}
+	exit := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 7,
+		HopLayer:        1,
+		Direction:       0,
+		Key:             bytesOf(0x41, 32),
+		StaticIV:        bytesOf(0x42, 12),
+	}
+	outer, err := SealSplit2Onion(exitBlock, entry, exit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entryBlock, err := entry.Open(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entryBlock.Frames) != 1 || entryBlock.Frames[0].FrameType != registry.FrameRouteForward {
+		t.Fatalf("entry did not receive a single route-forward frame: %+v", entryBlock)
+	}
+	if bytes.Contains(entryBlock.Frames[0].Payload, []byte("secret.example")) {
+		t.Fatalf("entry-visible route-forward payload leaked exit flow metadata")
+	}
+	if _, err := protocol.DecodeFrameBlock(entryBlock.Frames[0].Payload); err == nil {
+		t.Fatalf("entry route-forward payload decoded as plaintext frame block")
+	}
+	inner, err := DecodeForwardedPacket(entryBlock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := exit.Open(inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opened.Frames) != 1 || opened.Frames[0].FlowID != 100 {
+		t.Fatalf("exit did not recover original frame block: %+v", opened)
+	}
+}
+
+func TestSplit2OnionMaintainsIndependentHopCounters(t *testing.T) {
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
+	entry := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 8, HopLayer: 0, Key: bytesOf(0x51, 32), StaticIV: bytesOf(0x52, 12)}
+	exit := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 8, HopLayer: 1, Key: bytesOf(0x61, 32), StaticIV: bytesOf(0x62, 12)}
+	if _, err := SealSplit2Onion(block, entry, exit); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SealSplit2Onion(block, entry, exit); err != nil {
+		t.Fatal(err)
+	}
+	if entry.NextPacket != 2 || exit.NextPacket != 2 {
+		t.Fatalf("entry/exit counters not independent: entry=%d exit=%d", entry.NextPacket, exit.NextPacket)
+	}
+}
+
+func TestSplit2OnionWrongInnerHopLayerFails(t *testing.T) {
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
+	entry := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 9, HopLayer: 0, Key: bytesOf(0x71, 32), StaticIV: bytesOf(0x72, 12)}
+	exit := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 9, HopLayer: 1, Key: bytesOf(0x81, 32), StaticIV: bytesOf(0x82, 12)}
+	outer, err := SealSplit2Onion(block, entry, exit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entryBlock, err := entry.Open(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner, err := DecodeForwardedPacket(entryBlock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner.HopLayer = 2
+	if _, err := exit.Open(inner); err == nil {
+		t.Fatalf("exit accepted forwarded packet with wrong hop layer")
+	}
+}
+
 func TestFlowManagementMismatchFailsBeforeMutation(t *testing.T) {
 	flow := protocol.FlowOpen{
 		FlowOpenVersion:  registry.Version20,

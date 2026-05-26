@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"crypto/sha256"
+	"reflect"
 	"testing"
 
 	"github.com/aurora-protocol/aurora-core/registry"
@@ -103,5 +104,110 @@ func TestLabStaticTokenKeyRecordRequiresEmptyKeyMaterial(t *testing.T) {
 	}
 	if err := key.Validate(20); err == nil {
 		t.Fatalf("lab static token key material accepted")
+	}
+}
+
+func TestIssuerMetadataAndVerifierPayloadsRoundTrip(t *testing.T) {
+	tokenKey := fill(0x31, 64)
+	tokenKeyID := sha256.Sum256(tokenKey)
+	metadata := IssuerMetadata{
+		MetadataVersion:     registry.Version20,
+		IssuerID:            fill(0x32, 16),
+		ValidFromUnix:       100,
+		ValidUntilUnix:      200,
+		IssuerName:          []byte("issuer"),
+		SupportedProofTypes: []uint64{registry.ProofBlindRSA2048, registry.ProofVOPRFP384SHA384},
+		TokenKeyMappings: []IssuerTokenKeyRecord{{
+			ProofType:  registry.ProofBlindRSA2048,
+			TokenKeyID: tokenKeyID[:],
+			TokenVerificationKey: TokenVerificationKeyRecord{
+				TokenVerificationKeyScheme: registry.TokenKeyBlindRSA2048,
+				TokenVerificationKey:       tokenKey,
+			},
+			ValidFromUnix:  100,
+			ValidUntilUnix: 200,
+			KeyStatus:      registry.IssuerStatusActive,
+		}},
+		OriginInfoPolicies: []OriginInfoPolicy{{
+			PolicyID:             1,
+			OriginInfo:           []byte("origin"),
+			AllowEmptyOriginInfo: true,
+			ValidFromUnix:        100,
+			ValidUntilUnix:       200,
+		}},
+		RelayBucketScopes: []RelayBucketScope{{
+			RelayBucketID:         fill(0x33, 16),
+			TokenScopeID:          fill(0x34, 16),
+			AllowedOriginPolicyID: []uint64{1},
+			ValidFromUnix:         100,
+			ValidUntilUnix:        200,
+		}},
+		AuxiliaryBindingPolicies: []AuxiliaryBindingPolicy{{
+			ProofType:            registry.ProofBlindRSA2048,
+			BindingProofRequired: true,
+			MaxBindingProofLen:   128,
+			BindingPolicyID:      9,
+		}},
+		VerifierServices:     []IssuerVerifierServiceRecord{verifierServiceFixture()},
+		MetadataSigningKeyID: fill(0x35, 16),
+		SignatureScheme:      registry.SigECDSAP256SHA384DER,
+		KeyEncoding:          registry.KeyP256SEC1Uncompressed,
+		MetadataSignature:    []byte("metadata-signature"),
+		Extensions:           []Extension{{ExtensionType: 0x7010, Body: []byte("metadata")}},
+	}
+	encodedMetadata, err := Encode(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DecodeIssuerMetadata(bytesReader(encodedMetadata)); !reflect.DeepEqual(got, metadata) {
+		t.Fatalf("IssuerMetadata round trip mismatch:\n got=%+v\nwant=%+v", got, metadata)
+	}
+
+	request := IssuerVerifierRequest{
+		RequestVersion:            registry.Version20,
+		ServiceID:                 fill(0x36, 16),
+		IssuerID:                  fill(0x37, 16),
+		IssuerMetadataHash:        fill(0x38, 48),
+		RelayDescriptorHash:       fill(0x39, 48),
+		RelayBucketID:             fill(0x3a, 16),
+		RouteInstanceID:           77,
+		HopIndex:                  2,
+		ProofType:                 registry.ProofVOPRFP384SHA384,
+		TokenKeyID:                fill(0x3b, 32),
+		TokenNonce:                fill(0x3c, 32),
+		ChallengeDigest:           fill(0x3d, 32),
+		AuthenticatorInputHash:    fill(0x3e, 48),
+		TokenAuthenticator:        []byte("token-authenticator"),
+		TokenSpentKey:             fill(0x3f, 48),
+		ReplayEpochID:             88,
+		ReplayEpochValidUntilUnix: 300,
+		RequestNonce:              fill(0x40, 32),
+		RequestTimeUnix:           150,
+	}
+	encodedRequest, err := Encode(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DecodeIssuerVerifierRequest(bytesReader(encodedRequest)); !reflect.DeepEqual(got, request) {
+		t.Fatalf("IssuerVerifierRequest round trip mismatch:\n got=%+v\nwant=%+v", got, request)
+	}
+
+	response := IssuerVerifierResponse{
+		ResponseVersion:  registry.Version20,
+		ServiceID:        fill(0x41, 16),
+		RequestHash:      fill(0x42, 48),
+		Decision:         registry.VerifierDecisionAccept,
+		DecisionDetail:   registry.VerifierDecisionRejectReplayOrSpent,
+		TokenSpentKey:    fill(0x43, 48),
+		ValidUntilUnix:   180,
+		ResponseNonce:    fill(0x44, 32),
+		ServiceSignature: []byte("service-signature"),
+	}
+	encodedResponse, err := Encode(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DecodeIssuerVerifierResponse(bytesReader(encodedResponse)); !reflect.DeepEqual(got, response) {
+		t.Fatalf("IssuerVerifierResponse round trip mismatch:\n got=%+v\nwant=%+v", got, response)
 	}
 }

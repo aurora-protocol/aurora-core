@@ -200,15 +200,7 @@ func DecodeIssuerVerifierServiceRecord(r *wire.Reader) IssuerVerifierServiceReco
 		ServiceID:         r.ReadOpaqueFixed(16),
 		ServiceKind:       r.ReadVarint(),
 		ServiceProtocolID: r.ReadVarint(),
-		ServiceLocator: RoutingRecord{
-			RoutingRecordID:   r.ReadOpaque16(),
-			TransportFamilyID: r.ReadVarint(),
-			LocatorType:       r.ReadVarint(),
-			LocatorBody:       r.ReadOpaque16(),
-			Priority:          r.ReadVarint(),
-			NotBeforeUnix:     r.ReadUint64(),
-			NotAfterUnix:      r.ReadUint64(),
-		},
+		ServiceLocator:    DecodeRoutingRecord(r),
 		ServiceAuthKey:    DecodePublicKeyRecord(r),
 		AllowedProofTypes: r.ReadVarintVector(),
 	}
@@ -313,6 +305,48 @@ func (m IssuerMetadata) EncodeTo(e *wire.Encoder) {
 	EncodeExtensions(e, m.Extensions)
 }
 
+func DecodeIssuerMetadata(r *wire.Reader) IssuerMetadata {
+	out := IssuerMetadata{
+		MetadataVersion:     r.ReadVarint(),
+		IssuerID:            r.ReadOpaqueFixed(16),
+		ValidFromUnix:       r.ReadUint64(),
+		ValidUntilUnix:      r.ReadUint64(),
+		IssuerName:          r.ReadOpaque16(),
+		SupportedProofTypes: r.ReadVarintVector(),
+	}
+	tokenKeys := r.ReadVarint()
+	out.TokenKeyMappings = make([]IssuerTokenKeyRecord, 0, tokenKeys)
+	for i := uint64(0); i < tokenKeys; i++ {
+		out.TokenKeyMappings = append(out.TokenKeyMappings, DecodeIssuerTokenKeyRecord(r))
+	}
+	originPolicies := r.ReadVarint()
+	out.OriginInfoPolicies = make([]OriginInfoPolicy, 0, originPolicies)
+	for i := uint64(0); i < originPolicies; i++ {
+		out.OriginInfoPolicies = append(out.OriginInfoPolicies, DecodeOriginInfoPolicy(r))
+	}
+	relayScopes := r.ReadVarint()
+	out.RelayBucketScopes = make([]RelayBucketScope, 0, relayScopes)
+	for i := uint64(0); i < relayScopes; i++ {
+		out.RelayBucketScopes = append(out.RelayBucketScopes, DecodeRelayBucketScope(r))
+	}
+	bindingPolicies := r.ReadVarint()
+	out.AuxiliaryBindingPolicies = make([]AuxiliaryBindingPolicy, 0, bindingPolicies)
+	for i := uint64(0); i < bindingPolicies; i++ {
+		out.AuxiliaryBindingPolicies = append(out.AuxiliaryBindingPolicies, DecodeAuxiliaryBindingPolicy(r))
+	}
+	services := r.ReadVarint()
+	out.VerifierServices = make([]IssuerVerifierServiceRecord, 0, services)
+	for i := uint64(0); i < services; i++ {
+		out.VerifierServices = append(out.VerifierServices, DecodeIssuerVerifierServiceRecord(r))
+	}
+	out.MetadataSigningKeyID = r.ReadOpaqueFixed(16)
+	out.SignatureScheme = r.ReadVarint()
+	out.KeyEncoding = r.ReadVarint()
+	out.MetadataSignature = r.ReadOpaque16()
+	out.Extensions = DecodeExtensions(r)
+	return out
+}
+
 func (m IssuerMetadata) Unsigned() IssuerMetadata {
 	m.MetadataSignature = nil
 	return m
@@ -362,6 +396,30 @@ func (r IssuerVerifierRequest) EncodeTo(e *wire.Encoder) {
 	e.WriteUint64(r.RequestTimeUnix)
 }
 
+func DecodeIssuerVerifierRequest(r *wire.Reader) IssuerVerifierRequest {
+	return IssuerVerifierRequest{
+		RequestVersion:            r.ReadVarint(),
+		ServiceID:                 r.ReadOpaqueFixed(16),
+		IssuerID:                  r.ReadOpaqueFixed(16),
+		IssuerMetadataHash:        r.ReadPreHash(),
+		RelayDescriptorHash:       r.ReadPreHash(),
+		RelayBucketID:             r.ReadOpaqueFixed(16),
+		RouteInstanceID:           r.ReadVarint(),
+		HopIndex:                  r.ReadUint8(),
+		ProofType:                 r.ReadVarint(),
+		TokenKeyID:                r.ReadOpaqueFixed(32),
+		TokenNonce:                r.ReadOpaqueFixed(32),
+		ChallengeDigest:           r.ReadOpaqueFixed(32),
+		AuthenticatorInputHash:    r.ReadPreHash(),
+		TokenAuthenticator:        r.ReadOpaque16(),
+		TokenSpentKey:             r.ReadPreHash(),
+		ReplayEpochID:             r.ReadUint64(),
+		ReplayEpochValidUntilUnix: r.ReadUint64(),
+		RequestNonce:              r.ReadOpaqueFixed(32),
+		RequestTimeUnix:           r.ReadUint64(),
+	}
+}
+
 type IssuerVerifierResponse struct {
 	ResponseVersion  uint64
 	ServiceID        []byte
@@ -384,6 +442,20 @@ func (r IssuerVerifierResponse) EncodeTo(e *wire.Encoder) {
 	e.WriteUint64(r.ValidUntilUnix)
 	e.WriteOpaqueFixed(r.ResponseNonce, 32)
 	e.WriteOpaque16(r.ServiceSignature)
+}
+
+func DecodeIssuerVerifierResponse(r *wire.Reader) IssuerVerifierResponse {
+	return IssuerVerifierResponse{
+		ResponseVersion:  r.ReadVarint(),
+		ServiceID:        r.ReadOpaqueFixed(16),
+		RequestHash:      r.ReadPreHash(),
+		Decision:         r.ReadUint8(),
+		DecisionDetail:   r.ReadUint8(),
+		TokenSpentKey:    r.ReadPreHash(),
+		ValidUntilUnix:   r.ReadUint64(),
+		ResponseNonce:    r.ReadOpaqueFixed(32),
+		ServiceSignature: r.ReadOpaque16(),
+	}
 }
 
 func (r IssuerVerifierResponse) Unsigned() IssuerVerifierResponse {

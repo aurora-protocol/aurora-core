@@ -278,6 +278,46 @@ func TestProtectorRejectsUnknownReservedFrameType(t *testing.T) {
 	}
 }
 
+func TestProtectorRejectsFlowOpenWithUnknownCriticalExtension(t *testing.T) {
+	flow := protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           21,
+		FlowKind:         0x01,
+		TargetKind:       0x01,
+		TargetHost:       []byte{203, 0, 113, 21},
+		TargetPort:       443,
+		NameBindingID:    bytesOf(0x11, 16),
+		DNSAnswerSetHash: bytesOf(0x22, 48),
+		Extensions: []protocol.Extension{{
+			ExtensionType: 0x7002,
+			Critical:      true,
+			Body:          []byte("required"),
+		}},
+	}
+	payload, err := protocol.Encode(flow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{
+		FrameType: registry.FrameFlowOpen,
+		FlowID:    21,
+		Payload:   payload,
+	}}}
+	p := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	pkt, err := p.Seal(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Open(pkt); err == nil {
+		t.Fatalf("flow open with unknown critical extension accepted")
+	}
+}
+
 func TestKeyUpdateDerivationAndACK(t *testing.T) {
 	frame := protocol.KeyUpdate{
 		RouteInstanceID: 0x42,

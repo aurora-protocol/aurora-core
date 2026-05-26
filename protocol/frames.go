@@ -270,18 +270,28 @@ func DecodeFlowClose(r *wire.Reader) FlowClose {
 func ValidateFlowManagementFrame(frame AuroraFrame) error {
 	r := wire.NewReader(frame.Payload)
 	var payloadFlowID uint64
+	var extensions []Extension
 	switch frame.FrameType {
 	case registry.FrameFlowOpen:
-		payloadFlowID = DecodeFlowOpen(r).FlowID
+		payload := DecodeFlowOpen(r)
+		payloadFlowID = payload.FlowID
+		extensions = payload.Extensions
 	case registry.FrameUDPTargetConfirm:
-		payloadFlowID = DecodeUDPTargetConfirm(r).FlowID
+		payload := DecodeUDPTargetConfirm(r)
+		payloadFlowID = payload.FlowID
+		extensions = payload.Extensions
 	case registry.FrameFlowClose:
-		payloadFlowID = DecodeFlowClose(r).FlowID
+		payload := DecodeFlowClose(r)
+		payloadFlowID = payload.FlowID
+		extensions = payload.Extensions
 	default:
 		return nil
 	}
 	if r.Err() != nil {
 		return r.Err()
+	}
+	if err := ValidateExtensions(extensions, nil); err != nil {
+		return err
 	}
 	if payloadFlowID != frame.FlowID {
 		return fmt.Errorf("protocol: frame flow_id %d does not match payload flow_id %d", frame.FlowID, payloadFlowID)

@@ -94,6 +94,19 @@ func TestPublicKeyCompatibilityRejectsMismatches(t *testing.T) {
 	}
 }
 
+func TestValidateExtensionsRejectsUnknownCritical(t *testing.T) {
+	known := map[uint64]bool{0x7001: true}
+	if err := ValidateExtensions([]Extension{{ExtensionType: 0x7001, Critical: true}}, known); err != nil {
+		t.Fatalf("known critical extension rejected: %v", err)
+	}
+	if err := ValidateExtensions([]Extension{{ExtensionType: 0x7002, Critical: false}}, known); err != nil {
+		t.Fatalf("unknown non-critical extension rejected: %v", err)
+	}
+	if err := ValidateExtensions([]Extension{{ExtensionType: 0x7002, Critical: true}}, known); err == nil {
+		t.Fatalf("unknown critical extension accepted")
+	}
+}
+
 func assertHex(t *testing.T, name string, got []byte, wantHex string) {
 	t.Helper()
 	want := hexBytes(t, wantHex)

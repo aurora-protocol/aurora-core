@@ -1,6 +1,10 @@
 package protocol
 
-import "github.com/aurora-protocol/aurora-core/wire"
+import (
+	"fmt"
+
+	"github.com/aurora-protocol/aurora-core/wire"
+)
 
 type Extension struct {
 	ExtensionType uint64
@@ -43,6 +47,15 @@ func DecodeExtensions(r *wire.Reader) []Extension {
 		out = append(out, DecodeExtension(r))
 	}
 	return out
+}
+
+func ValidateExtensions(xs []Extension, known map[uint64]bool) error {
+	for _, x := range xs {
+		if x.Critical && !known[x.ExtensionType] {
+			return fmt.Errorf("protocol: unknown critical extension 0x%x", x.ExtensionType)
+		}
+	}
+	return nil
 }
 
 func Encode(v wire.Encodable) ([]byte, error) {

@@ -146,6 +146,7 @@ func ActiveProbeCases() []ProbeCase {
 		{Name: "wrong-suite", Kind: WrongSuite},
 		{Name: "bad-aead-tag", Kind: BadAEADTag},
 		{Name: "replayed-admission-proof", Kind: ReplayedAdmission},
+		{Name: "verifier-unavailable", Kind: VerifierUnavailable},
 		{Name: "unsupported-version", Kind: UnsupportedVersion},
 		{Name: "malformed-hybrid-share", Kind: MalformedHybridShare},
 		{Name: "unsupported-method", Kind: UnsupportedMethod},

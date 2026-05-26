@@ -97,6 +97,7 @@ func TestActiveProbeCasesCoverSpecChecklist(t *testing.T) {
 		"replayed-admission-proof":  ReplayedAdmission,
 		"unsupported-method":        UnsupportedMethod,
 		"unsupported-version":       UnsupportedVersion,
+		"verifier-unavailable":      VerifierUnavailable,
 		"malformed-hybrid-share":    MalformedHybridShare,
 		"wrong-h3-settings":         WrongH3Settings,
 		"malformed-flow-open":       MalformedFlowOpen,

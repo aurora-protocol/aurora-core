@@ -6,6 +6,7 @@ import (
 
 	"github.com/aurora-protocol/aurora-core/admission"
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
+	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	auroratrust "github.com/aurora-protocol/aurora-core/trust"
@@ -103,6 +104,30 @@ type IssuerVerifierRequestInput struct {
 	RequestTimeUnix           uint64
 	NowUnix                   uint64
 	RequestAuthImplemented    bool
+}
+
+type IssuerVerifierTransport interface {
+	ExchangeIssuerVerifier(protocol.IssuerVerifierServiceRecord, protocol.IssuerVerifierRequest) (protocol.IssuerVerifierResponse, error)
+}
+
+type IssuerVerifierServiceVerificationInput struct {
+	Request   IssuerVerifierRequestInput
+	Transport IssuerVerifierTransport
+}
+
+func VerifyIssuerVerifierService(in IssuerVerifierServiceVerificationInput) error {
+	if in.Transport == nil {
+		return failure.NewError(failure.VerifierUnavailable, "ops: missing issuer verifier transport")
+	}
+	req, _, err := BuildIssuerVerifierRequest(in.Request)
+	if err != nil {
+		return err
+	}
+	resp, err := in.Transport.ExchangeIssuerVerifier(in.Request.Service, req)
+	if err != nil {
+		return failure.NewError(failure.VerifierUnavailable, "ops: issuer verifier transport failed: %w", err)
+	}
+	return ValidateIssuerVerifierResponse(in.Request.Service, req, resp, in.Request.NowUnix)
 }
 
 func BuildIssuerVerifierRequest(in IssuerVerifierRequestInput) (protocol.IssuerVerifierRequest, []byte, error) {

@@ -6,9 +6,11 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"testing"
 
 	"github.com/aurora-protocol/aurora-core/admission"
+	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	auroratrust "github.com/aurora-protocol/aurora-core/trust"
@@ -456,6 +458,47 @@ func TestValidateIssuerVerifierResponseRejectsInvalidServiceSignature(t *testing
 	if err := ValidateIssuerVerifierResponse(service, req, resp, 150); err == nil {
 		t.Fatalf("invalid verifier service signature accepted")
 	}
+}
+
+func TestVerifyIssuerVerifierServiceMapsTransportOutageToCoverNeutralFailure(t *testing.T) {
+	service := verifierServiceRecord()
+	proof, replay, admissionContextHash, handshakeBinding := verifierProofReplay(t)
+	err := VerifyIssuerVerifierService(IssuerVerifierServiceVerificationInput{
+		Request: IssuerVerifierRequestInput{
+			Service:                   service,
+			AdmissionProof:            proof,
+			ReplayProof:               replay,
+			IssuerMetadataHash:        rb(0x30, 48),
+			RelayDescriptorHash:       rb(0x31, 48),
+			RouteInstanceID:           77,
+			HopIndex:                  1,
+			ReplayEpochValidUntilUnix: 800,
+			HandshakeBindingContext:   handshakeBinding,
+			AdmissionContextHash:      admissionContextHash,
+			ChallengeDigest:           rb(0x32, 32),
+			AuthenticatorInputHash:    rb(0x33, 48),
+			TokenSpentCache:           admission.NewMemoryReplayCache(),
+			BootstrapDedupCache:       admission.NewMemoryReplayCache(),
+			RequestNonce:              rb(0x34, 32),
+			RequestTimeUnix:           100,
+			NowUnix:                   100,
+			RequestAuthImplemented:    true,
+		},
+		Transport: outageVerifierTransport{},
+	})
+	var failureErr *failure.Error
+	if !errors.As(err, &failureErr) || failureErr.Kind != failure.VerifierUnavailable {
+		t.Fatalf("verifier transport outage error = %T %[1]v, want %v", err, failure.VerifierUnavailable)
+	}
+	if got := failure.Classify(failureErr.Kind); got.Action != failure.CoverOrigin {
+		t.Fatalf("verifier outage action = %v, want cover-origin", got.Action)
+	}
+}
+
+type outageVerifierTransport struct{}
+
+func (outageVerifierTransport) ExchangeIssuerVerifier(protocol.IssuerVerifierServiceRecord, protocol.IssuerVerifierRequest) (protocol.IssuerVerifierResponse, error) {
+	return protocol.IssuerVerifierResponse{}, errors.New("operator verifier unavailable")
 }
 
 func verifierServiceRecord() protocol.IssuerVerifierServiceRecord {

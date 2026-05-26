@@ -15,9 +15,10 @@ func TestActiveProbesCommandPrintsBaselineReport(t *testing.T) {
 	}
 	text := out.String()
 	for _, want := range []string{
-		"active_probe_baseline passed=true cases=13\n",
+		"active_probe_baseline passed=true cases=14\n",
 		"canonical http_status=0 close_code=0 tls_alert=0 quic_close=0 websocket_close=0 timing_class= reflected_log=\n",
 		"case bad-access-hint passed=true http_status=0 close_code=0 tls_alert=0 quic_close=0 websocket_close=0 timing_class= reflected_log=\n",
+		"case verifier-unavailable passed=true http_status=0 close_code=0 tls_alert=0 quic_close=0 websocket_close=0 timing_class= reflected_log=\n",
 		"case malformed-key-update passed=true http_status=0 close_code=0 tls_alert=0 quic_close=0 websocket_close=0 timing_class= reflected_log=\n",
 	} {
 		if !strings.Contains(text, want) {

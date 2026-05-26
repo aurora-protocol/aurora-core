@@ -2,11 +2,15 @@ package ops
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"testing"
 
 	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
+	auroratrust "github.com/aurora-protocol/aurora-core/trust"
 )
 
 func TestDirectoryPublisherRejectsUnsignedConsensus(t *testing.T) {
@@ -165,6 +169,7 @@ func TestBuildIssuerVerifierRequestRejectsStructurallyInvalidAdmissionProof(t *t
 
 func TestValidateIssuerVerifierResponseRequiresFreshMatchingAccept(t *testing.T) {
 	service := verifierServiceRecord()
+	serviceSigner := attachVerifierServiceSigningKey(t, &service)
 	proof, replay, admissionContextHash, handshakeBinding := verifierProofReplay(t)
 	req, requestHash, err := BuildIssuerVerifierRequest(IssuerVerifierRequestInput{
 		Service:                   service,
@@ -195,8 +200,8 @@ func TestValidateIssuerVerifierResponseRequiresFreshMatchingAccept(t *testing.T)
 		TokenSpentKey:    append([]byte(nil), req.TokenSpentKey...),
 		ValidUntilUnix:   200,
 		ResponseNonce:    rb(0x40, 32),
-		ServiceSignature: []byte("signature"),
 	}
+	signVerifierResponse(t, serviceSigner, &resp)
 	if err := ValidateIssuerVerifierResponse(service, req, resp, 150); err != nil {
 		t.Fatalf("valid verifier response rejected: %v", err)
 	}
@@ -223,6 +228,46 @@ func TestValidateIssuerVerifierResponseRequiresFreshMatchingAccept(t *testing.T)
 	resp.Decision = registry.VerifierDecisionRejectPolicy
 	if err := ValidateIssuerVerifierResponse(service, req, resp, 150); err == nil {
 		t.Fatalf("reject decision accepted")
+	}
+}
+
+func TestValidateIssuerVerifierResponseRejectsInvalidServiceSignature(t *testing.T) {
+	service := verifierServiceRecord()
+	attachVerifierServiceSigningKey(t, &service)
+	proof, replay, admissionContextHash, handshakeBinding := verifierProofReplay(t)
+	req, requestHash, err := BuildIssuerVerifierRequest(IssuerVerifierRequestInput{
+		Service:                   service,
+		AdmissionProof:            proof,
+		ReplayProof:               replay,
+		IssuerMetadataHash:        rb(0x30, 48),
+		RelayDescriptorHash:       rb(0x31, 48),
+		RouteInstanceID:           77,
+		HopIndex:                  1,
+		ReplayEpochValidUntilUnix: 800,
+		HandshakeBindingContext:   handshakeBinding,
+		AdmissionContextHash:      admissionContextHash,
+		ChallengeDigest:           rb(0x32, 32),
+		AuthenticatorInputHash:    rb(0x33, 48),
+		RequestNonce:              rb(0x34, 32),
+		RequestTimeUnix:           100,
+		NowUnix:                   100,
+		RequestAuthImplemented:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := protocol.IssuerVerifierResponse{
+		ResponseVersion:  registry.Version20,
+		ServiceID:        append([]byte(nil), service.ServiceID...),
+		RequestHash:      requestHash,
+		Decision:         registry.VerifierDecisionAccept,
+		TokenSpentKey:    append([]byte(nil), req.TokenSpentKey...),
+		ValidUntilUnix:   200,
+		ResponseNonce:    rb(0x40, 32),
+		ServiceSignature: []byte("not a valid signature"),
+	}
+	if err := ValidateIssuerVerifierResponse(service, req, resp, 150); err == nil {
+		t.Fatalf("invalid verifier service signature accepted")
 	}
 }
 
@@ -274,6 +319,32 @@ func verifierProofReplay(t *testing.T) (protocol.AdmissionProof, protocol.Replay
 	}
 	replay.ReplayContextHash = replayHash
 	return proof, replay, admissionContextHash, handshakeBinding
+}
+
+func attachVerifierServiceSigningKey(t *testing.T, service *protocol.IssuerVerifierServiceRecord) *ecdsa.PrivateKey {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.ServiceAuthKey = protocol.PublicKeyRecord{
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+		PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+	}
+	return priv
+}
+
+func signVerifierResponse(t *testing.T, priv *ecdsa.PrivateKey, resp *protocol.IssuerVerifierResponse) {
+	t.Helper()
+	input, err := auroratrust.IssuerVerifierResponseSignatureInput(resp.RequestHash, *resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.ServiceSignature, err = ecdsa.SignASN1(rand.Reader, priv, input)
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func rb(b byte, n int) []byte {

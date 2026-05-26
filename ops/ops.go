@@ -8,6 +8,7 @@ import (
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
+	auroratrust "github.com/aurora-protocol/aurora-core/trust"
 )
 
 type ConsensusDraft struct {
@@ -191,5 +192,5 @@ func ValidateIssuerVerifierResponse(service protocol.IssuerVerifierServiceRecord
 	if len(resp.ServiceSignature) == 0 {
 		return fmt.Errorf("ops: verifier response missing service signature")
 	}
-	return nil
+	return auroratrust.VerifyIssuerVerifierResponse(req, service, resp, now, 300)
 }

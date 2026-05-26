@@ -68,3 +68,35 @@ func TestFirstHopRealCryptoBundleIsDeterministicAndVerifiable(t *testing.T) {
 		t.Fatalf("first-hop real crypto vector omitted required first-hop fields: %+v", first)
 	}
 }
+
+func TestRoutePreludeRealCryptoBundleIsDeterministicAndVerifiable(t *testing.T) {
+	first, err := GenerateRoutePreludeRealCryptoBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := GenerateRoutePreludeRealCryptoBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("route-prelude real crypto vector is not deterministic:\nfirst=%+v\nsecond=%+v", first, second)
+	}
+	assertHexLen := func(name, value string, wantBytes int) {
+		t.Helper()
+		decoded, err := hex.DecodeString(value)
+		if err != nil {
+			t.Fatalf("%s is not hex: %v", name, err)
+		}
+		if len(decoded) != wantBytes {
+			t.Fatalf("%s length = %d, want %d", name, len(decoded), wantBytes)
+		}
+	}
+	assertHexLen("route_hop_binding", first.RouteHopBinding, 48)
+	assertHexLen("route_prelude_transcript_hash", first.RoutePreludeTranscriptHash, 48)
+	assertHexLen("route_mlkem_shared_secret", first.RouteMLKEMSharedSecret, mlkem768.SharedKeySize)
+	assertHexLen("route_server_pq_public_key", first.RouteServerPQPublicKey, mldsa65.PublicKeySize)
+	assertHexLen("route_server_prelude_signature_pq", first.RouteServerPreludeSignaturePQ, mldsa65.SignatureSize)
+	if first.RoutePreludeEnvelope == "" || first.RoutePrelude0Plaintext == "" || first.RoutePrelude1 == "" || first.RouteClassicalSharedSecret == "" {
+		t.Fatalf("route-prelude real crypto vector omitted required fields: %+v", first)
+	}
+}

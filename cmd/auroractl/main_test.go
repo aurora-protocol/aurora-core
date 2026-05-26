@@ -58,8 +58,8 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "ML-DSA verification") {
 		t.Fatalf("capabilities output missing ML-DSA verification:\n%s", text)
 	}
-	if !strings.Contains(text, "first-hop real-crypto vector") {
-		t.Fatalf("capabilities output missing first-hop real-crypto vector:\n%s", text)
+	if !strings.Contains(text, "first-hop and split-2 route-prelude real-crypto vectors") {
+		t.Fatalf("capabilities output missing first-hop and route-prelude real-crypto vectors:\n%s", text)
 	}
 	if strings.Contains(text, "not production-complete:\n- ML-DSA") {
 		t.Fatalf("capabilities output still reports ML-DSA work as the first missing item:\n%s", text)
@@ -104,6 +104,11 @@ func TestVectorsCommandPrintsFirstHopRealCryptoVectors(t *testing.T) {
 		"first_hop_prelude_transcript_hash: ",
 		"first_hop_mlkem_shared_secret: ",
 		"first_hop_server_prelude_signature_pq: ",
+		"split2_route_prelude_envelope: ",
+		"split2_route_prelude0_plaintext: ",
+		"split2_route_prelude1: ",
+		"split2_route_prelude_transcript_hash: ",
+		"split2_route_server_prelude_signature_pq: ",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("real crypto vectors output missing %q:\n%s", want, text)

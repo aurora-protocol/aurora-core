@@ -13,6 +13,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/handshake"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/aurora-protocol/aurora-core/route"
 	"github.com/aurora-protocol/aurora-core/trust"
 	"github.com/aurora-protocol/aurora-core/wire"
 	"github.com/cloudflare/circl/kem/mlkem/mlkem768"
@@ -32,6 +33,23 @@ type FirstHopRealCryptoBundle struct {
 	CoverPrelude0                   string
 	CoverPrelude1                   string
 	PreludeTranscriptHash           string
+}
+
+type RoutePreludeRealCryptoBundle struct {
+	RoutePreludeEnvelope                 string
+	RoutePrelude0Plaintext               string
+	RoutePrelude1                        string
+	RouteHopBinding                      string
+	RoutePreludeTranscriptHash           string
+	RouteClientClassicalEphPub           string
+	RouteServerClassicalEphPub           string
+	RouteClassicalSharedSecret           string
+	RouteClientMLKEMEncapsulationKey     string
+	RouteServerMLKEMCiphertext           string
+	RouteMLKEMSharedSecret               string
+	RouteServerPQPublicKey               string
+	RouteServerPreludeSignatureClassical string
+	RouteServerPreludeSignaturePQ        string
 }
 
 func GenerateFirstHopRealCryptoBundle() (FirstHopRealCryptoBundle, error) {
@@ -179,6 +197,211 @@ func GenerateFirstHopRealCryptoBundle() (FirstHopRealCryptoBundle, error) {
 		CoverPrelude1:                   hex.EncodeToString(encodedP1),
 		PreludeTranscriptHash:           hex.EncodeToString(transcript),
 	}, nil
+}
+
+func GenerateRoutePreludeRealCryptoBundle() (RoutePreludeRealCryptoBundle, error) {
+	const suite = registry.SuiteHybrid768P256AESGCM
+
+	clientECDH, err := auroracrypto.NewECDHPrivateKeyForSuite(suite, repeated(0xb1, 32))
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	serverECDH, err := auroracrypto.NewECDHPrivateKeyForSuite(suite, repeated(0xb2, 32))
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	clientClassicalSecret, err := clientECDH.SharedSecret(serverECDH.PublicKeyBytes())
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	serverClassicalSecret, err := serverECDH.SharedSecret(clientECDH.PublicKeyBytes())
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	if !bytes.Equal(clientClassicalSecret, serverClassicalSecret) {
+		return RoutePreludeRealCryptoBundle{}, fmt.Errorf("vectors: deterministic route ECDH shared secret mismatch")
+	}
+
+	clientMLKEMPublic, clientMLKEMPrivate := mlkem768.NewKeyFromSeed(repeated(0xb3, mlkem768.KeySeedSize))
+	clientMLKEMPublicBytes, err := clientMLKEMPublic.MarshalBinary()
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	mlkemCiphertext := make([]byte, mlkem768.CiphertextSize)
+	mlkemShared := make([]byte, mlkem768.SharedKeySize)
+	clientMLKEMPublic.EncapsulateTo(mlkemCiphertext, mlkemShared, repeated(0xb4, mlkem768.EncapsulationSeedSize))
+	decapsulated := make([]byte, mlkem768.SharedKeySize)
+	clientMLKEMPrivate.DecapsulateTo(decapsulated, mlkemCiphertext)
+	if !bytes.Equal(mlkemShared, decapsulated) {
+		return RoutePreludeRealCryptoBundle{}, fmt.Errorf("vectors: deterministic route ML-KEM shared secret mismatch")
+	}
+
+	classicalSigner, err := ecdsaPrivateKeyFromScalar(repeated(0xb5, 32))
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	classicalPublic := elliptic.Marshal(elliptic.P256(), classicalSigner.PublicKey.X, classicalSigner.PublicKey.Y)
+	var pqSeed [mldsa65.SeedSize]byte
+	copy(pqSeed[:], repeated(0xb6, len(pqSeed)))
+	pqPublic, pqPrivate := mldsa65.NewKeyFromSeed(&pqSeed)
+
+	descriptor := sampleRelayDescriptor()
+	descriptor.SupportedSuiteIDs = []uint64{suite}
+	descriptor.RelayLongtermClassicalKey = protocol.PublicKeyRecord{
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+		PublicKey:       append([]byte(nil), classicalPublic...),
+	}
+	descriptor.EpochAuthClassicalKey = descriptor.RelayLongtermClassicalKey
+	descriptor.RelayLongtermPQKey = protocol.PublicKeyRecord{
+		SignatureScheme: registry.SigMLDSA65,
+		KeyEncoding:     registry.KeyMLDSA65RawPublic,
+		PublicKey:       pqPublic.Bytes(),
+	}
+	descriptor.EpochAuthPQKey = descriptor.RelayLongtermPQKey
+	nextDescriptorHash, err := trust.RelayDescriptorHash(descriptor)
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	previousDescriptorHash, err := trust.RelayDescriptorHash(sampleRelayDescriptor())
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	previousHopFullTranscript, err := route.PreviousHopFullTranscriptHash(suite, repeated(0xb7, 48))
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	env := route.EnvelopeInput{
+		RouteInstanceID:                2,
+		HopIndex:                       1,
+		PreviousHopRelayDescriptorHash: previousDescriptorHash,
+		NextRelayDescriptorHash:        nextDescriptorHash,
+		HintIssuerID:                   repeated(0xc0, 16),
+		RelayBucketID:                  repeated(0xc1, 16),
+		HintEpochID:                    1700000200,
+		HintSelector:                   repeated(0xc2, 16),
+		WrapSuiteID:                    registry.WrapSuiteRouteV1,
+		WrapNonce:                      repeated(0xc3, 16),
+		HintSecret:                     repeated(0xc4, 32),
+	}
+	wrapContext, err := auroracrypto.RoutePreludeWrapContext(routeWrapInput(env))
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	private := route.PrivatePrelude{
+		RoutePreludeWrapContext:       wrapContext,
+		PreviousHopFullTranscriptHash: previousHopFullTranscript,
+		ClientNonceForThisHop:         repeated(0xc5, 32),
+		OfferedSuites:                 []uint64{suite},
+		ClientClassicalEphPub:         clientECDH.PublicKeyBytes(),
+		ClientMLKEMEncapsulationKey:   clientMLKEMPublicBytes,
+		AccessHint:                    repeated(0xc6, 16),
+		RequestedRouteModeID:          registry.RouteSplit2,
+		CoverShapeHintID:              registry.ShapeNormal,
+		Padding:                       repeated(0xc7, 32),
+	}
+	envelope, err := route.SealPrivatePrelude(env, private)
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	openedPrivate, err := route.OpenPrivatePrelude(env, envelope)
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	routeHopBinding, err := route.RouteHopBinding(route.HopBindingInput{
+		RouteInstanceID:                openedPrivate.RouteInstanceID,
+		HopIndex:                       openedPrivate.HopIndex,
+		PreviousHopFullTranscriptHash:  openedPrivate.PreviousHopFullTranscriptHash,
+		PreviousHopRelayDescriptorHash: openedPrivate.PreviousHopRelayDescriptorHash,
+		NextRelayDescriptorHash:        openedPrivate.NextRelayDescriptorHash,
+		RoutePreludeWrapContext:        openedPrivate.RoutePreludeWrapContext,
+		ClientNonceForThisHop:          openedPrivate.ClientNonceForThisHop,
+	})
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	p1 := protocol.RoutePrelude1{
+		MsgType:                        registry.MsgRoutePrelude1,
+		Version:                        registry.Version20,
+		RouteInstanceID:                env.RouteInstanceID,
+		HopIndex:                       env.HopIndex,
+		PreviousHopRelayDescriptorHash: previousDescriptorHash,
+		NextRelayDescriptorHash:        nextDescriptorHash,
+		NextRelayEpochID:               descriptor.EpochID,
+		SelectedSuite:                  suite,
+		ServerNonce:                    repeated(0xc8, 32),
+		ServerClassicalEphPub:          serverECDH.PublicKeyBytes(),
+		ServerMLKEMCiphertextToClient:  mlkemCiphertext,
+		SelectedShapeID:                registry.ShapeNormal,
+		Padding:                        repeated(0xc9, 32),
+	}
+	transcript, err := route.HopPreludeTranscriptHash(suite, routeHopBinding, openedPrivate, p1)
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	p1.ServerPreludeSignatureClassical, err = classicalSigner.Sign(nil, transcript, crypto.SHA384)
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	p1.ServerPreludeSignaturePQ = make([]byte, mldsa65.SignatureSize)
+	if err := mldsa65.SignTo(pqPrivate, transcript, nil, false, p1.ServerPreludeSignaturePQ); err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	if _, err := route.VerifyRoutePrelude1Signatures(route.RoutePreludeVerificationInput{
+		Suite:           suite,
+		RouteHopBinding: routeHopBinding,
+		Prelude0:        openedPrivate,
+		Prelude1:        p1,
+		Descriptor:      descriptor,
+		RequirePQ:       true,
+		NowUnix:         descriptor.EpochValidFromUnix,
+	}); err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	encodedEnvelope, err := wire.Encode(envelope)
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	encodedPrivate, err := wire.Encode(openedPrivate)
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	encodedP1, err := wire.Encode(p1)
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
+	return RoutePreludeRealCryptoBundle{
+		RoutePreludeEnvelope:                 hex.EncodeToString(encodedEnvelope),
+		RoutePrelude0Plaintext:               hex.EncodeToString(encodedPrivate),
+		RoutePrelude1:                        hex.EncodeToString(encodedP1),
+		RouteHopBinding:                      hex.EncodeToString(routeHopBinding),
+		RoutePreludeTranscriptHash:           hex.EncodeToString(transcript),
+		RouteClientClassicalEphPub:           hex.EncodeToString(clientECDH.PublicKeyBytes()),
+		RouteServerClassicalEphPub:           hex.EncodeToString(serverECDH.PublicKeyBytes()),
+		RouteClassicalSharedSecret:           hex.EncodeToString(clientClassicalSecret),
+		RouteClientMLKEMEncapsulationKey:     hex.EncodeToString(clientMLKEMPublicBytes),
+		RouteServerMLKEMCiphertext:           hex.EncodeToString(mlkemCiphertext),
+		RouteMLKEMSharedSecret:               hex.EncodeToString(mlkemShared),
+		RouteServerPQPublicKey:               hex.EncodeToString(pqPublic.Bytes()),
+		RouteServerPreludeSignatureClassical: hex.EncodeToString(p1.ServerPreludeSignatureClassical),
+		RouteServerPreludeSignaturePQ:        hex.EncodeToString(p1.ServerPreludeSignaturePQ),
+	}, nil
+}
+
+func routeWrapInput(env route.EnvelopeInput) auroracrypto.RouteWrapInput {
+	return auroracrypto.RouteWrapInput{
+		RouteInstanceID:                env.RouteInstanceID,
+		HopIndex:                       env.HopIndex,
+		PreviousHopRelayDescriptorHash: env.PreviousHopRelayDescriptorHash,
+		NextRelayDescriptorHash:        env.NextRelayDescriptorHash,
+		HintIssuerID:                   env.HintIssuerID,
+		RelayBucketID:                  env.RelayBucketID,
+		HintEpochID:                    env.HintEpochID,
+		HintSelector:                   env.HintSelector,
+		WrapSuiteID:                    env.WrapSuiteID,
+		WrapNonce:                      env.WrapNonce,
+		HintSecret:                     env.HintSecret,
+	}
 }
 
 func ecdsaPrivateKeyFromScalar(scalar []byte) (*ecdsa.PrivateKey, error) {

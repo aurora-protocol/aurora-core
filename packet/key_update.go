@@ -115,3 +115,26 @@ func (s *DirectionState) InitiateUpdate(suite uint64, updateNonce []byte, ackReq
 	s.DrainUntil = time.Now().Add(MaxDrainWindow)
 	return frame, nil
 }
+
+func (s *DirectionState) ApplyReceivedUpdate(suite uint64, frame protocol.KeyUpdate, ackNonce []byte) (KeyUpdateResult, error) {
+	if frame.RouteInstanceID != s.RouteInstanceID {
+		return KeyUpdateResult{}, fmt.Errorf("packet: KEY_UPDATE route instance mismatch")
+	}
+	if frame.HopLayer != s.HopLayer {
+		return KeyUpdateResult{}, fmt.Errorf("packet: KEY_UPDATE hop layer mismatch")
+	}
+	if frame.Direction != s.Direction {
+		return KeyUpdateResult{}, fmt.Errorf("packet: KEY_UPDATE direction mismatch")
+	}
+	if frame.OldKeyPhase != s.KeyPhase {
+		return KeyUpdateResult{}, fmt.Errorf("packet: KEY_UPDATE old phase %d does not match active phase %d", frame.OldKeyPhase, s.KeyPhase)
+	}
+	res, err := ApplyReceivedKeyUpdate(suite, s.Material.AppSecret, frame, ackNonce)
+	if err != nil {
+		return KeyUpdateResult{}, err
+	}
+	s.KeyPhase = frame.NewKeyPhase
+	s.Material = res.Next
+	s.DrainUntil = time.Now().Add(MaxDrainWindow)
+	return res, nil
+}

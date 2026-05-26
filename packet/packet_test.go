@@ -463,6 +463,53 @@ func TestKeyUpdateDerivationAndACK(t *testing.T) {
 	}
 }
 
+func TestDirectionStateApplyReceivedUpdateValidatesStateBeforeMutation(t *testing.T) {
+	state := DirectionState{
+		RouteInstanceID: 0x42,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        0,
+		Material: KeyMaterial{
+			AppSecret: bytesOf(0x55, 48),
+			Key:       bytesOf(0x56, 32),
+			IV:        bytesOf(0x57, 12),
+		},
+	}
+	original := state.Material
+	wrongDirection := protocol.KeyUpdate{
+		RouteInstanceID: 0x42,
+		HopLayer:        1,
+		Direction:       1,
+		OldKeyPhase:     0,
+		NewKeyPhase:     1,
+		UpdateNonce:     bytesOf(0xaa, 16),
+		AckRequired:     true,
+		UpdateReason:    1,
+	}
+	if _, err := state.ApplyReceivedUpdate(registry.SuiteHybrid768AESGCM, wrongDirection, bytesOf(0xbb, 16)); err == nil {
+		t.Fatalf("wrong-direction KEY_UPDATE accepted")
+	}
+	if state.KeyPhase != 0 || !bytes.Equal(state.Material.AppSecret, original.AppSecret) {
+		t.Fatalf("wrong-direction KEY_UPDATE mutated state: %+v", state)
+	}
+
+	rightDirection := wrongDirection
+	rightDirection.Direction = 0
+	res, err := state.ApplyReceivedUpdate(registry.SuiteHybrid768AESGCM, rightDirection, bytesOf(0xbc, 16))
+	if err != nil {
+		t.Fatalf("valid KEY_UPDATE rejected: %v", err)
+	}
+	if state.KeyPhase != 1 || bytes.Equal(state.Material.AppSecret, original.AppSecret) {
+		t.Fatalf("valid KEY_UPDATE did not advance state: %+v", state)
+	}
+	if res.ACK == nil || res.ACK.AckedDirection != 0 || res.ACK.AckedKeyPhase != 1 {
+		t.Fatalf("valid KEY_UPDATE did not produce matching ACK: %+v", res.ACK)
+	}
+	if _, err := state.ApplyReceivedUpdate(registry.SuiteHybrid768AESGCM, rightDirection, bytesOf(0xbd, 16)); err == nil {
+		t.Fatalf("stale KEY_UPDATE old phase accepted after state advanced")
+	}
+}
+
 func TestAuroraPacketEncodeDecode(t *testing.T) {
 	pkt := AuroraPacket{
 		RouteInstanceID: 9,

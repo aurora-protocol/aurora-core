@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/config"
 	auroracover "github.com/aurora-protocol/aurora-core/cover"
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
@@ -39,6 +40,8 @@ func main() {
 		err = classifierCheck(os.Stdout)
 	case "platform-check":
 		err = platformCheck(os.Stdout)
+	case "proof-check":
+		err = proofCheck(os.Stdout)
 	case "crypto-check":
 		err = cryptoCheck(os.Stdout)
 	case "wire-check":
@@ -59,7 +62,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|platform-check|crypto-check|wire-check|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|platform-check|proof-check|crypto-check|wire-check|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -324,9 +327,9 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- signed directory, relay descriptor, and cover-template real-crypto vectors")
 	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, exit-layer packet, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
-	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, platform adapter conformance profiles")
+	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, platform adapter conformance profiles, Privacy Pass Blind RSA production proof harness")
 	fmt.Fprintln(w, "not production-complete:")
-	fmt.Fprintln(w, "- Privacy Pass production proof verification, production cover-origin deployment, production platform packaging/device entitlements, external DPI/classifier evaluation, external active-probe evaluation")
+	fmt.Fprintln(w, "- production issuer operations, production cover-origin deployment, production platform packaging/device entitlements, external DPI/classifier evaluation, external active-probe evaluation")
 }
 
 func cryptoCheck(w io.Writer) error {
@@ -449,6 +452,27 @@ func platformCheck(w io.Writer) error {
 	}
 	if !report.Passed {
 		return fmt.Errorf("platform-check failed adapter conformance")
+	}
+	return nil
+}
+
+func proofCheck(w io.Writer) error {
+	report, err := admission.RunProductionProofHarness(100)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(
+		w,
+		"proof_check passed=%t blind_rsa=%t blind_rsa_tamper_rejected=%t blind_rsa_origin_policy_rejected=%t voprf_proof_only_rejected=%t lab_static_rejected=%t\n",
+		report.Passed,
+		report.BlindRSA2048Verified,
+		report.BlindRSAAuthenticatorTamperRejected,
+		report.BlindRSAOriginPolicyRejected,
+		report.VOPRFProofOnlyRejected,
+		report.LabStaticTokenRejected,
+	)
+	if !report.Passed {
+		return fmt.Errorf("proof-check failed production proof harness")
 	}
 	return nil
 }

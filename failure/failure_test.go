@@ -25,6 +25,7 @@ func TestKindsHaveStableInternalCodes(t *testing.T) {
 		{PolicyGate, 0x000c, "f000c"},
 		{VerifierUnavailable, 0x000d, "f000d"},
 		{ReplayCacheFailure, 0x000e, "f000e"},
+		{WrongH3Settings, 0x000f, "f000f"},
 	}
 	seen := make(map[uint16]bool, len(cases))
 	for _, tc := range cases {
@@ -54,6 +55,7 @@ func TestProbeSensitiveFailuresUseCoverOriginAction(t *testing.T) {
 		MalformedKeyUpdate,
 		InvalidCoverSlot,
 		UnsupportedMethod,
+		WrongH3Settings,
 		PolicyGate,
 		VerifierUnavailable,
 		ReplayCacheFailure,
@@ -77,6 +79,45 @@ func TestUnknownFailureFailsClosedToCoverOrigin(t *testing.T) {
 		t.Fatalf("unknown failure classification = %+v", got)
 	}
 	assertSafeLogKey(t, got.LogKey)
+}
+
+func TestActiveProbeCasesCoverSpecChecklist(t *testing.T) {
+	want := map[string]Kind{
+		"bad-access-hint":           BadAccessHint,
+		"replayed-access-hint":      ReplayedAccessHint,
+		"malformed-cover-prelude0":  MalformedPrelude,
+		"invalid-prelude-signature": WrongSignature,
+		"wrong-suite":               WrongSuite,
+		"bad-aead-tag":              BadAEADTag,
+		"replayed-admission-proof":  ReplayedAdmission,
+		"unsupported-method":        UnsupportedMethod,
+		"wrong-h3-settings":         WrongH3Settings,
+		"malformed-flow-open":       MalformedFlowOpen,
+		"malformed-key-update":      MalformedKeyUpdate,
+	}
+	got := ActiveProbeCases()
+	if len(got) != len(want) {
+		t.Fatalf("probe case count = %d, want %d: %+v", len(got), len(want), got)
+	}
+	for _, tc := range got {
+		kind, ok := want[tc.Name]
+		if !ok {
+			t.Fatalf("unexpected probe case %q", tc.Name)
+		}
+		if tc.Kind != kind {
+			t.Fatalf("probe case %q kind = %v, want %v", tc.Name, tc.Kind, kind)
+		}
+		delete(want, tc.Name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing probe cases: %+v", want)
+	}
+}
+
+func TestActiveProbeCasesArePubliclyIndistinguishable(t *testing.T) {
+	if err := VerifyProbeNeutrality(ActiveProbeCases()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func assertSafeLogKey(t *testing.T, key string) {

@@ -222,6 +222,9 @@ func (s IssuerVerifierServiceRecord) Allows(proofType uint64, relayBucketID []by
 	if s.ServiceProtocolID != registry.IssuerVerifierVOPRFMTLS13 {
 		return fmt.Errorf("protocol: verifier service protocol unsupported")
 	}
+	if proofType != registry.ProofVOPRFP384SHA384 {
+		return fmt.Errorf("protocol: VOPRF verifier service cannot verify proof type 0x%x", proofType)
+	}
 	if now < s.ValidFromUnix || now >= s.ValidUntilUnix {
 		return fmt.Errorf("protocol: verifier service outside validity interval")
 	}

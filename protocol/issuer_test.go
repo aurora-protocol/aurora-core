@@ -63,6 +63,14 @@ func TestIssuerVerifierServiceGatesProofBucketAndRequestAuthPolicy(t *testing.T)
 	}
 }
 
+func TestIssuerVerifierServiceRejectsBlindRSAEvenIfAllowlisted(t *testing.T) {
+	service := verifierServiceFixture()
+	service.AllowedProofTypes = []uint64{registry.ProofBlindRSA2048}
+	if err := service.Allows(registry.ProofBlindRSA2048, fill(0x04, 16), 20, true); err == nil {
+		t.Fatalf("Blind RSA proof was accepted by VOPRF verifier service")
+	}
+}
+
 func TestIssuerTokenKeyRecordMatchesProofTypeToKeyScheme(t *testing.T) {
 	tokenKey := fill(0x07, 64)
 	tokenKeyID := sha256.Sum256(tokenKey)

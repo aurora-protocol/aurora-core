@@ -3,6 +3,7 @@ package route
 import (
 	"bytes"
 	"fmt"
+	"sync"
 
 	"github.com/aurora-protocol/aurora-core/admission"
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
@@ -260,6 +261,78 @@ func OpenAndVerifyPrivatePrelude(cache *admission.MemoryReplayCache, env Envelop
 		return PrivatePrelude{}, nil, fmt.Errorf("route: access hint verification failed: %w", err)
 	}
 	return private, binding, nil
+}
+
+func OpenAndVerifyPrivatePreludeWithWrapNonceCache(accessHintCache *admission.MemoryReplayCache, wrapNonceCache *WrapNonceReplayCache, env EnvelopeInput, envelope protocol.RoutePreludeEnvelope, cred admission.AccessHintCredential, nowUnix uint64) (PrivatePrelude, []byte, error) {
+	private, err := OpenPrivatePrelude(env, envelope)
+	if err != nil {
+		return PrivatePrelude{}, nil, err
+	}
+	if wrapNonceCache == nil {
+		return PrivatePrelude{}, nil, fmt.Errorf("route: missing route wrap nonce replay cache")
+	}
+	if ok, err := wrapNonceCache.InsertIfAbsent(envelope); err != nil {
+		return PrivatePrelude{}, nil, err
+	} else if !ok {
+		return PrivatePrelude{}, nil, fmt.Errorf("route: duplicate route wrap nonce")
+	}
+	binding, err := RouteHopBinding(HopBindingInput{
+		RouteInstanceID:                private.RouteInstanceID,
+		HopIndex:                       private.HopIndex,
+		PreviousHopFullTranscriptHash:  private.PreviousHopFullTranscriptHash,
+		PreviousHopRelayDescriptorHash: private.PreviousHopRelayDescriptorHash,
+		NextRelayDescriptorHash:        private.NextRelayDescriptorHash,
+		RoutePreludeWrapContext:        private.RoutePreludeWrapContext,
+		ClientNonceForThisHop:          private.ClientNonceForThisHop,
+	})
+	if err != nil {
+		return PrivatePrelude{}, nil, err
+	}
+	if err := admission.VerifyAndSpendAccessHintAt(accessHintCache, cred, binding, private.ClientNonceForThisHop, private.AccessHint, nowUnix); err != nil {
+		return PrivatePrelude{}, nil, fmt.Errorf("route: access hint verification failed: %w", err)
+	}
+	return private, binding, nil
+}
+
+type WrapNonceReplayCache struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+func NewWrapNonceReplayCache() *WrapNonceReplayCache {
+	return &WrapNonceReplayCache{seen: make(map[string]struct{})}
+}
+
+func (c *WrapNonceReplayCache) InsertIfAbsent(envelope protocol.RoutePreludeEnvelope) (bool, error) {
+	if c == nil {
+		return false, fmt.Errorf("route: missing route wrap nonce replay cache")
+	}
+	key, err := routeWrapNonceReplayKey(envelope)
+	if err != nil {
+		return false, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.seen[string(key)]; ok {
+		return false, nil
+	}
+	c.seen[string(key)] = struct{}{}
+	return true, nil
+}
+
+func routeWrapNonceReplayKey(envelope protocol.RoutePreludeEnvelope) ([]byte, error) {
+	e := wire.NewEncoder()
+	e.WriteBytes([]byte("aurora v2.0 route wrap nonce replay"))
+	e.WriteOpaqueFixed(envelope.HintIssuerID, 16)
+	e.WriteOpaqueFixed(envelope.RelayBucketID, 16)
+	e.WriteUint64(envelope.HintEpochID)
+	e.WriteOpaqueFixed(envelope.HintSelector, 16)
+	e.WriteOpaqueFixed(envelope.WrapNonce, 16)
+	preimage, err := e.Bytes()
+	if err != nil {
+		return nil, err
+	}
+	return auroracrypto.PreHash(preimage), nil
 }
 
 type RoutePreludeVerificationInput struct {

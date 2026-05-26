@@ -245,6 +245,52 @@ func TestOpenAndVerifyPrivatePreludeSpendsAccessHintWithRouteHopBinding(t *testi
 	}
 }
 
+func TestOpenAndVerifyPrivatePreludeRejectsDuplicateWrapNonceBeforeAccessHintSpend(t *testing.T) {
+	env := routeTestEnvelope()
+	cred := routeTestAccessHintCredential(env)
+	private := routeTestPrivatePrelude(t, env)
+	context, err := auroracrypto.RoutePreludeWrapContext(env.routeWrapInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	private.RoutePreludeWrapContext = context
+	binding, err := RouteHopBinding(HopBindingInput{
+		RouteInstanceID:                private.RouteInstanceID,
+		HopIndex:                       private.HopIndex,
+		PreviousHopFullTranscriptHash:  private.PreviousHopFullTranscriptHash,
+		PreviousHopRelayDescriptorHash: private.PreviousHopRelayDescriptorHash,
+		NextRelayDescriptorHash:        private.NextRelayDescriptorHash,
+		RoutePreludeWrapContext:        private.RoutePreludeWrapContext,
+		ClientNonceForThisHop:          private.ClientNonceForThisHop,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	private.AccessHint, err = admission.ComputeAccessHint(cred, binding, private.ClientNonceForThisHop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := SealPrivatePrelude(env, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapCache := NewWrapNonceReplayCache()
+	if _, _, err := OpenAndVerifyPrivatePreludeWithWrapNonceCache(admission.NewMemoryReplayCache(), wrapCache, env, envelope, cred, 100); err != nil {
+		t.Fatalf("valid route prelude was rejected: %v", err)
+	}
+	secondAccessCache := admission.NewMemoryReplayCache()
+	if _, _, err := OpenAndVerifyPrivatePreludeWithWrapNonceCache(secondAccessCache, wrapCache, env, envelope, cred, 100); err == nil {
+		t.Fatalf("duplicate route wrap nonce was accepted")
+	}
+	spentKey, err := admission.ComputeSpentHintKey(cred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondAccessCache.Has(spentKey) {
+		t.Fatalf("duplicate route wrap nonce spent AccessHint before rejection")
+	}
+}
+
 func TestVerifyRoutePrelude1SignaturesRejectsTampering(t *testing.T) {
 	in := signedRoutePreludeVerificationInput(t)
 	if _, err := VerifyRoutePrelude1Signatures(in); err != nil {

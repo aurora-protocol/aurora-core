@@ -136,6 +136,7 @@ func coreBoundaryMethods() []string {
 		"submit-tcp-flow",
 		"submit-udp-datagram",
 		"submit-dns-message",
+		"submit-packet",
 		"read-packet-or-frame",
 		"notify-network-change",
 		"export-redacted-diagnostics",

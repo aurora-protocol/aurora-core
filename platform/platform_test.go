@@ -195,6 +195,31 @@ func TestAdapterBlueprintVerificationRejectsMissingProxyFallback(t *testing.T) {
 	}
 }
 
+func TestAdapterBlueprintVerificationRequiresPacketIngressBoundary(t *testing.T) {
+	blueprints := AdapterBlueprints()
+	blueprints[0].CoreBoundaryMethods = removeString(blueprints[0].CoreBoundaryMethods, "submit-packet")
+	report, err := VerifyAdapterBlueprints(blueprints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatalf("platform adapter conformance accepted missing packet ingress boundary: %+v", report)
+	}
+	if len(report.Failures) != 1 || report.Failures[0].Field != "core_boundary" {
+		t.Fatalf("unexpected platform adapter failure report: %+v", report.Failures)
+	}
+}
+
+func removeString(values []string, drop string) []string {
+	out := values[:0]
+	for _, value := range values {
+		if value != drop {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
 type recordingCoreSink struct {
 	openSessions              int
 	tcpFlows                  int

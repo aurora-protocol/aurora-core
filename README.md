@@ -41,6 +41,7 @@ GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl vectors --check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl vectors --negative --check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl negative-vectors-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl wire-check
+GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl transport-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl host-build-check --portable
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl classifier-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl evaluation-check

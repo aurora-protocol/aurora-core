@@ -57,6 +57,30 @@ func TestWireCheckCommandPrintsPublicWireReport(t *testing.T) {
 	}
 }
 
+func TestTransportCheckCommandPrintsCarrierConformance(t *testing.T) {
+	var out bytes.Buffer
+	if err := transportCheck(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"transport_check passed=true cases=6 failures=0\n",
+		"transport_case h2_baseline_first passed=true",
+		"transport_case h1_websocket_fallback passed=true",
+		"transport_case shadow_origin_slot passed=true",
+		"transport_case h3_ext_datagram_gated passed=true",
+		"transport_case masque_visible_opt_in passed=true",
+		"transport_case shared_opaque_core_path passed=true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("transport-check output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "passed=false") {
+		t.Fatalf("transport-check output contains failing case:\n%s", text)
+	}
+}
+
 func TestClassifierCheckCommandPrintsBaselineReport(t *testing.T) {
 	var out bytes.Buffer
 	if err := classifierCheck(&out); err != nil {
@@ -373,6 +397,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	}
 	if !strings.Contains(text, "shared opaque carrier session adapters") {
 		t.Fatalf("capabilities output missing shared carrier session adapters:\n%s", text)
+	}
+	if !strings.Contains(text, "P7 transport conformance harness") {
+		t.Fatalf("capabilities output missing P7 transport conformance harness:\n%s", text)
 	}
 	if !strings.Contains(text, "DPI/classifier baseline harness") {
 		t.Fatalf("capabilities output missing classifier baseline harness:\n%s", text)
@@ -696,6 +723,7 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go run ./cmd/auroractl negative-vectors-check",
 		"go run ./cmd/auroractl crypto-check",
 		"go run ./cmd/auroractl wire-check",
+		"go run ./cmd/auroractl transport-check",
 		"go run ./cmd/auroractl host-build-check --portable",
 		"go run ./cmd/auroractl host-build-check --apple-simulator",
 		"go run ./cmd/auroractl active-probes",

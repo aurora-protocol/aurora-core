@@ -88,6 +88,29 @@ func TestValidateFrameBlockRejectsReservedFlowCloseCode(t *testing.T) {
 	}
 }
 
+func TestNewFlowCloseFrameWrapsPayloadAndCopiesReason(t *testing.T) {
+	reason := []byte("done")
+	frame, err := NewFlowCloseFrame(FlowClose{
+		FlowID:    9,
+		CloseCode: CloseNormal,
+		Reason:    reason,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reason[0] = 'D'
+	if frame.FrameType != registry.FrameFlowClose || frame.FlowID != 9 || frame.Flags != 0 {
+		t.Fatalf("unexpected FlowClose frame: %+v", frame)
+	}
+	got := DecodeFlowClose(bytesReader(frame.Payload))
+	if !bytes.Equal(got.Reason, []byte("done")) {
+		t.Fatalf("FlowClose reason was not copied: %q", got.Reason)
+	}
+	if err := ValidateFrameBlock(FrameBlock{Frames: []AuroraFrame{frame}}); err != nil {
+		t.Fatalf("FlowClose frame did not validate: %v", err)
+	}
+}
+
 func bytesReader(encoded []byte) *wire.Reader {
 	return wire.NewReader(encoded)
 }

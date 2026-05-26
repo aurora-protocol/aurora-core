@@ -373,14 +373,35 @@ func ValidateFlowManagementFrame(frame AuroraFrame) error {
 func ValidateFlowClose(close FlowClose) error {
 	switch {
 	case close.CloseCode <= CloseResourceLimit:
-		return nil
 	case close.CloseCode >= 0x7000 && close.CloseCode <= 0x7eff:
-		return nil
 	case close.CloseCode >= 0x7f00 && close.CloseCode <= 0x7fff:
-		return nil
 	default:
 		return fmt.Errorf("protocol: reserved flow close code 0x%x", close.CloseCode)
 	}
+	if err := ValidateExtensions(close.Extensions, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
+func NewFlowCloseFrame(close FlowClose) (AuroraFrame, error) {
+	if err := ValidateFlowClose(close); err != nil {
+		return AuroraFrame{}, err
+	}
+	close.Reason = append([]byte(nil), close.Reason...)
+	payload, err := Encode(close)
+	if err != nil {
+		return AuroraFrame{}, err
+	}
+	frame := AuroraFrame{
+		FrameType: registry.FrameFlowClose,
+		FlowID:    close.FlowID,
+		Payload:   payload,
+	}
+	if err := ValidateFlowManagementFrame(frame); err != nil {
+		return AuroraFrame{}, err
+	}
+	return frame, nil
 }
 
 type RouteForwardFrame struct {

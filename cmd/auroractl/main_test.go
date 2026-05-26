@@ -105,6 +105,32 @@ func TestFlowCheckCommandPrintsProxyFlowConformance(t *testing.T) {
 	}
 }
 
+func TestRouteCheckCommandPrintsSplitRouteConformance(t *testing.T) {
+	var out bytes.Buffer
+	if err := routeCheck(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"route_check passed=true cases=8 failures=0\n",
+		"route_case route_prelude_wrap_replay passed=true",
+		"route_case route_hop_binding_separation passed=true",
+		"route_case route_capsule_hop_privacy passed=true",
+		"route_case split2_forward_opaque_entry passed=true",
+		"route_case split2_backward_opaque_entry passed=true",
+		"route_case packet_ad_route_hop_binding passed=true",
+		"route_case route_rotation_drain_window passed=true",
+		"route_case split2_independent_counters passed=true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("route-check output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "passed=false") {
+		t.Fatalf("route-check output contains failing case:\n%s", text)
+	}
+}
+
 func TestClassifierCheckCommandPrintsBaselineReport(t *testing.T) {
 	var out bytes.Buffer
 	if err := classifierCheck(&out); err != nil {
@@ -427,6 +453,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	}
 	if !strings.Contains(text, "P6 proxy-flow conformance harness") {
 		t.Fatalf("capabilities output missing P6 proxy-flow conformance harness:\n%s", text)
+	}
+	if !strings.Contains(text, "P5 split-route conformance harness") {
+		t.Fatalf("capabilities output missing P5 split-route conformance harness:\n%s", text)
 	}
 	if !strings.Contains(text, "DPI/classifier baseline harness") {
 		t.Fatalf("capabilities output missing classifier baseline harness:\n%s", text)
@@ -752,6 +781,7 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go run ./cmd/auroractl wire-check",
 		"go run ./cmd/auroractl transport-check",
 		"go run ./cmd/auroractl flow-check",
+		"go run ./cmd/auroractl route-check",
 		"go run ./cmd/auroractl host-build-check --portable",
 		"go run ./cmd/auroractl host-build-check --apple-simulator",
 		"go run ./cmd/auroractl active-probes",

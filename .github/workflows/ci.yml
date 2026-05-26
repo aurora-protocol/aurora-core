@@ -40,6 +40,8 @@ jobs:
         run: go run ./cmd/auroractl transport-check
       - name: Check proxy-flow conformance
         run: go run ./cmd/auroractl flow-check
+      - name: Check split-route conformance
+        run: go run ./cmd/auroractl route-check
       - name: Check portable host build matrix
         if: matrix.os == 'ubuntu-latest'
         run: go run ./cmd/auroractl host-build-check --portable

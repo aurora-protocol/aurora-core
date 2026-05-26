@@ -24,6 +24,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/relay"
 	aurorarelease "github.com/aurora-protocol/aurora-core/release"
+	auroraroute "github.com/aurora-protocol/aurora-core/route"
 	"github.com/aurora-protocol/aurora-core/transport"
 	corevectors "github.com/aurora-protocol/aurora-core/vectors"
 	"github.com/aurora-protocol/aurora-core/wire"
@@ -74,6 +75,8 @@ func main() {
 		err = transportCheck(os.Stdout)
 	case "flow-check":
 		err = flowCheck(os.Stdout)
+	case "route-check":
+		err = routeCheck(os.Stdout)
 	case "host-build-check":
 		err = hostBuildCheck(os.Args[2:], os.Stdout)
 	case "check-config":
@@ -92,7 +95,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|cover-check|crypto-check|wire-check|transport-check|flow-check|host-build-check [--portable|--apple-simulator|--all]|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|cover-check|crypto-check|wire-check|transport-check|flow-check|route-check|host-build-check [--portable|--apple-simulator|--all]|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -387,7 +390,7 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, exit-layer packet, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
 	fmt.Fprintln(w, "- P2 negative vector harness for malformed public keys, wrong key_encoding, wrong signatures, wrong AEAD tag, and replay")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
-	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, P0 host build matrix, HTTP CONNECT/SOCKS5 local interface handlers, client FLOW_OPEN frame emission, relay frame-block flow demux, fake-IP mapped UDP flow integration, UDP target confirm TTL enforcement, synthetic local DNS forwarder responses, negative-cache-aware local DNS responses, P6 proxy-flow conformance harness, shared opaque carrier session adapters, P7 transport conformance harness, append-only file replay cache, protocol decode fuzz harness, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, external evaluation evidence verifier, deployment security assessment evidence verifier, platform adapter conformance profiles, packet-to-core platform ABI forwarding, packet, DNS, socket, and network-path platform ABI forwarding, platform packaging and entitlement conformance matrix, release readiness evidence verifier, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, issuer service readiness harness, issuer HTTP daemon readiness harness, binary issuer verifier mTLS handler, cover-origin deployment conformance harness")
+	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, P0 host build matrix, HTTP CONNECT/SOCKS5 local interface handlers, client FLOW_OPEN frame emission, relay frame-block flow demux, fake-IP mapped UDP flow integration, UDP target confirm TTL enforcement, synthetic local DNS forwarder responses, negative-cache-aware local DNS responses, P5 split-route conformance harness, P6 proxy-flow conformance harness, shared opaque carrier session adapters, P7 transport conformance harness, append-only file replay cache, protocol decode fuzz harness, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, external evaluation evidence verifier, deployment security assessment evidence verifier, platform adapter conformance profiles, packet-to-core platform ABI forwarding, packet, DNS, socket, and network-path platform ABI forwarding, platform packaging and entitlement conformance matrix, release readiness evidence verifier, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, issuer service readiness harness, issuer HTTP daemon readiness harness, binary issuer verifier mTLS handler, cover-origin deployment conformance harness")
 	fmt.Fprintln(w, "not production-complete:")
 	fmt.Fprintln(w, "- external live issuer deployment, real signed platform release execution/device provisioning, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation")
 }
@@ -861,6 +864,20 @@ func flowCheck(w io.Writer) error {
 	}
 	if !report.Passed {
 		return fmt.Errorf("flow-check failed proxy-flow conformance")
+	}
+	return nil
+}
+
+func routeCheck(w io.Writer) error {
+	report, err := auroraroute.RunSplitRouteConformance()
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, auroraroute.FormatSplitRouteConformanceReport(report)); err != nil {
+		return err
+	}
+	if !report.Passed {
+		return fmt.Errorf("route-check failed split-route conformance")
 	}
 	return nil
 }

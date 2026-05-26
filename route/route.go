@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
+	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/wire"
@@ -227,7 +228,26 @@ func OpenPrivatePrelude(env EnvelopeInput, envelope protocol.RoutePreludeEnvelop
 		!bytes.Equal(private.RoutePreludeWrapContext, context) {
 		return PrivatePrelude{}, fmt.Errorf("route: decrypted prelude does not match visible envelope")
 	}
+	if err := ValidatePrivatePreludeHybridShares(private); err != nil {
+		return PrivatePrelude{}, err
+	}
 	return private, nil
+}
+
+func ValidatePrivatePreludeHybridShares(private PrivatePrelude) error {
+	for _, suite := range private.OfferedSuites {
+		if err := validatePrivatePreludeHybridSharesForSuite(suite, private); err == nil {
+			return nil
+		}
+	}
+	return failure.NewError(failure.MalformedHybridShare, "route: malformed client hybrid share")
+}
+
+func validatePrivatePreludeHybridSharesForSuite(suite uint64, private PrivatePrelude) error {
+	if _, err := auroracrypto.NewECDHPublicKeyForSuite(suite, private.ClientClassicalEphPub); err != nil {
+		return err
+	}
+	return auroracrypto.ValidateMLKEMEncapsulationKeyForSuite(suite, private.ClientMLKEMEncapsulationKey)
 }
 
 func validateEnvelopeInput(env EnvelopeInput, envelope protocol.RoutePreludeEnvelope) error {

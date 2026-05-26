@@ -2,9 +2,11 @@ package route
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
+	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/registry"
 )
 
@@ -93,6 +95,8 @@ func TestRoutePreludeWrapRoundTripRejectsMismatchedVisibleEnvelope(t *testing.T)
 		HintSelector:                   env.HintSelector,
 		AccessHint:                     rb(0x46, 16),
 		OfferedSuites:                  []uint64{registry.SuiteHybrid768AESGCM},
+		ClientClassicalEphPub:          routeTestClassicalShare(t, registry.SuiteHybrid768AESGCM),
+		ClientMLKEMEncapsulationKey:    routeTestKEMShare(t),
 		RequestedRouteModeID:           registry.RouteSplit2,
 		CoverShapeHintID:               registry.ShapeNormal,
 	}
@@ -118,4 +122,93 @@ func TestRoutePreludeWrapRoundTripRejectsMismatchedVisibleEnvelope(t *testing.T)
 	if _, err := OpenPrivatePrelude(env, envelope); err == nil {
 		t.Fatalf("expected visible-envelope mismatch to fail")
 	}
+}
+
+func TestOpenPrivatePreludeClassifiesMalformedHybridShares(t *testing.T) {
+	env := routeTestEnvelope()
+	for name, mutate := range map[string]func(*PrivatePrelude){
+		"client classical": func(p *PrivatePrelude) {
+			p.ClientClassicalEphPub = []byte{0x01}
+		},
+		"client mlkem": func(p *PrivatePrelude) {
+			p.ClientMLKEMEncapsulationKey = []byte{0x02}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			private := routeTestPrivatePrelude(t, env)
+			mutate(&private)
+			envelope, err := SealPrivatePrelude(env, private)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = OpenPrivatePrelude(env, envelope)
+			if err == nil {
+				t.Fatalf("malformed route hybrid share was accepted")
+			}
+			var failureErr *failure.Error
+			if !errors.As(err, &failureErr) || failureErr.Kind != failure.MalformedHybridShare {
+				t.Fatalf("route malformed share error = %T %[1]v, want %v", err, failure.MalformedHybridShare)
+			}
+			if got := failure.Classify(failureErr.Kind); got.Action != failure.CoverOrigin {
+				t.Fatalf("route malformed share classification = %+v", got)
+			}
+		})
+	}
+}
+
+func routeTestEnvelope() EnvelopeInput {
+	return EnvelopeInput{
+		RouteInstanceID:                1,
+		HopIndex:                       1,
+		PreviousHopRelayDescriptorHash: rb(0x41, 48),
+		NextRelayDescriptorHash:        rb(0x42, 48),
+		HintIssuerID:                   rb(0x34, 16),
+		RelayBucketID:                  rb(0x35, 16),
+		HintEpochID:                    7,
+		HintSelector:                   rb(0x31, 16),
+		WrapSuiteID:                    registry.WrapSuiteRouteV1,
+		WrapNonce:                      rb(0x32, 16),
+		HintSecret:                     rb(0x33, 32),
+	}
+}
+
+func routeTestPrivatePrelude(t *testing.T, env EnvelopeInput) PrivatePrelude {
+	t.Helper()
+	return PrivatePrelude{
+		RouteInstanceID:                env.RouteInstanceID,
+		HopIndex:                       env.HopIndex,
+		PreviousHopRelayDescriptorHash: env.PreviousHopRelayDescriptorHash,
+		NextRelayDescriptorHash:        env.NextRelayDescriptorHash,
+		RoutePreludeWrapContext:        rb(0, 48),
+		PreviousHopFullTranscriptHash:  rb(0x44, 48),
+		ClientNonceForThisHop:          rb(0x45, 32),
+		HintIssuerID:                   env.HintIssuerID,
+		RelayBucketID:                  env.RelayBucketID,
+		HintEpochID:                    env.HintEpochID,
+		HintSelector:                   env.HintSelector,
+		AccessHint:                     rb(0x46, 16),
+		OfferedSuites:                  []uint64{registry.SuiteHybrid768AESGCM},
+		ClientClassicalEphPub:          routeTestClassicalShare(t, registry.SuiteHybrid768AESGCM),
+		ClientMLKEMEncapsulationKey:    routeTestKEMShare(t),
+		RequestedRouteModeID:           registry.RouteSplit2,
+		CoverShapeHintID:               registry.ShapeNormal,
+	}
+}
+
+func routeTestClassicalShare(t *testing.T, suite uint64) []byte {
+	t.Helper()
+	key, err := auroracrypto.GenerateECDHForSuite(suite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key.PublicKeyBytes()
+}
+
+func routeTestKEMShare(t *testing.T) []byte {
+	t.Helper()
+	key, err := auroracrypto.GenerateMLKEM768()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key.EncapsulationKeyBytes()
 }

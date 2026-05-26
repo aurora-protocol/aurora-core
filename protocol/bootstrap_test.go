@@ -164,7 +164,7 @@ func sampleAdmissionProof() AdmissionProof {
 		RedemptionContextHash: fill(0x15, 48),
 		TokenPublicMetadata:   []byte("metadata"),
 		TokenAuthenticator:    []byte("authenticator"),
-		BindingProof:          []byte("binding"),
+		BindingProof:          []byte{},
 		Extensions:            []Extension{{ExtensionType: 0x7005, Body: []byte("admission")}},
 	}
 }

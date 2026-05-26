@@ -388,7 +388,6 @@ func verifierProofReplay(t *testing.T) (protocol.AdmissionProof, protocol.Replay
 		RedemptionContextHash: admissionContextHash,
 		TokenPublicMetadata:   []byte("metadata"),
 		TokenAuthenticator:    []byte("authenticator"),
-		BindingProof:          []byte("binding"),
 	}
 	proof.TokenPublicMetadata, _, _ = verifierTokenMetadataForTest(t, proof, rb(0x30, 48), []byte("issuer.example"), []byte("origin.example"))
 	redemptionHash, err := admission.TokenRedemptionHash(proof)

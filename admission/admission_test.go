@@ -237,7 +237,6 @@ func TestVerifyAndSpendReplayRejectsStructurallyInvalidReplayProof(t *testing.T)
 				TokenNonce:            rep(0x05, 32),
 				RedemptionContextHash: admissionContext,
 				TokenAuthenticator:    []byte("token"),
-				BindingProof:          []byte("binding"),
 			}
 			redemption, err := TokenRedemptionHash(proof)
 			if err != nil {
@@ -287,6 +286,9 @@ func TestVerifyAndSpendReplayRejectsStructurallyInvalidAdmissionProof(t *testing
 			proof.ProofType = registry.ProofOpaqueIssuer
 			proof.BindingProof = rep(0x88, 4097)
 		},
+		"blind rsa binding proof without profile": func(proof *protocol.AdmissionProof) {
+			proof.BindingProof = []byte("binding")
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			admissionContext := rep(0x50, 48)
@@ -302,7 +304,6 @@ func TestVerifyAndSpendReplayRejectsStructurallyInvalidAdmissionProof(t *testing
 				TokenNonce:            rep(0x05, 32),
 				RedemptionContextHash: admissionContext,
 				TokenAuthenticator:    []byte("token"),
-				BindingProof:          []byte("binding"),
 			}
 			mutate(&proof)
 			redemption, err := TokenRedemptionHash(proof)

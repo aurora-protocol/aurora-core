@@ -355,7 +355,6 @@ func relayAdmissionProof(proofType uint64) protocol.AdmissionProof {
 		RedemptionContextHash: bytesOf(0x14, 48),
 		TokenPublicMetadata:   []byte("metadata"),
 		TokenAuthenticator:    []byte("authenticator"),
-		BindingProof:          []byte("binding"),
 	}
 }
 

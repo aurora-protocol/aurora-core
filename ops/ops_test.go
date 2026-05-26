@@ -88,6 +88,8 @@ func TestBuildIssuerVerifierRequestRecomputesTokenSpentKey(t *testing.T) {
 		AdmissionContextHash:      admissionContextHash,
 		ChallengeDigest:           rb(0x32, 32),
 		AuthenticatorInputHash:    rb(0x33, 48),
+		TokenSpentCache:           admission.NewMemoryReplayCache(),
+		BootstrapDedupCache:       admission.NewMemoryReplayCache(),
 		RequestNonce:              rb(0x34, 32),
 		RequestTimeUnix:           100,
 		NowUnix:                   100,
@@ -116,6 +118,8 @@ func TestBuildIssuerVerifierRequestRecomputesTokenSpentKey(t *testing.T) {
 		AdmissionContextHash:      admissionContextHash,
 		ChallengeDigest:           rb(0x32, 32),
 		AuthenticatorInputHash:    rb(0x33, 48),
+		TokenSpentCache:           admission.NewMemoryReplayCache(),
+		BootstrapDedupCache:       admission.NewMemoryReplayCache(),
 		RequestNonce:              rb(0x34, 32),
 		RequestTimeUnix:           100,
 		NowUnix:                   100,
@@ -153,6 +157,8 @@ func TestBuildIssuerVerifierRequestRecomputesAuthenticatorFields(t *testing.T) {
 		AdmissionContextHash:      admissionContextHash,
 		ChallengeDigest:           rb(0xee, 32),
 		AuthenticatorInputHash:    rb(0xef, 48),
+		TokenSpentCache:           admission.NewMemoryReplayCache(),
+		BootstrapDedupCache:       admission.NewMemoryReplayCache(),
 		RequestNonce:              rb(0x34, 32),
 		RequestTimeUnix:           100,
 		NowUnix:                   100,
@@ -166,6 +172,92 @@ func TestBuildIssuerVerifierRequestRecomputesAuthenticatorFields(t *testing.T) {
 	}
 	if !bytes.Equal(req.AuthenticatorInputHash, wantAuthenticatorHash) {
 		t.Fatalf("request authenticator input hash was not recomputed")
+	}
+}
+
+func TestBuildIssuerVerifierRequestRejectsLocalReplayWithChangedNonce(t *testing.T) {
+	service := verifierServiceRecord()
+	proof, replay, admissionContextHash, handshakeBinding := verifierProofReplay(t)
+	tokenCache := admission.NewMemoryReplayCache()
+
+	input := IssuerVerifierRequestInput{
+		Service:                   service,
+		AdmissionProof:            proof,
+		ReplayProof:               replay,
+		IssuerMetadataHash:        rb(0x30, 48),
+		RelayDescriptorHash:       rb(0x31, 48),
+		RouteInstanceID:           77,
+		HopIndex:                  1,
+		ReplayEpochValidUntilUnix: 800,
+		HandshakeBindingContext:   handshakeBinding,
+		AdmissionContextHash:      admissionContextHash,
+		ChallengeDigest:           rb(0x32, 32),
+		AuthenticatorInputHash:    rb(0x33, 48),
+		RequestNonce:              rb(0x34, 32),
+		RequestTimeUnix:           100,
+		NowUnix:                   100,
+		RequestAuthImplemented:    true,
+		TokenSpentCache:           tokenCache,
+		BootstrapDedupCache:       admission.NewMemoryReplayCache(),
+	}
+	if _, _, err := BuildIssuerVerifierRequest(input); err != nil {
+		t.Fatalf("first verifier request failed: %v", err)
+	}
+
+	replay.ClientReplayNonce = rb(0x42, 32)
+	redemption, err := admission.TokenRedemptionHash(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay.ReplayContextHash, err = admission.ReplayContextHash(redemption, replay, 77, 1, handshakeBinding, admissionContextHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.ReplayProof = replay
+	input.BootstrapDedupCache = admission.NewMemoryReplayCache()
+	if _, _, err := BuildIssuerVerifierRequest(input); err == nil {
+		t.Fatalf("replayed token accepted with changed replay nonce")
+	}
+}
+
+func TestBuildIssuerVerifierRequestDoesNotSpendOnMetadataMismatch(t *testing.T) {
+	service := verifierServiceRecord()
+	proof, replay, admissionContextHash, handshakeBinding := verifierProofReplay(t)
+	tokenCache := admission.NewMemoryReplayCache()
+	redemption, err := admission.TokenRedemptionHash(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spentKey, err := admission.TokenSpentKey(redemption)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = BuildIssuerVerifierRequest(IssuerVerifierRequestInput{
+		Service:                   service,
+		AdmissionProof:            proof,
+		ReplayProof:               replay,
+		IssuerMetadataHash:        rb(0x99, 48),
+		RelayDescriptorHash:       rb(0x31, 48),
+		RouteInstanceID:           77,
+		HopIndex:                  1,
+		ReplayEpochValidUntilUnix: 800,
+		HandshakeBindingContext:   handshakeBinding,
+		AdmissionContextHash:      admissionContextHash,
+		ChallengeDigest:           rb(0x32, 32),
+		AuthenticatorInputHash:    rb(0x33, 48),
+		RequestNonce:              rb(0x34, 32),
+		RequestTimeUnix:           100,
+		NowUnix:                   100,
+		RequestAuthImplemented:    true,
+		TokenSpentCache:           tokenCache,
+		BootstrapDedupCache:       admission.NewMemoryReplayCache(),
+	})
+	if err == nil {
+		t.Fatalf("verifier request accepted mismatched issuer metadata")
+	}
+	if tokenCache.Has(spentKey) {
+		t.Fatalf("token was spent before verifier metadata validation completed")
 	}
 }
 
@@ -202,6 +294,8 @@ func TestBuildIssuerVerifierRequestRejectsStructurallyInvalidAdmissionProof(t *t
 				AdmissionContextHash:      admissionContextHash,
 				ChallengeDigest:           rb(0x32, 32),
 				AuthenticatorInputHash:    rb(0x33, 48),
+				TokenSpentCache:           admission.NewMemoryReplayCache(),
+				BootstrapDedupCache:       admission.NewMemoryReplayCache(),
 				RequestNonce:              rb(0x34, 32),
 				RequestTimeUnix:           tc.now,
 				NowUnix:                   tc.now,
@@ -230,6 +324,8 @@ func TestValidateIssuerVerifierResponseRequiresFreshMatchingAccept(t *testing.T)
 		AdmissionContextHash:      admissionContextHash,
 		ChallengeDigest:           rb(0x32, 32),
 		AuthenticatorInputHash:    rb(0x33, 48),
+		TokenSpentCache:           admission.NewMemoryReplayCache(),
+		BootstrapDedupCache:       admission.NewMemoryReplayCache(),
 		RequestNonce:              rb(0x34, 32),
 		RequestTimeUnix:           100,
 		NowUnix:                   100,
@@ -294,6 +390,8 @@ func TestValidateIssuerVerifierResponseRejectsUnusableService(t *testing.T) {
 		AdmissionContextHash:      admissionContextHash,
 		ChallengeDigest:           rb(0x32, 32),
 		AuthenticatorInputHash:    rb(0x33, 48),
+		TokenSpentCache:           admission.NewMemoryReplayCache(),
+		BootstrapDedupCache:       admission.NewMemoryReplayCache(),
 		RequestNonce:              rb(0x34, 32),
 		RequestTimeUnix:           100,
 		NowUnix:                   100,
@@ -335,6 +433,8 @@ func TestValidateIssuerVerifierResponseRejectsInvalidServiceSignature(t *testing
 		AdmissionContextHash:      admissionContextHash,
 		ChallengeDigest:           rb(0x32, 32),
 		AuthenticatorInputHash:    rb(0x33, 48),
+		TokenSpentCache:           admission.NewMemoryReplayCache(),
+		BootstrapDedupCache:       admission.NewMemoryReplayCache(),
 		RequestNonce:              rb(0x34, 32),
 		RequestTimeUnix:           100,
 		NowUnix:                   100,

@@ -97,6 +97,8 @@ type IssuerVerifierRequestInput struct {
 	AdmissionContextHash      []byte
 	ChallengeDigest           []byte
 	AuthenticatorInputHash    []byte
+	TokenSpentCache           *admission.MemoryReplayCache
+	BootstrapDedupCache       *admission.MemoryReplayCache
 	RequestNonce              []byte
 	RequestTimeUnix           uint64
 	NowUnix                   uint64
@@ -104,10 +106,17 @@ type IssuerVerifierRequestInput struct {
 }
 
 func BuildIssuerVerifierRequest(in IssuerVerifierRequestInput) (protocol.IssuerVerifierRequest, []byte, error) {
+	if in.TokenSpentCache == nil || in.BootstrapDedupCache == nil {
+		return protocol.IssuerVerifierRequest{}, nil, fmt.Errorf("ops: missing local replay cache")
+	}
 	if err := in.AdmissionProof.ValidateStructural(in.NowUnix, false); err != nil {
 		return protocol.IssuerVerifierRequest{}, nil, err
 	}
 	if err := in.Service.Allows(in.AdmissionProof.ProofType, in.AdmissionProof.RelayBucketID, in.NowUnix, in.RequestAuthImplemented); err != nil {
+		return protocol.IssuerVerifierRequest{}, nil, err
+	}
+	challengeDigest, authenticatorInputHash, err := verifierRequestAuthenticatorFields(in.AdmissionProof, in.IssuerMetadataHash, in.ChallengeDigest, in.AuthenticatorInputHash)
+	if err != nil {
 		return protocol.IssuerVerifierRequest{}, nil, err
 	}
 	tokenSpentKey, _, err := admission.VerifyAndSpendReplay(admission.ReplayVerificationInput{
@@ -117,12 +126,10 @@ func BuildIssuerVerifierRequest(in IssuerVerifierRequestInput) (protocol.IssuerV
 		HopIndex:                in.HopIndex,
 		HandshakeBindingContext: in.HandshakeBindingContext,
 		AdmissionContextHash:    in.AdmissionContextHash,
+		TokenSpentCache:         in.TokenSpentCache,
+		BootstrapDedupCache:     in.BootstrapDedupCache,
 		NowUnix:                 in.NowUnix,
 	})
-	if err != nil {
-		return protocol.IssuerVerifierRequest{}, nil, err
-	}
-	challengeDigest, authenticatorInputHash, err := verifierRequestAuthenticatorFields(in.AdmissionProof, in.IssuerMetadataHash, in.ChallengeDigest, in.AuthenticatorInputHash)
 	if err != nil {
 		return protocol.IssuerVerifierRequest{}, nil, err
 	}

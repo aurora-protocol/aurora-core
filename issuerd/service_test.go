@@ -136,6 +136,30 @@ func TestHarnessServiceValidityFollowsWallClockNow(t *testing.T) {
 	}
 }
 
+func TestHarnessServiceValiditySupportsLongRunningPrototypeServer(t *testing.T) {
+	nowUnix := uint64(1_800_000_000)
+	service, err := NewHarnessService(nowUnix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := service.PublishIssuerMetadata()
+	if metadata.ValidUntilUnix < nowUnix+86_400 {
+		t.Fatalf("metadata validity ends at %d, want at least %d for day-long prototype server runs", metadata.ValidUntilUnix, nowUnix+86_400)
+	}
+
+	proof, err := service.IssueBlindRSA2048(IssueBlindRSA2048Request{
+		TokenNonce:            fill(0x46, 32),
+		RedemptionContextHash: fill(0x47, 48),
+		ExpiryUnix:            nowUnix + 3_600,
+	})
+	if err != nil {
+		t.Fatalf("long-running server issue window failed: %v", err)
+	}
+	if err := admission.VerifyBlindRSA2048WithIssuerMetadata(proof, metadata, nowUnix); err != nil {
+		t.Fatalf("long-running proof did not verify against metadata: %v", err)
+	}
+}
+
 func TestIssueBlindRSA2048RejectsIncompleteServiceWithoutPanic(t *testing.T) {
 	defer func() {
 		if recovered := recover(); recovered != nil {

@@ -39,6 +39,13 @@ type ServiceOptions struct {
 	SpentTokenCache admission.ReplayCache
 }
 
+const (
+	harnessValidityBackfillSeconds  uint64 = 100
+	harnessValidityLifetimeSeconds  uint64 = 86_400
+	harnessAuthorityBackfillSeconds uint64 = 110
+	harnessAuthorityLifetimeSeconds uint64 = 90_000
+)
+
 type IssueBlindRSA2048Request struct {
 	TokenNonce            []byte
 	RedemptionContextHash []byte
@@ -93,8 +100,16 @@ func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service
 	blindRSAKeyID := sha256.Sum256(blindRSAKeyDER)
 	voprfKey := []byte("issuerd harness voprf verification key")
 	voprfKeyID := sha256.Sum256(voprfKey)
-	validFrom, validUntil := harnessValidityWindow(nowUnix, 100, 800)
-	authorityValidFrom, authorityValidUntil := harnessValidityWindow(nowUnix, 110, 900)
+	validFrom, validUntil := harnessValidityWindow(
+		nowUnix,
+		harnessValidityBackfillSeconds,
+		harnessValidityLifetimeSeconds,
+	)
+	authorityValidFrom, authorityValidUntil := harnessValidityWindow(
+		nowUnix,
+		harnessAuthorityBackfillSeconds,
+		harnessAuthorityLifetimeSeconds,
+	)
 
 	metadata := protocol.IssuerMetadata{
 		MetadataVersion:     registry.Version20,

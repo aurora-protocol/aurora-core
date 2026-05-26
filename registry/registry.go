@@ -103,6 +103,26 @@ const (
 const IssuerVerifierVOPRFMTLS13 uint64 = 0x0001
 
 const (
+	IssuerStatusActive   uint8 = 0x00
+	IssuerStatusRetiring uint8 = 0x01
+	IssuerStatusRevoked  uint8 = 0x02
+)
+
+const (
+	VerifierServiceKindVOPRF        uint64 = 0x0001
+	VerifierServiceKindOpaqueIssuer uint64 = 0x0002
+)
+
+const (
+	VerifierDecisionAccept                    uint8 = 0x00
+	VerifierDecisionRejectInvalidToken        uint8 = 0x01
+	VerifierDecisionRejectReplayOrSpent       uint8 = 0x02
+	VerifierDecisionRejectUnauthorizedBucket  uint8 = 0x03
+	VerifierDecisionRejectExpiredOrRevokedKey uint8 = 0x04
+	VerifierDecisionRejectPolicy              uint8 = 0x05
+)
+
+const (
 	FrameStreamData       uint64 = 0x01
 	FrameDatagramData     uint64 = 0x02
 	FrameIPPacket         uint64 = 0x03

@@ -38,7 +38,10 @@ func TestH3ExtDgramRequiresValidation(t *testing.T) {
 	if IsMethodAllowed(profile, registry.MethodWebH3ExtDgram, Capabilities{SupportsH3: true, SupportsH3Dgram: true, H3Validated: false, CoverTemplateOK: true}) {
 		t.Fatalf("H3 ext datagram must be validation-gated")
 	}
-	if !IsMethodAllowed(profile, registry.MethodWebH3ExtDgram, Capabilities{SupportsH3: true, SupportsH3Dgram: true, H3Validated: true, CoverTemplateOK: true}) {
+	if IsMethodAllowed(profile, registry.MethodWebH3ExtDgram, Capabilities{SupportsH3: true, SupportsH3Dgram: true, H3Validated: true, WebTransportOK: false, CoverTemplateOK: true}) {
+		t.Fatalf("H3 ext datagram must require WebTransport capability validation")
+	}
+	if !IsMethodAllowed(profile, registry.MethodWebH3ExtDgram, Capabilities{SupportsH3: true, SupportsH3Dgram: true, H3Validated: true, WebTransportOK: true, CoverTemplateOK: true}) {
 		t.Fatalf("validated H3 ext datagram should be allowed")
 	}
 }

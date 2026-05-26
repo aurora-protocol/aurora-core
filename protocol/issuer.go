@@ -1,0 +1,392 @@
+package protocol
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"fmt"
+
+	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/aurora-protocol/aurora-core/wire"
+)
+
+type IssuerTokenKeyRecord struct {
+	ProofType            uint64
+	TokenKeyID           []byte
+	TokenVerificationKey TokenVerificationKeyRecord
+	ValidFromUnix        uint64
+	ValidUntilUnix       uint64
+	KeyStatus            uint8
+}
+
+func (r IssuerTokenKeyRecord) EncodeTo(e *wire.Encoder) {
+	e.WriteVarint(r.ProofType)
+	e.WriteOpaqueFixed(r.TokenKeyID, 32)
+	r.TokenVerificationKey.EncodeTo(e)
+	e.WriteUint64(r.ValidFromUnix)
+	e.WriteUint64(r.ValidUntilUnix)
+	e.WriteUint8(r.KeyStatus)
+}
+
+func DecodeIssuerTokenKeyRecord(r *wire.Reader) IssuerTokenKeyRecord {
+	return IssuerTokenKeyRecord{
+		ProofType:            r.ReadVarint(),
+		TokenKeyID:           r.ReadOpaqueFixed(32),
+		TokenVerificationKey: DecodeTokenVerificationKeyRecord(r),
+		ValidFromUnix:        r.ReadUint64(),
+		ValidUntilUnix:       r.ReadUint64(),
+		KeyStatus:            r.ReadUint8(),
+	}
+}
+
+func (r IssuerTokenKeyRecord) Validate(now uint64) error {
+	if len(r.TokenKeyID) != 32 {
+		return fmt.Errorf("protocol: issuer token key id must be 32 bytes")
+	}
+	if now < r.ValidFromUnix || now >= r.ValidUntilUnix {
+		return fmt.Errorf("protocol: issuer token key outside validity interval")
+	}
+	if r.KeyStatus != registry.IssuerStatusActive && r.KeyStatus != registry.IssuerStatusRetiring {
+		return fmt.Errorf("protocol: issuer token key status not usable")
+	}
+	switch r.ProofType {
+	case registry.ProofVOPRFP384SHA384:
+		if r.TokenVerificationKey.TokenVerificationKeyScheme != registry.TokenKeyVOPRFP384SHA384 {
+			return fmt.Errorf("protocol: VOPRF proof requires VOPRF token key scheme")
+		}
+		if err := r.validateProductionTokenKeyID(); err != nil {
+			return err
+		}
+	case registry.ProofBlindRSA2048:
+		if r.TokenVerificationKey.TokenVerificationKeyScheme != registry.TokenKeyBlindRSA2048 {
+			return fmt.Errorf("protocol: Blind RSA proof requires Blind RSA token key scheme")
+		}
+		if err := r.validateProductionTokenKeyID(); err != nil {
+			return err
+		}
+	case registry.ProofOpaqueIssuer:
+		if r.TokenVerificationKey.TokenVerificationKeyScheme < 0x7000 || r.TokenVerificationKey.TokenVerificationKeyScheme > 0x7eff {
+			return fmt.Errorf("protocol: opaque issuer proof requires private token key scheme")
+		}
+	case registry.ProofLabStaticToken:
+		if r.TokenVerificationKey.TokenVerificationKeyScheme != registry.TokenKeyLabStaticNoKey {
+			return fmt.Errorf("protocol: lab static proof requires lab token key scheme")
+		}
+		if len(r.TokenVerificationKey.TokenVerificationKey) != 0 {
+			return fmt.Errorf("protocol: lab static token key must be empty")
+		}
+	default:
+		return fmt.Errorf("protocol: unknown issuer proof type 0x%x", r.ProofType)
+	}
+	return nil
+}
+
+func (r IssuerTokenKeyRecord) validateProductionTokenKeyID() error {
+	sum := sha256.Sum256(r.TokenVerificationKey.TokenVerificationKey)
+	if !bytes.Equal(r.TokenKeyID, sum[:]) {
+		return fmt.Errorf("protocol: token key id does not match token verification key")
+	}
+	return nil
+}
+
+type OriginInfoPolicy struct {
+	PolicyID             uint64
+	OriginInfo           []byte
+	AllowEmptyOriginInfo bool
+	ValidFromUnix        uint64
+	ValidUntilUnix       uint64
+}
+
+func (p OriginInfoPolicy) EncodeTo(e *wire.Encoder) {
+	e.WriteVarint(p.PolicyID)
+	e.WriteOpaque16(p.OriginInfo)
+	e.WriteBool(p.AllowEmptyOriginInfo)
+	e.WriteUint64(p.ValidFromUnix)
+	e.WriteUint64(p.ValidUntilUnix)
+}
+
+func DecodeOriginInfoPolicy(r *wire.Reader) OriginInfoPolicy {
+	return OriginInfoPolicy{
+		PolicyID:             r.ReadVarint(),
+		OriginInfo:           r.ReadOpaque16(),
+		AllowEmptyOriginInfo: r.ReadBool(),
+		ValidFromUnix:        r.ReadUint64(),
+		ValidUntilUnix:       r.ReadUint64(),
+	}
+}
+
+type RelayBucketScope struct {
+	RelayBucketID         []byte
+	TokenScopeID          []byte
+	AllowedOriginPolicyID []uint64
+	ValidFromUnix         uint64
+	ValidUntilUnix        uint64
+}
+
+func (s RelayBucketScope) EncodeTo(e *wire.Encoder) {
+	e.WriteOpaqueFixed(s.RelayBucketID, 16)
+	e.WriteOpaqueFixed(s.TokenScopeID, 16)
+	e.WriteVarintVector(s.AllowedOriginPolicyID)
+	e.WriteUint64(s.ValidFromUnix)
+	e.WriteUint64(s.ValidUntilUnix)
+}
+
+func DecodeRelayBucketScope(r *wire.Reader) RelayBucketScope {
+	return RelayBucketScope{
+		RelayBucketID:         r.ReadOpaqueFixed(16),
+		TokenScopeID:          r.ReadOpaqueFixed(16),
+		AllowedOriginPolicyID: r.ReadVarintVector(),
+		ValidFromUnix:         r.ReadUint64(),
+		ValidUntilUnix:        r.ReadUint64(),
+	}
+}
+
+type AuxiliaryBindingPolicy struct {
+	ProofType            uint64
+	BindingProofRequired bool
+	MaxBindingProofLen   uint16
+	BindingPolicyID      uint64
+}
+
+func (p AuxiliaryBindingPolicy) EncodeTo(e *wire.Encoder) {
+	e.WriteVarint(p.ProofType)
+	e.WriteBool(p.BindingProofRequired)
+	e.WriteUint16(p.MaxBindingProofLen)
+	e.WriteVarint(p.BindingPolicyID)
+}
+
+func DecodeAuxiliaryBindingPolicy(r *wire.Reader) AuxiliaryBindingPolicy {
+	return AuxiliaryBindingPolicy{
+		ProofType:            r.ReadVarint(),
+		BindingProofRequired: r.ReadBool(),
+		MaxBindingProofLen:   r.ReadUint16(),
+		BindingPolicyID:      r.ReadVarint(),
+	}
+}
+
+type IssuerVerifierServiceRecord struct {
+	ServiceID             []byte
+	ServiceKind           uint64
+	ServiceProtocolID     uint64
+	ServiceLocator        RoutingRecord
+	ServiceAuthKey        PublicKeyRecord
+	AllowedProofTypes     []uint64
+	AllowedRelayBucketIDs [][]byte
+	RequestAuthPolicyID   uint64
+	ValidFromUnix         uint64
+	ValidUntilUnix        uint64
+	ServiceStatus         uint8
+}
+
+func (s IssuerVerifierServiceRecord) EncodeTo(e *wire.Encoder) {
+	e.WriteOpaqueFixed(s.ServiceID, 16)
+	e.WriteVarint(s.ServiceKind)
+	e.WriteVarint(s.ServiceProtocolID)
+	s.ServiceLocator.EncodeTo(e)
+	s.ServiceAuthKey.EncodeTo(e)
+	e.WriteVarintVector(s.AllowedProofTypes)
+	e.WriteVarint(uint64(len(s.AllowedRelayBucketIDs)))
+	for _, id := range s.AllowedRelayBucketIDs {
+		e.WriteOpaqueFixed(id, 16)
+	}
+	e.WriteVarint(s.RequestAuthPolicyID)
+	e.WriteUint64(s.ValidFromUnix)
+	e.WriteUint64(s.ValidUntilUnix)
+	e.WriteUint8(s.ServiceStatus)
+}
+
+func DecodeIssuerVerifierServiceRecord(r *wire.Reader) IssuerVerifierServiceRecord {
+	count := func() uint64 { return r.ReadVarint() }
+	out := IssuerVerifierServiceRecord{
+		ServiceID:         r.ReadOpaqueFixed(16),
+		ServiceKind:       r.ReadVarint(),
+		ServiceProtocolID: r.ReadVarint(),
+		ServiceLocator: RoutingRecord{
+			RoutingRecordID:   r.ReadOpaque16(),
+			TransportFamilyID: r.ReadVarint(),
+			LocatorType:       r.ReadVarint(),
+			LocatorBody:       r.ReadOpaque16(),
+			Priority:          r.ReadVarint(),
+			NotBeforeUnix:     r.ReadUint64(),
+			NotAfterUnix:      r.ReadUint64(),
+		},
+		ServiceAuthKey:    DecodePublicKeyRecord(r),
+		AllowedProofTypes: r.ReadVarintVector(),
+	}
+	n := count()
+	for i := uint64(0); i < n; i++ {
+		out.AllowedRelayBucketIDs = append(out.AllowedRelayBucketIDs, r.ReadOpaqueFixed(16))
+	}
+	out.RequestAuthPolicyID = r.ReadVarint()
+	out.ValidFromUnix = r.ReadUint64()
+	out.ValidUntilUnix = r.ReadUint64()
+	out.ServiceStatus = r.ReadUint8()
+	return out
+}
+
+func (s IssuerVerifierServiceRecord) Allows(proofType uint64, relayBucketID []byte, now uint64, requestAuthPolicySupported bool) error {
+	if s.ServiceKind != registry.VerifierServiceKindVOPRF {
+		return fmt.Errorf("protocol: verifier service kind is not VOPRF")
+	}
+	if s.ServiceProtocolID != registry.IssuerVerifierVOPRFMTLS13 {
+		return fmt.Errorf("protocol: verifier service protocol unsupported")
+	}
+	if now < s.ValidFromUnix || now >= s.ValidUntilUnix {
+		return fmt.Errorf("protocol: verifier service outside validity interval")
+	}
+	if s.ServiceStatus != registry.IssuerStatusActive && s.ServiceStatus != registry.IssuerStatusRetiring {
+		return fmt.Errorf("protocol: verifier service status not usable")
+	}
+	if !requestAuthPolicySupported {
+		return fmt.Errorf("protocol: verifier service request auth policy unsupported")
+	}
+	if len(s.AllowedProofTypes) == 0 || len(s.AllowedRelayBucketIDs) == 0 {
+		return fmt.Errorf("protocol: verifier service allowlists are empty")
+	}
+	proofOK := false
+	for _, allowed := range s.AllowedProofTypes {
+		if allowed == proofType {
+			proofOK = true
+			break
+		}
+	}
+	if !proofOK {
+		return fmt.Errorf("protocol: verifier service proof type not allowed")
+	}
+	for _, allowed := range s.AllowedRelayBucketIDs {
+		if bytes.Equal(allowed, relayBucketID) {
+			return nil
+		}
+	}
+	return fmt.Errorf("protocol: verifier service relay bucket not allowed")
+}
+
+type IssuerMetadata struct {
+	MetadataVersion          uint64
+	IssuerID                 []byte
+	ValidFromUnix            uint64
+	ValidUntilUnix           uint64
+	IssuerName               []byte
+	SupportedProofTypes      []uint64
+	TokenKeyMappings         []IssuerTokenKeyRecord
+	OriginInfoPolicies       []OriginInfoPolicy
+	RelayBucketScopes        []RelayBucketScope
+	AuxiliaryBindingPolicies []AuxiliaryBindingPolicy
+	VerifierServices         []IssuerVerifierServiceRecord
+	MetadataSigningKeyID     []byte
+	SignatureScheme          uint64
+	KeyEncoding              uint64
+	MetadataSignature        []byte
+	Extensions               []Extension
+}
+
+func (m IssuerMetadata) EncodeTo(e *wire.Encoder) {
+	e.WriteVarint(m.MetadataVersion)
+	e.WriteOpaqueFixed(m.IssuerID, 16)
+	e.WriteUint64(m.ValidFromUnix)
+	e.WriteUint64(m.ValidUntilUnix)
+	e.WriteOpaque16(m.IssuerName)
+	e.WriteVarintVector(m.SupportedProofTypes)
+	e.WriteVarint(uint64(len(m.TokenKeyMappings)))
+	for _, mapping := range m.TokenKeyMappings {
+		mapping.EncodeTo(e)
+	}
+	e.WriteVarint(uint64(len(m.OriginInfoPolicies)))
+	for _, policy := range m.OriginInfoPolicies {
+		policy.EncodeTo(e)
+	}
+	e.WriteVarint(uint64(len(m.RelayBucketScopes)))
+	for _, scope := range m.RelayBucketScopes {
+		scope.EncodeTo(e)
+	}
+	e.WriteVarint(uint64(len(m.AuxiliaryBindingPolicies)))
+	for _, policy := range m.AuxiliaryBindingPolicies {
+		policy.EncodeTo(e)
+	}
+	e.WriteVarint(uint64(len(m.VerifierServices)))
+	for _, service := range m.VerifierServices {
+		service.EncodeTo(e)
+	}
+	e.WriteOpaqueFixed(m.MetadataSigningKeyID, 16)
+	e.WriteVarint(m.SignatureScheme)
+	e.WriteVarint(m.KeyEncoding)
+	e.WriteOpaque16(m.MetadataSignature)
+	EncodeExtensions(e, m.Extensions)
+}
+
+func (m IssuerMetadata) Unsigned() IssuerMetadata {
+	m.MetadataSignature = nil
+	return m
+}
+
+type IssuerVerifierRequest struct {
+	RequestVersion            uint64
+	ServiceID                 []byte
+	IssuerID                  []byte
+	IssuerMetadataHash        []byte
+	RelayDescriptorHash       []byte
+	RelayBucketID             []byte
+	RouteInstanceID           uint64
+	HopIndex                  uint8
+	ProofType                 uint64
+	TokenKeyID                []byte
+	TokenNonce                []byte
+	ChallengeDigest           []byte
+	AuthenticatorInputHash    []byte
+	TokenAuthenticator        []byte
+	TokenSpentKey             []byte
+	ReplayEpochID             uint64
+	ReplayEpochValidUntilUnix uint64
+	RequestNonce              []byte
+	RequestTimeUnix           uint64
+}
+
+func (r IssuerVerifierRequest) EncodeTo(e *wire.Encoder) {
+	e.WriteVarint(r.RequestVersion)
+	e.WriteOpaqueFixed(r.ServiceID, 16)
+	e.WriteOpaqueFixed(r.IssuerID, 16)
+	e.WritePreHash(r.IssuerMetadataHash)
+	e.WritePreHash(r.RelayDescriptorHash)
+	e.WriteOpaqueFixed(r.RelayBucketID, 16)
+	e.WriteVarint(r.RouteInstanceID)
+	e.WriteUint8(r.HopIndex)
+	e.WriteVarint(r.ProofType)
+	e.WriteOpaqueFixed(r.TokenKeyID, 32)
+	e.WriteOpaqueFixed(r.TokenNonce, 32)
+	e.WriteOpaqueFixed(r.ChallengeDigest, 32)
+	e.WritePreHash(r.AuthenticatorInputHash)
+	e.WriteOpaque16(r.TokenAuthenticator)
+	e.WritePreHash(r.TokenSpentKey)
+	e.WriteUint64(r.ReplayEpochID)
+	e.WriteUint64(r.ReplayEpochValidUntilUnix)
+	e.WriteOpaqueFixed(r.RequestNonce, 32)
+	e.WriteUint64(r.RequestTimeUnix)
+}
+
+type IssuerVerifierResponse struct {
+	ResponseVersion  uint64
+	ServiceID        []byte
+	RequestHash      []byte
+	Decision         uint8
+	DecisionDetail   uint8
+	TokenSpentKey    []byte
+	ValidUntilUnix   uint64
+	ResponseNonce    []byte
+	ServiceSignature []byte
+}
+
+func (r IssuerVerifierResponse) EncodeTo(e *wire.Encoder) {
+	e.WriteVarint(r.ResponseVersion)
+	e.WriteOpaqueFixed(r.ServiceID, 16)
+	e.WritePreHash(r.RequestHash)
+	e.WriteUint8(r.Decision)
+	e.WriteUint8(r.DecisionDetail)
+	e.WritePreHash(r.TokenSpentKey)
+	e.WriteUint64(r.ValidUntilUnix)
+	e.WriteOpaqueFixed(r.ResponseNonce, 32)
+	e.WriteOpaque16(r.ServiceSignature)
+}
+
+func (r IssuerVerifierResponse) Unsigned() IssuerVerifierResponse {
+	r.ServiceSignature = nil
+	return r
+}

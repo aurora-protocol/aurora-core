@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/aurora-protocol/aurora-core/admission"
@@ -66,6 +67,8 @@ func main() {
 		err = cryptoCheck(os.Stdout)
 	case "wire-check":
 		err = wireCheck(os.Stdout)
+	case "host-build-check":
+		err = hostBuildCheck(os.Args[2:], os.Stdout)
 	case "check-config":
 		if len(os.Args) != 3 {
 			err = fmt.Errorf("check-config requires a path")
@@ -82,7 +85,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|cover-check|crypto-check|wire-check|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|cover-check|crypto-check|wire-check|host-build-check [--portable|--apple-simulator|--all]|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -347,7 +350,7 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- signed directory, relay descriptor, and cover-template real-crypto vectors")
 	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, exit-layer packet, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
-	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, external evaluation evidence verifier, deployment security assessment evidence verifier, platform adapter conformance profiles, platform packaging and entitlement conformance matrix, release readiness evidence verifier, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, issuer service readiness harness, issuer HTTP daemon readiness harness, cover-origin deployment conformance harness")
+	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, P0 host build matrix, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, external evaluation evidence verifier, deployment security assessment evidence verifier, platform adapter conformance profiles, platform packaging and entitlement conformance matrix, release readiness evidence verifier, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, issuer service readiness harness, issuer HTTP daemon readiness harness, cover-origin deployment conformance harness")
 	fmt.Fprintln(w, "not production-complete:")
 	fmt.Fprintln(w, "- external live issuer deployment, real signed platform release execution/device provisioning, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation")
 }
@@ -771,6 +774,76 @@ func wireCheck(w io.Writer) error {
 		return fmt.Errorf("wire-check found forbidden public marker")
 	}
 	return nil
+}
+
+func hostBuildCheck(args []string, w io.Writer) error {
+	return hostBuildCheckWithRunner(args, w, execHostBuildRunner{})
+}
+
+func hostBuildCheckWithRunner(args []string, w io.Writer, runner auroraplatform.HostBuildRunner) error {
+	targets, err := hostBuildTargetsForArgs(args)
+	if err != nil {
+		return err
+	}
+	report := auroraplatform.VerifyHostBuildMatrix(targets, []string{"./..."}, runner)
+	failures := 0
+	for _, result := range report.Results {
+		if !result.Passed {
+			failures++
+		}
+	}
+	fmt.Fprintf(w, "host_build_check passed=%t targets=%d failures=%d\n", report.Passed, report.Targets, failures)
+	for _, result := range report.Results {
+		fmt.Fprintf(
+			w,
+			"host_build_target %s passed=%t goos=%s goarch=%s cgo=%s\n",
+			result.Target.Name,
+			result.Passed,
+			result.Target.GOOS,
+			result.Target.GOARCH,
+			result.Target.CGOEnabled,
+		)
+	}
+	for _, finding := range report.Findings {
+		fmt.Fprintf(w, "host_build_finding %s\n", finding)
+	}
+	if !report.Passed {
+		return fmt.Errorf("host-build-check failed host build matrix")
+	}
+	return nil
+}
+
+func hostBuildTargetsForArgs(args []string) ([]auroraplatform.HostBuildTarget, error) {
+	if len(args) == 0 {
+		return auroraplatform.PortableHostBuildTargets(), nil
+	}
+	if len(args) != 1 {
+		return nil, fmt.Errorf("host-build-check: too many arguments")
+	}
+	switch args[0] {
+	case "--portable":
+		return auroraplatform.PortableHostBuildTargets(), nil
+	case "--apple-simulator":
+		return auroraplatform.AppleSimulatorHostBuildTargets(), nil
+	case "--all":
+		targets := auroraplatform.PortableHostBuildTargets()
+		targets = append(targets, auroraplatform.AppleSimulatorHostBuildTargets()...)
+		return targets, nil
+	default:
+		return nil, fmt.Errorf("host-build-check: unknown option %q", args[0])
+	}
+}
+
+type execHostBuildRunner struct{}
+
+func (execHostBuildRunner) RunHostBuild(target auroraplatform.HostBuildTarget, args []string) ([]byte, error) {
+	cmd := exec.Command("go", args...)
+	cmd.Env = append(os.Environ(),
+		"GOOS="+target.GOOS,
+		"GOARCH="+target.GOARCH,
+		"CGO_ENABLED="+target.CGOEnabled,
+	)
+	return cmd.CombinedOutput()
 }
 
 type wireCheckResult struct {

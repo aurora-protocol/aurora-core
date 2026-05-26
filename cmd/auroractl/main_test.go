@@ -2,10 +2,14 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	auroraplatform "github.com/aurora-protocol/aurora-core/platform"
 )
 
 func TestActiveProbesCommandPrintsBaselineReport(t *testing.T) {
@@ -126,6 +130,51 @@ func TestPlatformCheckCommandPrintsAdapterConformance(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(text), "passed=false") {
 		t.Fatalf("platform-check output contains failing platform:\n%s", text)
+	}
+}
+
+func TestHostBuildCheckCommandPrintsPortableMatrixReport(t *testing.T) {
+	runner := &recordingCommandHostBuildRunner{}
+	var out bytes.Buffer
+	if err := hostBuildCheckWithRunner([]string{"--portable"}, &out, runner); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "host_build_check passed=true targets=4 failures=0\n") {
+		t.Fatalf("host-build-check output missing summary:\n%s", text)
+	}
+	if !strings.Contains(text, "host_build_target linux-amd64 passed=true goos=linux goarch=amd64 cgo=0\n") ||
+		!strings.Contains(text, "host_build_target android-arm64 passed=true goos=android goarch=arm64 cgo=0\n") {
+		t.Fatalf("host-build-check output missing portable targets:\n%s", text)
+	}
+	wantArgs := []string{"test", "-run", "^$", "-exec=true", "./..."}
+	if len(runner.calls) != 4 || !reflect.DeepEqual(runner.calls[0].Args, wantArgs) {
+		t.Fatalf("host build runner calls = %+v, want 4 compile-only calls with %v", runner.calls, wantArgs)
+	}
+}
+
+func TestHostBuildCheckCommandPrintsAppleSimulatorTarget(t *testing.T) {
+	runner := &recordingCommandHostBuildRunner{}
+	var out bytes.Buffer
+	if err := hostBuildCheckWithRunner([]string{"--apple-simulator"}, &out, runner); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "host_build_check passed=true targets=1 failures=0\n") ||
+		!strings.Contains(text, "host_build_target ios-simulator-arm64 passed=true goos=ios goarch=arm64 cgo=1\n") {
+		t.Fatalf("host-build-check output missing apple simulator target:\n%s", text)
+	}
+}
+
+func TestHostBuildCheckCommandFailsOnCompileFailure(t *testing.T) {
+	runner := &recordingCommandHostBuildRunner{err: errors.New("compile failed")}
+	var out bytes.Buffer
+	err := hostBuildCheckWithRunner([]string{"--portable"}, &out, runner)
+	if err == nil {
+		t.Fatalf("host-build-check accepted compile failure")
+	}
+	if !strings.Contains(out.String(), "host_build_finding linux-amd64: compile failed") {
+		t.Fatalf("host-build-check output missing finding:\n%s", out.String())
 	}
 }
 
@@ -525,6 +574,8 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go run ./cmd/auroractl vectors --real-crypto --check",
 		"go run ./cmd/auroractl crypto-check",
 		"go run ./cmd/auroractl wire-check",
+		"go run ./cmd/auroractl host-build-check --portable",
+		"go run ./cmd/auroractl host-build-check --apple-simulator",
 		"go run ./cmd/auroractl active-probes",
 		"go run ./cmd/auroractl classifier-check",
 		"go run ./cmd/auroractl evaluation-check",
@@ -542,4 +593,25 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 			t.Fatalf("CI workflow missing %q:\n%s", want, text)
 		}
 	}
+}
+
+type recordingCommandHostBuildRunner struct {
+	err   error
+	calls []commandHostBuildRunnerCall
+}
+
+type commandHostBuildRunnerCall struct {
+	Target auroraplatform.HostBuildTarget
+	Args   []string
+}
+
+func (r *recordingCommandHostBuildRunner) RunHostBuild(target auroraplatform.HostBuildTarget, args []string) ([]byte, error) {
+	r.calls = append(r.calls, commandHostBuildRunnerCall{
+		Target: target,
+		Args:   append([]string(nil), args...),
+	})
+	if r.err != nil {
+		return []byte(r.err.Error()), r.err
+	}
+	return []byte("ok"), nil
 }

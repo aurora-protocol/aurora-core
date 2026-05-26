@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/aurora-protocol/aurora-core/protocol"
 )
 
 func TestSecretStringRedactsData(t *testing.T) {
@@ -92,6 +94,67 @@ func TestSafeFieldRedactsSensitiveRawValues(t *testing.T) {
 	ordinary := SafeField("route_instance_id", "r1", false)
 	if ordinary.Value != "r1" {
 		t.Fatalf("ordinary field was unexpectedly changed: %+v", ordinary)
+	}
+}
+
+func TestSafeFieldRedactsTypedProofValuesUnderOrdinaryKeys(t *testing.T) {
+	for name, value := range map[string]any{
+		"admission": protocol.AdmissionProof{
+			TokenAuthenticator: []byte{0xde, 0xad, 0xbe, 0xef},
+		},
+		"admission pointer": &protocol.AdmissionProof{
+			TokenAuthenticator: []byte{0xde, 0xad, 0xbe, 0xef},
+		},
+		"replay": protocol.ReplayProof{
+			ClientReplayNonce: []byte{0xca, 0xfe},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			field := SafeField("context", value, false)
+			if field.Value != "[redacted-field]" {
+				t.Fatalf("typed proof value was not fully redacted: %+v", field)
+			}
+		})
+	}
+}
+
+func TestSafeFieldRedactsStructsWithSensitiveCamelCaseFields(t *testing.T) {
+	value := struct {
+		TokenAuthenticator []byte
+	}{
+		TokenAuthenticator: []byte{0xde, 0xad, 0xbe, 0xef},
+	}
+	field := SafeField("context", value, false)
+	if field.Value != "[redacted-field]" {
+		t.Fatalf("struct with sensitive field was not fully redacted: %+v", field)
+	}
+}
+
+func TestSafeFieldRedactsSensitiveValuesInsideContainers(t *testing.T) {
+	for name, value := range map[string]any{
+		"slice": []protocol.AdmissionProof{{
+			TokenAuthenticator: []byte{0xde, 0xad, 0xbe, 0xef},
+		}},
+		"map": map[string]protocol.ReplayProof{
+			"proof": {ClientReplayNonce: []byte{0xca, 0xfe}},
+		},
+		"struct slice field": struct {
+			Items []protocol.AdmissionProof
+		}{
+			Items: []protocol.AdmissionProof{{TokenAuthenticator: []byte{0xde, 0xad}}},
+		},
+		"struct pointer field": struct {
+			Item *protocol.ReplayProof
+		}{
+			Item: &protocol.ReplayProof{ClientReplayNonce: []byte{0xca, 0xfe}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			field := SafeField("context", value, false)
+			if field.Value != "[redacted-field]" {
+				t.Fatalf("container with sensitive value was not fully redacted: %+v", field)
+			}
+		})
 	}
 }
 

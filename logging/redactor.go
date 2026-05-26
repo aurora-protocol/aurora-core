@@ -3,6 +3,7 @@ package logging
 import (
 	"encoding/hex"
 	"fmt"
+	"reflect"
 	"strings"
 )
 
@@ -46,7 +47,10 @@ func SafeField(key string, value any, labEnabled bool) Field {
 	if secret, ok := value.(Secret); ok {
 		return Field{Key: key, Value: LabString(secret, labEnabled)}
 	}
-	if isSensitiveFieldKey(key) {
+	if secret, ok := value.(*Secret); ok && secret != nil {
+		return Field{Key: key, Value: LabString(*secret, labEnabled)}
+	}
+	if isSensitiveFieldKey(key) || isSensitiveValue(value) {
 		return Field{Key: key, Value: "[redacted-field]"}
 	}
 	return Field{Key: key, Value: SanitizeMessage(fmt.Sprintf("%v", value))}
@@ -131,19 +135,124 @@ func isSensitiveFieldKey(key string) bool {
 	normalized := strings.ToLower(strings.NewReplacer("-", "_", " ", "_").Replace(key))
 	switch normalized {
 	case "admission_proof",
+		"admissionproof",
 		"replay_proof",
+		"replayproof",
 		"token_authenticator",
+		"tokenauthenticator",
 		"hint_secret",
+		"hintsecret",
 		"bridge_locator",
+		"bridgelocator",
 		"private_relay_ip",
+		"privaterelayip",
 		"cover_origin",
+		"coverorigin",
 		"admission_key",
+		"admissionkey",
 		"bucket_user_mapping",
+		"bucketusermapping",
 		"raw_capsule_plaintext",
+		"rawcapsuleplaintext",
 		"cover_capsule_plaintext",
+		"covercapsuleplaintext",
 		"capsule_plaintext",
+		"capsuleplaintext",
 		"route_wrap_plaintext",
-		"route_prelude_plaintext":
+		"routewrapplaintext",
+		"route_prelude_plaintext",
+		"routepreludeplaintext":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSensitiveValue(value any) bool {
+	if value == nil {
+		return false
+	}
+	return containsSensitiveValue(reflect.ValueOf(value), 0)
+}
+
+func containsSensitiveValue(v reflect.Value, depth int) bool {
+	if !v.IsValid() || depth > 8 {
+		return false
+	}
+	t := v.Type()
+	if isSensitiveType(t, depth) {
+		return true
+	}
+
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if v.IsNil() {
+			return false
+		}
+		return containsSensitiveValue(v.Elem(), depth+1)
+	case reflect.Struct:
+		for i := 0; i < t.NumField(); i++ {
+			field := t.Field(i)
+			if isSensitiveFieldKey(field.Name) || isSensitiveType(field.Type, depth+1) {
+				return true
+			}
+			if containsSensitiveValue(v.Field(i), depth+1) {
+				return true
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			if containsSensitiveValue(v.Index(i), depth+1) {
+				return true
+			}
+		}
+	case reflect.Map:
+		iter := v.MapRange()
+		for iter.Next() {
+			if containsSensitiveValue(iter.Key(), depth+1) || containsSensitiveValue(iter.Value(), depth+1) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isSensitiveType(t reflect.Type, depth int) bool {
+	if t == nil || depth > 8 {
+		return false
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+		if t == nil {
+			return false
+		}
+	}
+	if isSensitiveTypeName(t.Name()) {
+		return true
+	}
+	switch t.Kind() {
+	case reflect.Slice, reflect.Array:
+		return isSensitiveType(t.Elem(), depth+1)
+	case reflect.Map:
+		return isSensitiveType(t.Key(), depth+1) || isSensitiveType(t.Elem(), depth+1)
+	case reflect.Struct:
+		for i := 0; i < t.NumField(); i++ {
+			field := t.Field(i)
+			if isSensitiveFieldKey(field.Name) || isSensitiveType(field.Type, depth+1) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isSensitiveTypeName(name string) bool {
+	switch name {
+	case "AdmissionProof",
+		"ReplayProof",
+		"CoverCapsule1Plain",
+		"RouteCapsule1Plain",
+		"IssuerVerifierRequest":
 		return true
 	default:
 		return false

@@ -162,6 +162,12 @@ func writeVectors(w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	fmt.Fprintln(w, "object_signature:", bundle.ObjectSignature)
+	fmt.Fprintln(w, "object_signature_unsigned:", bundle.ObjectSignatureUnsigned)
+	fmt.Fprintln(w, "object_signature_hash:", bundle.ObjectSignatureHash)
+	fmt.Fprintln(w, "directory_consensus:", bundle.DirectoryConsensus)
+	fmt.Fprintln(w, "relay_descriptor:", bundle.RelayDescriptor)
+	fmt.Fprintln(w, "cover_template:", bundle.CoverTemplate)
 	fmt.Fprintln(w, "flow_open:", bundle.FlowOpen)
 	fmt.Fprintln(w, "udp_target_confirm:", bundle.UDPTargetConfirm)
 	fmt.Fprintln(w, "flow_close:", bundle.FlowClose)

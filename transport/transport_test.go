@@ -45,3 +45,37 @@ func TestH3ExtDgramRequiresValidation(t *testing.T) {
 		t.Fatalf("validated H3 ext datagram should be allowed")
 	}
 }
+
+func TestCarrierPlanMarksH2UDPStreamFallbackDowngrade(t *testing.T) {
+	profile, _ := policy.ProfileByID(registry.PolicyAdversarialDPI)
+	plan, err := SelectCarrierPlan(profile, Capabilities{SupportsH2: true, CoverTemplateOK: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Carrier.MethodID != registry.MethodWebH2Stream {
+		t.Fatalf("expected H2 carrier, got %+v", plan.Carrier)
+	}
+	if plan.UDPMode != UDPOverStreamFallback || !plan.PerformanceDowngrade {
+		t.Fatalf("H2 UDP fallback was not exposed as downgrade: %+v", plan)
+	}
+}
+
+func TestCarrierPlanMarksValidatedH3DatagramNative(t *testing.T) {
+	profile, _ := policy.ProfileByID(registry.PolicyFastWeb)
+	plan, err := SelectCarrierPlan(profile, Capabilities{
+		SupportsH3:      true,
+		SupportsH3Dgram: true,
+		H3Validated:     true,
+		WebTransportOK:  true,
+		CoverTemplateOK: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Carrier.MethodID != registry.MethodWebH3ExtDgram {
+		t.Fatalf("expected H3 ext-dgram carrier, got %+v", plan.Carrier)
+	}
+	if plan.UDPMode != UDPNativeDatagram || plan.PerformanceDowngrade {
+		t.Fatalf("validated H3 datagram should be native, got %+v", plan)
+	}
+}

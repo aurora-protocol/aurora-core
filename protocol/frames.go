@@ -619,7 +619,6 @@ func ValidateFlowClose(close FlowClose) error {
 	switch {
 	case close.CloseCode <= CloseResourceLimit:
 	case close.CloseCode >= 0x7000 && close.CloseCode <= 0x7eff:
-	case close.CloseCode >= 0x7f00 && close.CloseCode <= 0x7fff:
 	default:
 		return fmt.Errorf("protocol: reserved flow close code 0x%x", close.CloseCode)
 	}

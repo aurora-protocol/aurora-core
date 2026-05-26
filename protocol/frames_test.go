@@ -88,6 +88,42 @@ func TestValidateFrameBlockRejectsReservedFlowCloseCode(t *testing.T) {
 	}
 }
 
+func TestValidateFrameBlockRejectsLabOnlyFlowCloseCode(t *testing.T) {
+	payload, err := Encode(FlowClose{
+		FlowID:    8,
+		CloseCode: 0x7f00,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ValidateFrameBlock(FrameBlock{Frames: []AuroraFrame{{
+		FrameType: registry.FrameFlowClose,
+		FlowID:    8,
+		Payload:   payload,
+	}}})
+	if err == nil {
+		t.Fatalf("lab-only FlowClose close code accepted")
+	}
+}
+
+func TestValidateFrameBlockAllowsPrivateUseFlowCloseCode(t *testing.T) {
+	payload, err := Encode(FlowClose{
+		FlowID:    8,
+		CloseCode: 0x7000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ValidateFrameBlock(FrameBlock{Frames: []AuroraFrame{{
+		FrameType: registry.FrameFlowClose,
+		FlowID:    8,
+		Payload:   payload,
+	}}})
+	if err != nil {
+		t.Fatalf("private-use FlowClose close code rejected: %v", err)
+	}
+}
+
 func TestValidateFrameBlockRejectsZeroFlowCloseID(t *testing.T) {
 	payload, err := Encode(FlowClose{
 		FlowID:    0,

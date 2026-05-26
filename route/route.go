@@ -213,6 +213,9 @@ func OpenPrivatePrelude(env EnvelopeInput, envelope protocol.RoutePreludeEnvelop
 	if err != nil {
 		return PrivatePrelude{}, err
 	}
+	if err := ValidatePrivatePreludeHeader(private); err != nil {
+		return PrivatePrelude{}, err
+	}
 	context, err := auroracrypto.RoutePreludeWrapContext(env.routeWrapInput())
 	if err != nil {
 		return PrivatePrelude{}, err
@@ -232,6 +235,16 @@ func OpenPrivatePrelude(env EnvelopeInput, envelope protocol.RoutePreludeEnvelop
 		return PrivatePrelude{}, err
 	}
 	return private, nil
+}
+
+func ValidatePrivatePreludeHeader(private PrivatePrelude) error {
+	if private.MsgType != registry.MsgRoutePrelude0 {
+		return fmt.Errorf("route: malformed private prelude message type 0x%x", private.MsgType)
+	}
+	if private.Version != registry.Version20 {
+		return fmt.Errorf("route: unsupported private prelude version 0x%x", private.Version)
+	}
+	return nil
 }
 
 func ValidatePrivatePreludeHybridShares(private PrivatePrelude) error {

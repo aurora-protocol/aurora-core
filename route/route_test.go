@@ -7,6 +7,7 @@ import (
 
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/failure"
+	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 )
 
@@ -156,6 +157,40 @@ func TestOpenPrivatePreludeClassifiesMalformedHybridShares(t *testing.T) {
 	}
 }
 
+func TestOpenPrivatePreludeRejectsMalformedPrivateHeader(t *testing.T) {
+	env := routeTestEnvelope()
+	for name, mutate := range map[string]func(*PrivatePrelude){
+		"wrong message type": func(p *PrivatePrelude) {
+			p.MsgType = registry.MsgCoverPrelude0
+		},
+		"wrong version": func(p *PrivatePrelude) {
+			p.Version = registry.Version20 + 1
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			private := routeTestPrivatePrelude(t, env)
+			context, err := auroracrypto.RoutePreludeWrapContext(env.routeWrapInput())
+			if err != nil {
+				t.Fatal(err)
+			}
+			private.RoutePreludeWrapContext = context
+			private.RouteInstanceID = env.RouteInstanceID
+			private.HopIndex = env.HopIndex
+			private.PreviousHopRelayDescriptorHash = env.PreviousHopRelayDescriptorHash
+			private.NextRelayDescriptorHash = env.NextRelayDescriptorHash
+			private.HintIssuerID = env.HintIssuerID
+			private.RelayBucketID = env.RelayBucketID
+			private.HintEpochID = env.HintEpochID
+			private.HintSelector = env.HintSelector
+			mutate(&private)
+			envelope := sealRouteTestPrivatePrelude(t, env, private)
+			if _, err := OpenPrivatePrelude(env, envelope); err == nil {
+				t.Fatalf("malformed private prelude header was accepted")
+			}
+		})
+	}
+}
+
 func routeTestEnvelope() EnvelopeInput {
 	return EnvelopeInput{
 		RouteInstanceID:                1,
@@ -169,6 +204,31 @@ func routeTestEnvelope() EnvelopeInput {
 		WrapSuiteID:                    registry.WrapSuiteRouteV1,
 		WrapNonce:                      rb(0x32, 16),
 		HintSecret:                     rb(0x33, 32),
+	}
+}
+
+func sealRouteTestPrivatePrelude(t *testing.T, env EnvelopeInput, private PrivatePrelude) protocol.RoutePreludeEnvelope {
+	t.Helper()
+	encoded, err := protocol.Encode(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, _, sealed, err := auroracrypto.SealRoutePrelude(env.routeWrapInput(), encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return protocol.RoutePreludeEnvelope{
+		RouteInstanceID:                env.RouteInstanceID,
+		HopIndex:                       env.HopIndex,
+		PreviousHopRelayDescriptorHash: append([]byte(nil), env.PreviousHopRelayDescriptorHash...),
+		NextRelayDescriptorHash:        append([]byte(nil), env.NextRelayDescriptorHash...),
+		HintIssuerID:                   append([]byte(nil), env.HintIssuerID...),
+		RelayBucketID:                  append([]byte(nil), env.RelayBucketID...),
+		HintEpochID:                    env.HintEpochID,
+		HintSelector:                   append([]byte(nil), env.HintSelector...),
+		WrapSuiteID:                    env.WrapSuiteID,
+		WrapNonce:                      append([]byte(nil), env.WrapNonce...),
+		SealedRoutePrelude0:            sealed,
 	}
 }
 

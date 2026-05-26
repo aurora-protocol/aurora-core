@@ -385,6 +385,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "platform adapter conformance profiles") {
 		t.Fatalf("capabilities output missing platform adapter conformance:\n%s", text)
 	}
+	if !strings.Contains(text, "packet, DNS, socket, and network-path platform ABI forwarding") {
+		t.Fatalf("capabilities output missing full platform ABI forwarding:\n%s", text)
+	}
 	if !strings.Contains(text, "packet-to-core platform ABI forwarding") {
 		t.Fatalf("capabilities output missing packet-to-core platform ABI forwarding:\n%s", text)
 	}

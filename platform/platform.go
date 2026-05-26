@@ -101,6 +101,14 @@ type PathInfo struct {
 	Expensive bool
 }
 
+type SocketEvent struct {
+	EventType     string
+	FlowID        uint64
+	RemoteAddress string
+	RemotePort    uint16
+	Payload       []byte
+}
+
 type Event struct {
 	Type string
 	Path PathInfo
@@ -123,6 +131,7 @@ type CoreSink interface {
 	SubmitUDPDatagram(flowID uint64, datagram []byte) error
 	SubmitDNSMessage(flowID uint64, message []byte) error
 	SubmitPacket(packet []byte) error
+	SubmitSocketEvent(event SocketEvent) error
 	ReadPacketOrFrame() ([]byte, bool)
 	NotifyNetworkChange(PathInfo)
 	ExportRedactedDiagnostics() []byte
@@ -185,6 +194,14 @@ func (a *ThinAdapter) SubmitPacket(packet []byte) error {
 		return fmt.Errorf("platform: missing core sink")
 	}
 	return a.core.SubmitPacket(append([]byte(nil), packet...))
+}
+
+func (a *ThinAdapter) SubmitSocketEvent(event SocketEvent) error {
+	if a.core == nil {
+		return fmt.Errorf("platform: missing core sink")
+	}
+	event.Payload = append([]byte(nil), event.Payload...)
+	return a.core.SubmitSocketEvent(event)
 }
 
 func (a *ThinAdapter) ReadPacketOrFrame() ([]byte, bool) {

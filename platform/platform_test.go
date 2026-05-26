@@ -2,6 +2,7 @@ package platform
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 
 	"github.com/aurora-protocol/aurora-core/flow"
@@ -122,8 +123,19 @@ func TestThinAdapterForwardsCoreABIWithoutCryptoState(t *testing.T) {
 		t.Fatal(err)
 	}
 	packet[0] = 0
+	socketPayload := []byte{0x05, 0x06, 0x07}
+	if err := adapter.SubmitSocketEvent(SocketEvent{
+		EventType:     "connect",
+		FlowID:        4,
+		RemoteAddress: "203.0.113.7",
+		RemotePort:    443,
+		Payload:       socketPayload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	socketPayload[0] = 0
 	adapter.NotifyNetworkChange(PathInfo{Interface: "wifi"})
-	if sink.openSessions != 1 || sink.tcpFlows != 1 || sink.udpDatagrams != 1 || sink.dnsMessages != 1 || sink.packets != 1 || sink.networkChanges != 1 {
+	if sink.openSessions != 1 || sink.tcpFlows != 1 || sink.udpDatagrams != 1 || sink.dnsMessages != 1 || sink.packets != 1 || sink.socketEvents != 1 || sink.networkChanges != 1 {
 		t.Fatalf("adapter did not forward ABI calls: %+v", sink)
 	}
 	if !bytes.Equal(sink.lastTCPFlow.TargetHost, []byte("example.com")) {
@@ -135,6 +147,12 @@ func TestThinAdapterForwardsCoreABIWithoutCryptoState(t *testing.T) {
 	if !bytes.Equal(sink.lastPacket, []byte{0x45, 0x00, 0x00, 0x14}) {
 		t.Fatalf("packet was not copied before forwarding: %x", sink.lastPacket)
 	}
+	if sink.lastSocketEvent.EventType != "connect" || sink.lastSocketEvent.FlowID != 4 || sink.lastSocketEvent.RemoteAddress != "203.0.113.7" || sink.lastSocketEvent.RemotePort != 443 {
+		t.Fatalf("socket event metadata was not forwarded: %+v", sink.lastSocketEvent)
+	}
+	if !bytes.Equal(sink.lastSocketEvent.Payload, []byte{0x05, 0x06, 0x07}) {
+		t.Fatalf("socket event payload was not copied before forwarding: %x", sink.lastSocketEvent.Payload)
+	}
 	sink.nextPacketOrFrame = []byte{0x01, 0x02, 0x03}
 	outbound, ok := adapter.ReadPacketOrFrame()
 	if !ok || !bytes.Equal(outbound, []byte{0x01, 0x02, 0x03}) {
@@ -143,6 +161,13 @@ func TestThinAdapterForwardsCoreABIWithoutCryptoState(t *testing.T) {
 	outbound[0] = 0xff
 	if !bytes.Equal(sink.lastReturnedPacketOrFrame, []byte{0x01, 0x02, 0x03}) {
 		t.Fatalf("outbound packet/frame exposed core-owned buffer: %x", sink.lastReturnedPacketOrFrame)
+	}
+}
+
+func TestThinAdapterExposesSocketEventBoundary(t *testing.T) {
+	adapter := NewThinAdapter(ProfileFor(KindCI), &recordingCoreSink{})
+	if _, ok := reflect.TypeOf(adapter).MethodByName("SubmitSocketEvent"); !ok {
+		t.Fatalf("thin adapter does not expose socket event ingress")
 	}
 }
 
@@ -210,6 +235,21 @@ func TestAdapterBlueprintVerificationRequiresPacketIngressBoundary(t *testing.T)
 	}
 }
 
+func TestAdapterBlueprintVerificationRequiresSocketEventBoundary(t *testing.T) {
+	blueprints := AdapterBlueprints()
+	blueprints[0].CoreBoundaryMethods = removeString(blueprints[0].CoreBoundaryMethods, "submit-socket-event")
+	report, err := VerifyAdapterBlueprints(blueprints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatalf("platform adapter conformance accepted missing socket event boundary: %+v", report)
+	}
+	if len(report.Failures) != 1 || report.Failures[0].Field != "core_boundary" {
+		t.Fatalf("unexpected platform adapter failure report: %+v", report.Failures)
+	}
+}
+
 func removeString(values []string, drop string) []string {
 	out := values[:0]
 	for _, value := range values {
@@ -226,10 +266,12 @@ type recordingCoreSink struct {
 	udpDatagrams              int
 	dnsMessages               int
 	packets                   int
+	socketEvents              int
 	networkChanges            int
 	lastTCPFlow               protocol.FlowOpen
 	lastDNSMessage            []byte
 	lastPacket                []byte
+	lastSocketEvent           SocketEvent
 	nextPacketOrFrame         []byte
 	lastReturnedPacketOrFrame []byte
 }
@@ -266,6 +308,13 @@ func (s *recordingCoreSink) SubmitDNSMessage(_ uint64, message []byte) error {
 func (s *recordingCoreSink) SubmitPacket(packet []byte) error {
 	s.packets++
 	s.lastPacket = append([]byte(nil), packet...)
+	return nil
+}
+
+func (s *recordingCoreSink) SubmitSocketEvent(event SocketEvent) error {
+	s.socketEvents++
+	s.lastSocketEvent = event
+	s.lastSocketEvent.Payload = append([]byte(nil), event.Payload...)
 	return nil
 }
 

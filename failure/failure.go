@@ -60,6 +60,19 @@ type ProbeCase struct {
 	Kind Kind
 }
 
+type ProbeReport struct {
+	Passed           bool
+	CanonicalSurface ProbeSurface
+	Cases            []ProbeFinding
+}
+
+type ProbeFinding struct {
+	Name    string
+	Kind    Kind
+	Surface ProbeSurface
+	Passed  bool
+}
+
 func (k Kind) Code() uint16 {
 	if k < BadAccessHint || k > MalformedHybridShare {
 		return uint16(Unknown)
@@ -94,6 +107,36 @@ func PublicProbeSurface(k Kind) (ProbeSurface, error) {
 	}, nil
 }
 
+func RunActiveProbeHarness(cases []ProbeCase) (ProbeReport, error) {
+	if len(cases) == 0 {
+		return ProbeReport{}, fmt.Errorf("failure: no active-probe cases")
+	}
+	canonical, err := PublicProbeSurface(cases[0].Kind)
+	if err != nil {
+		return ProbeReport{}, fmt.Errorf("failure: probe case %q surface: %w", cases[0].Name, err)
+	}
+	report := ProbeReport{
+		Passed:           true,
+		CanonicalSurface: canonical,
+		Cases:            make([]ProbeFinding, 0, len(cases)),
+	}
+	for _, tc := range cases {
+		surface, err := PublicProbeSurface(tc.Kind)
+		if err != nil {
+			return ProbeReport{}, fmt.Errorf("failure: probe case %q surface: %w", tc.Name, err)
+		}
+		passed := sameProbeSurface(surface, canonical)
+		report.Passed = report.Passed && passed
+		report.Cases = append(report.Cases, ProbeFinding{
+			Name:    tc.Name,
+			Kind:    tc.Kind,
+			Surface: surface,
+			Passed:  passed,
+		})
+	}
+	return report, nil
+}
+
 func ActiveProbeCases() []ProbeCase {
 	return []ProbeCase{
 		{Name: "bad-access-hint", Kind: BadAccessHint},
@@ -113,36 +156,29 @@ func ActiveProbeCases() []ProbeCase {
 }
 
 func VerifyProbeNeutrality(cases []ProbeCase) error {
-	if len(cases) == 0 {
-		return fmt.Errorf("failure: no active-probe cases")
-	}
-	first := Classify(cases[0].Kind)
-	if first.Action != CoverOrigin {
-		return fmt.Errorf("failure: probe case %q action = %d, want cover-origin", cases[0].Name, first.Action)
-	}
-	firstSurface, err := PublicProbeSurface(cases[0].Kind)
+	report, err := RunActiveProbeHarness(cases)
 	if err != nil {
-		return fmt.Errorf("failure: probe case %q surface: %w", cases[0].Name, err)
+		return err
 	}
-	for _, tc := range cases[1:] {
+	for i, tc := range cases {
 		got := Classify(tc.Kind)
 		if got.Action != CoverOrigin {
 			return fmt.Errorf("failure: probe case %q action = %d, want cover-origin", tc.Name, got.Action)
 		}
-		surface, err := PublicProbeSurface(tc.Kind)
-		if err != nil {
-			return fmt.Errorf("failure: probe case %q surface: %w", tc.Name, err)
-		}
-		if surface.HTTPStatus != firstSurface.HTTPStatus ||
-			surface.CloseCode != firstSurface.CloseCode ||
-			surface.TLSAlertClass != firstSurface.TLSAlertClass ||
-			surface.QUICCloseCode != firstSurface.QUICCloseCode ||
-			surface.WebSocketCloseCode != firstSurface.WebSocketCloseCode ||
-			surface.TimingClass != firstSurface.TimingClass ||
-			surface.ReflectedLog != firstSurface.ReflectedLog ||
-			!bytes.Equal(surface.Body, firstSurface.Body) {
+		if !report.Cases[i].Passed {
 			return fmt.Errorf("failure: probe case %q has distinguishable public surface", tc.Name)
 		}
 	}
 	return nil
+}
+
+func sameProbeSurface(a, b ProbeSurface) bool {
+	return a.HTTPStatus == b.HTTPStatus &&
+		a.CloseCode == b.CloseCode &&
+		a.TLSAlertClass == b.TLSAlertClass &&
+		a.QUICCloseCode == b.QUICCloseCode &&
+		a.WebSocketCloseCode == b.WebSocketCloseCode &&
+		a.TimingClass == b.TimingClass &&
+		a.ReflectedLog == b.ReflectedLog &&
+		bytes.Equal(a.Body, b.Body)
 }

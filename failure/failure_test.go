@@ -1,6 +1,7 @@
 package failure
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -123,6 +124,35 @@ func TestActiveProbeCasesCoverSpecChecklist(t *testing.T) {
 func TestActiveProbeCasesArePubliclyIndistinguishable(t *testing.T) {
 	if err := VerifyProbeNeutrality(ActiveProbeCases()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestActiveProbeHarnessReportIncludesAllCasesAndCanonicalSurface(t *testing.T) {
+	report, err := RunActiveProbeHarness(ActiveProbeCases())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Passed {
+		t.Fatalf("active-probe report did not pass: %+v", report)
+	}
+	if len(report.Cases) != len(ActiveProbeCases()) {
+		t.Fatalf("reported case count = %d, want %d", len(report.Cases), len(ActiveProbeCases()))
+	}
+	canonical, err := PublicProbeSurface(ActiveProbeCases()[0].Kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(report.CanonicalSurface, canonical) {
+		t.Fatalf("canonical surface mismatch: %+v vs %+v", report.CanonicalSurface, canonical)
+	}
+	for i, tc := range ActiveProbeCases() {
+		got := report.Cases[i]
+		if got.Name != tc.Name || got.Kind != tc.Kind || !got.Passed {
+			t.Fatalf("reported case mismatch at %d: %+v vs %+v", i, got, tc)
+		}
+		if !reflect.DeepEqual(got.Surface, canonical) {
+			t.Fatalf("case %q surface drifted: %+v vs %+v", got.Name, got.Surface, canonical)
+		}
 	}
 }
 

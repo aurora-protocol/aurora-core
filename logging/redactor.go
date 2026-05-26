@@ -22,6 +22,11 @@ type Secret struct {
 	Data []byte
 }
 
+type Field struct {
+	Key   string
+	Value string
+}
+
 func (s Secret) String() string {
 	return fmt.Sprintf("[redacted:%s:%d-bytes]", s.Kind, len(s.Data))
 }
@@ -30,8 +35,21 @@ func (s Secret) GoString() string {
 	return s.String()
 }
 
-func LabString(s Secret) string {
+func LabString(s Secret, labEnabled bool) string {
+	if !labEnabled {
+		return s.String()
+	}
 	return fmt.Sprintf("[lab:%s:%s]", s.Kind, hex.EncodeToString(s.Data))
+}
+
+func SafeField(key string, value any, labEnabled bool) Field {
+	if secret, ok := value.(Secret); ok {
+		return Field{Key: key, Value: LabString(secret, labEnabled)}
+	}
+	if isSensitiveFieldKey(key) {
+		return Field{Key: key, Value: "[redacted-field]"}
+	}
+	return Field{Key: key, Value: SanitizeMessage(fmt.Sprintf("%v", value))}
 }
 
 func SanitizeMessage(msg string) string {
@@ -46,4 +64,21 @@ func SanitizeMessage(msg string) string {
 		msg = strings.ReplaceAll(msg, token, "[redacted-field]")
 	}
 	return msg
+}
+
+func isSensitiveFieldKey(key string) bool {
+	normalized := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+	switch normalized {
+	case "admission_proof",
+		"replay_proof",
+		"token_authenticator",
+		"hint_secret",
+		"cover_capsule_plaintext",
+		"capsule_plaintext",
+		"route_wrap_plaintext",
+		"route_prelude_plaintext":
+		return true
+	default:
+		return false
+	}
 }

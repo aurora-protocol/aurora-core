@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/aurora-protocol/aurora-core/config"
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
+	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/wire"
@@ -23,6 +25,8 @@ func main() {
 		err = vectors()
 	case "capabilities":
 		capabilities()
+	case "active-probes":
+		err = activeProbes(os.Stdout)
 	case "check-config":
 		if len(os.Args) != 3 {
 			err = fmt.Errorf("check-config requires a path")
@@ -39,7 +43,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors|capabilities|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors|capabilities|active-probes|check-config>")
 }
 
 func vectors() error {
@@ -127,6 +131,34 @@ func capabilities() {
 	fmt.Println("- policy profiles, PAL scoring, PACE reference behavior, local config parsing")
 	fmt.Println("not production-complete:")
 	fmt.Println("- ML-DSA signatures, Privacy Pass production proof verification, cover-origin gateway, active-probe harness, platform adapters, DPI evaluation")
+}
+
+func activeProbes(w io.Writer) error {
+	report, err := failure.RunActiveProbeHarness(failure.ActiveProbeCases())
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "active_probe_baseline passed=%t cases=%d\n", report.Passed, len(report.Cases))
+	fmt.Fprintf(w, "canonical %s\n", formatProbeSurface(report.CanonicalSurface))
+	for _, finding := range report.Cases {
+		fmt.Fprintf(w, "case %s passed=%t %s\n", finding.Name, finding.Passed, formatProbeSurface(finding.Surface))
+	}
+	if !report.Passed {
+		return fmt.Errorf("active-probes failed neutrality check")
+	}
+	return nil
+}
+
+func formatProbeSurface(surface failure.ProbeSurface) string {
+	return fmt.Sprintf("http_status=%d close_code=%d tls_alert=%d quic_close=%d websocket_close=%d timing_class=%s reflected_log=%s",
+		surface.HTTPStatus,
+		surface.CloseCode,
+		surface.TLSAlertClass,
+		surface.QUICCloseCode,
+		surface.WebSocketCloseCode,
+		surface.TimingClass,
+		surface.ReflectedLog,
+	)
 }
 
 func checkConfig(path string) error {

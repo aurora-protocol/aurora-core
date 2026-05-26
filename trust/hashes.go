@@ -58,10 +58,14 @@ func LocateAuthorityKey(keys []protocol.AuthorityKeyRecord, entry protocol.Signa
 }
 
 func VerifyDirectoryConsensusSignatures(c protocol.DirectoryConsensus, keys []protocol.AuthorityKeyRecord, now uint64, minValidDistinctAuthorities int) error {
-	return verifyDirectoryConsensusSignaturesWithUsage(c, keys, now, minValidDistinctAuthorities, registry.UsageMaySignDirectoryConsensus)
+	return verifyDirectoryConsensusSignaturesWithUsage(c, keys, now, minValidDistinctAuthorities, registry.UsageMaySignDirectoryConsensus, false)
 }
 
-func verifyDirectoryConsensusSignaturesWithUsage(c protocol.DirectoryConsensus, keys []protocol.AuthorityKeyRecord, now uint64, minValidDistinctAuthorities int, requiredUsage uint32) error {
+func VerifyStrictDirectoryConsensusSignatures(c protocol.DirectoryConsensus, keys []protocol.AuthorityKeyRecord, now uint64, minValidDistinctAuthorities int) error {
+	return verifyDirectoryConsensusSignaturesWithUsage(c, keys, now, minValidDistinctAuthorities, registry.UsageMaySignDirectoryConsensus, true)
+}
+
+func verifyDirectoryConsensusSignaturesWithUsage(c protocol.DirectoryConsensus, keys []protocol.AuthorityKeyRecord, now uint64, minValidDistinctAuthorities int, requiredUsage uint32, requireMLDSAQuorum bool) error {
 	if minValidDistinctAuthorities <= 0 {
 		minValidDistinctAuthorities = 1
 	}
@@ -69,6 +73,7 @@ func verifyDirectoryConsensusSignaturesWithUsage(c protocol.DirectoryConsensus, 
 		return fmt.Errorf("trust: directory consensus has no authority signatures")
 	}
 	validAuthorities := make(map[string]struct{}, len(c.AuthoritySignatures))
+	validMLDSAAuthorities := make(map[string]struct{}, len(c.AuthoritySignatures))
 	for _, entry := range c.AuthoritySignatures {
 		key, err := LocateAuthorityKey(keys, entry, now, requiredUsage)
 		if err != nil {
@@ -81,12 +86,23 @@ func verifyDirectoryConsensusSignaturesWithUsage(c protocol.DirectoryConsensus, 
 		if err := auroracrypto.VerifySignature(entry.SignatureScheme, entry.KeyEncoding, key.PublicKey.PublicKey, input, entry.Signature); err != nil {
 			return err
 		}
-		validAuthorities[string(entry.AuthorityID)] = struct{}{}
+		authority := string(entry.AuthorityID)
+		validAuthorities[authority] = struct{}{}
+		if isMLDSASignatureScheme(entry.SignatureScheme) {
+			validMLDSAAuthorities[authority] = struct{}{}
+		}
 	}
 	if len(validAuthorities) < minValidDistinctAuthorities {
 		return fmt.Errorf("trust: directory consensus has %d valid authority signatures, want %d", len(validAuthorities), minValidDistinctAuthorities)
 	}
+	if requireMLDSAQuorum && len(validMLDSAAuthorities) < minValidDistinctAuthorities {
+		return fmt.Errorf("trust: directory consensus has %d valid ML-DSA authority signatures, want %d", len(validMLDSAAuthorities), minValidDistinctAuthorities)
+	}
 	return nil
+}
+
+func isMLDSASignatureScheme(scheme uint64) bool {
+	return scheme == registry.SigMLDSA65 || scheme == registry.SigMLDSA87
 }
 
 type AuthorityKeyRotationInput struct {
@@ -111,7 +127,7 @@ func ValidateAuthorityKeyRotation(in AuthorityKeyRotationInput) error {
 		return nil
 	}
 	requiredUsage := registry.UsageMaySignDirectoryConsensus | registry.UsageMayRotateDirectoryAuthority
-	if err := verifyDirectoryConsensusSignaturesWithUsage(in.NextConsensus, in.PreviousKeys, in.NowUnix, in.MinValidDistinctAuthorities, requiredUsage); err != nil {
+	if err := verifyDirectoryConsensusSignaturesWithUsage(in.NextConsensus, in.PreviousKeys, in.NowUnix, in.MinValidDistinctAuthorities, requiredUsage, false); err != nil {
 		return fmt.Errorf("trust: authority rotation lacks previous quorum path: %w", err)
 	}
 	for _, previous := range currentPreviousDirectoryKeys(in.PreviousKeys, in.NowUnix) {

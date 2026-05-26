@@ -9,6 +9,7 @@ import (
 
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 )
 
 func rb(b byte, n int) []byte {
@@ -144,6 +145,67 @@ func TestVerifyDirectoryConsensusSignaturesRequiresDistinctAuthoritiesForThresho
 	}
 }
 
+func TestVerifyStrictDirectoryConsensusSignaturesRequiresDistinctMLDSAQuorum(t *testing.T) {
+	classicalPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pqSeed [mldsa65.SeedSize]byte
+	for i := range pqSeed {
+		pqSeed[i] = byte(i + 1)
+	}
+	pqPublic, pqPrivate := mldsa65.NewKeyFromSeed(&pqSeed)
+	classicalEntry := protocol.SignatureEntry{
+		AuthorityID:     rb(0xa1, 16),
+		AuthorityKeyID:  rb(0x01, 16),
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+	}
+	pqEntry := protocol.SignatureEntry{
+		AuthorityID:     rb(0xa2, 16),
+		AuthorityKeyID:  rb(0x02, 16),
+		SignatureScheme: registry.SigMLDSA65,
+		KeyEncoding:     registry.KeyMLDSA65RawPublic,
+	}
+	c := directoryConsensusForSignatureTest(classicalEntry)
+	c.AuthoritySignatures = []protocol.SignatureEntry{classicalEntry, pqEntry}
+	c.AuthoritySignatures[0].Signature = signDirectoryEntry(t, c, classicalEntry, classicalPriv)
+	c.AuthoritySignatures[1].Signature = signDirectoryEntryMLDSA65(t, c, pqEntry, pqPrivate)
+	keys := []protocol.AuthorityKeyRecord{
+		authorityKeyForECDSA(classicalEntry.AuthorityID, classicalEntry.AuthorityKeyID, classicalPriv, registry.AuthorityActive, registry.UsageMaySignDirectoryConsensus),
+		authorityKeyForMLDSA65(pqEntry.AuthorityID, pqEntry.AuthorityKeyID, pqPublic, registry.AuthorityActive, registry.UsageMaySignDirectoryConsensus),
+	}
+
+	if err := VerifyDirectoryConsensusSignatures(c, keys, 20, 2); err != nil {
+		t.Fatalf("standard total authority quorum rejected: %v", err)
+	}
+	if err := VerifyStrictDirectoryConsensusSignatures(c, keys, 20, 2); err == nil {
+		t.Fatalf("strict quorum accepted only one distinct ML-DSA authority")
+	}
+
+	var secondPQSeed [mldsa65.SeedSize]byte
+	for i := range secondPQSeed {
+		secondPQSeed[i] = byte(0x80 + i)
+	}
+	secondPQPublic, secondPQPrivate := mldsa65.NewKeyFromSeed(&secondPQSeed)
+	secondPQEntry := protocol.SignatureEntry{
+		AuthorityID:     rb(0xa3, 16),
+		AuthorityKeyID:  rb(0x03, 16),
+		SignatureScheme: registry.SigMLDSA65,
+		KeyEncoding:     registry.KeyMLDSA65RawPublic,
+	}
+	c.AuthoritySignatures = []protocol.SignatureEntry{pqEntry, secondPQEntry}
+	c.AuthoritySignatures[0].Signature = signDirectoryEntryMLDSA65(t, c, pqEntry, pqPrivate)
+	c.AuthoritySignatures[1].Signature = signDirectoryEntryMLDSA65(t, c, secondPQEntry, secondPQPrivate)
+	keys = []protocol.AuthorityKeyRecord{
+		authorityKeyForMLDSA65(pqEntry.AuthorityID, pqEntry.AuthorityKeyID, pqPublic, registry.AuthorityActive, registry.UsageMaySignDirectoryConsensus),
+		authorityKeyForMLDSA65(secondPQEntry.AuthorityID, secondPQEntry.AuthorityKeyID, secondPQPublic, registry.AuthorityActive, registry.UsageMaySignDirectoryConsensus),
+	}
+	if err := VerifyStrictDirectoryConsensusSignatures(c, keys, 20, 2); err != nil {
+		t.Fatalf("strict distinct ML-DSA authority quorum rejected: %v", err)
+	}
+}
+
 func TestValidateAuthorityKeyRotationRequiresOverlapUnlessPinned(t *testing.T) {
 	oldPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -250,6 +312,22 @@ func authorityKeyForECDSA(authorityID, keyID []byte, priv *ecdsa.PrivateKey, sta
 	}
 }
 
+func authorityKeyForMLDSA65(authorityID, keyID []byte, publicKey *mldsa65.PublicKey, status uint8, usage uint32) protocol.AuthorityKeyRecord {
+	return protocol.AuthorityKeyRecord{
+		AuthorityID:    authorityID,
+		AuthorityKeyID: keyID,
+		PublicKey: protocol.PublicKeyRecord{
+			SignatureScheme: registry.SigMLDSA65,
+			KeyEncoding:     registry.KeyMLDSA65RawPublic,
+			PublicKey:       publicKey.Bytes(),
+		},
+		ValidFromUnix:  10,
+		ValidUntilUnix: 30,
+		KeyStatus:      status,
+		UsageFlags:     usage,
+	}
+}
+
 func signDirectoryEntry(t *testing.T, c protocol.DirectoryConsensus, entry protocol.SignatureEntry, priv *ecdsa.PrivateKey) []byte {
 	t.Helper()
 	input, err := DirectoryConsensusSignatureInput(c, entry)
@@ -258,6 +336,19 @@ func signDirectoryEntry(t *testing.T, c protocol.DirectoryConsensus, entry proto
 	}
 	sig, err := ecdsa.SignASN1(rand.Reader, priv, input)
 	if err != nil {
+		t.Fatal(err)
+	}
+	return sig
+}
+
+func signDirectoryEntryMLDSA65(t *testing.T, c protocol.DirectoryConsensus, entry protocol.SignatureEntry, priv *mldsa65.PrivateKey) []byte {
+	t.Helper()
+	input, err := DirectoryConsensusSignatureInput(c, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := make([]byte, mldsa65.SignatureSize)
+	if err := mldsa65.SignTo(priv, input, nil, false, sig); err != nil {
 		t.Fatal(err)
 	}
 	return sig

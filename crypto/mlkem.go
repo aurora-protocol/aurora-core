@@ -115,7 +115,3 @@ func MLKEMCiphertextSizeForSuite(suite uint64) (int, error) {
 		return 0, fmt.Errorf("crypto: unsupported ML-KEM suite 0x%x", suite)
 	}
 }
-
-func VerifyMLDSAUnsupported() error {
-	return fmt.Errorf("crypto: ML-DSA verification is not implemented by the Go standard library in this prototype")
-}

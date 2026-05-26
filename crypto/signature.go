@@ -8,6 +8,8 @@ import (
 	"fmt"
 
 	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
+	"github.com/cloudflare/circl/sign/mldsa/mldsa87"
 )
 
 func VerifySignature(signatureScheme, keyEncoding uint64, publicKey, messageDigest, signature []byte) error {
@@ -41,11 +43,41 @@ func VerifySignature(signatureScheme, keyEncoding uint64, publicKey, messageDige
 			return fmt.Errorf("crypto: Ed25519 signature verification failed")
 		}
 		return nil
-	case registry.SigMLDSA65, registry.SigMLDSA87:
-		return VerifyMLDSAUnsupported()
+	case registry.SigMLDSA65:
+		return verifyMLDSA65(keyEncoding, publicKey, messageDigest, signature)
+	case registry.SigMLDSA87:
+		return verifyMLDSA87(keyEncoding, publicKey, messageDigest, signature)
 	default:
 		return fmt.Errorf("crypto: unsupported signature scheme 0x%x", signatureScheme)
 	}
+}
+
+func verifyMLDSA65(keyEncoding uint64, publicKey, message, signature []byte) error {
+	if keyEncoding != registry.KeyMLDSA65RawPublic {
+		return fmt.Errorf("crypto: ML-DSA-65 signature incompatible with key encoding 0x%x", keyEncoding)
+	}
+	var pk mldsa65.PublicKey
+	if err := pk.UnmarshalBinary(publicKey); err != nil {
+		return fmt.Errorf("crypto: invalid ML-DSA-65 public key: %w", err)
+	}
+	if !mldsa65.Verify(&pk, message, nil, signature) {
+		return fmt.Errorf("crypto: ML-DSA-65 signature verification failed")
+	}
+	return nil
+}
+
+func verifyMLDSA87(keyEncoding uint64, publicKey, message, signature []byte) error {
+	if keyEncoding != registry.KeyMLDSA87RawPublic {
+		return fmt.Errorf("crypto: ML-DSA-87 signature incompatible with key encoding 0x%x", keyEncoding)
+	}
+	var pk mldsa87.PublicKey
+	if err := pk.UnmarshalBinary(publicKey); err != nil {
+		return fmt.Errorf("crypto: invalid ML-DSA-87 public key: %w", err)
+	}
+	if !mldsa87.Verify(&pk, message, nil, signature) {
+		return fmt.Errorf("crypto: ML-DSA-87 signature verification failed")
+	}
+	return nil
 }
 
 func decodeECDSAPublicKey(keyEncoding uint64, curve elliptic.Curve, sec1Encoding, spkiEncoding uint64, encoded []byte) (*ecdsa.PublicKey, error) {

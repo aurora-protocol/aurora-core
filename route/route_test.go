@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/aurora-protocol/aurora-core/admission"
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/protocol"
@@ -191,6 +192,55 @@ func TestOpenPrivatePreludeRejectsMalformedPrivateHeader(t *testing.T) {
 	}
 }
 
+func TestOpenAndVerifyPrivatePreludeSpendsAccessHintWithRouteHopBinding(t *testing.T) {
+	env := routeTestEnvelope()
+	cred := routeTestAccessHintCredential(env)
+	private := routeTestPrivatePrelude(t, env)
+	context, err := auroracrypto.RoutePreludeWrapContext(env.routeWrapInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	private.RoutePreludeWrapContext = context
+	binding, err := RouteHopBinding(HopBindingInput{
+		RouteInstanceID:                private.RouteInstanceID,
+		HopIndex:                       private.HopIndex,
+		PreviousHopFullTranscriptHash:  private.PreviousHopFullTranscriptHash,
+		PreviousHopRelayDescriptorHash: private.PreviousHopRelayDescriptorHash,
+		NextRelayDescriptorHash:        private.NextRelayDescriptorHash,
+		RoutePreludeWrapContext:        private.RoutePreludeWrapContext,
+		ClientNonceForThisHop:          private.ClientNonceForThisHop,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	private.AccessHint, err = admission.ComputeAccessHint(cred, binding, private.ClientNonceForThisHop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := SealPrivatePrelude(env, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := admission.NewMemoryReplayCache()
+	opened, openedBinding, err := OpenAndVerifyPrivatePrelude(cache, env, envelope, cred, 100)
+	if err != nil {
+		t.Fatalf("valid route prelude was rejected: %v", err)
+	}
+	if opened.RouteInstanceID != env.RouteInstanceID || !bytes.Equal(openedBinding, binding) {
+		t.Fatalf("opened route prelude binding mismatch: %+v %x", opened, openedBinding)
+	}
+	spentKey, err := admission.ComputeSpentHintKey(cred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cache.Has(spentKey) {
+		t.Fatalf("route AccessHint was not spent")
+	}
+	if _, _, err := OpenAndVerifyPrivatePrelude(cache, env, envelope, cred, 100); err == nil {
+		t.Fatalf("replayed route AccessHint was accepted")
+	}
+}
+
 func routeTestEnvelope() EnvelopeInput {
 	return EnvelopeInput{
 		RouteInstanceID:                1,
@@ -204,6 +254,18 @@ func routeTestEnvelope() EnvelopeInput {
 		WrapSuiteID:                    registry.WrapSuiteRouteV1,
 		WrapNonce:                      rb(0x32, 16),
 		HintSecret:                     rb(0x33, 32),
+	}
+}
+
+func routeTestAccessHintCredential(env EnvelopeInput) admission.AccessHintCredential {
+	return admission.AccessHintCredential{
+		HintIssuerID:  append([]byte(nil), env.HintIssuerID...),
+		RelayBucketID: append([]byte(nil), env.RelayBucketID...),
+		HintEpochID:   env.HintEpochID,
+		HintSelector:  append([]byte(nil), env.HintSelector...),
+		HintSecret:    append([]byte(nil), env.HintSecret...),
+		ExpiryUnix:    200,
+		MaxUses:       1,
 	}
 }
 

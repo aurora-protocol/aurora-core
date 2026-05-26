@@ -165,6 +165,33 @@ func TestFakeIPAllocatorIsStableAndPrivate(t *testing.T) {
 	}
 }
 
+func TestFakeIPAllocatorAvoidsHashCollisionsAndPreservesReverseLookup(t *testing.T) {
+	a := NewFakeIPAllocator("198.18.0.0/15")
+	ip1, _, err := a.Assign("collision-457.example", []string{"93.184.216.34"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ip2, _, err := a.Assign("collision-539.example", []string{"198.51.100.9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ip1 == ip2 {
+		t.Fatalf("colliding names received the same fake IP: %s", ip1)
+	}
+	answers, ok := a.AnswersForFakeIP(ip1)
+	if !ok || len(answers) != 1 || answers[0] != "93.184.216.34" {
+		t.Fatalf("reverse lookup for first fake IP failed: %v %v", answers, ok)
+	}
+	answers[0] = "0.0.0.0"
+	answers, ok = a.AnswersForFakeIP(ip1)
+	if !ok || answers[0] != "93.184.216.34" {
+		t.Fatalf("reverse lookup exposed mutable state: %v %v", answers, ok)
+	}
+	if answers, ok := a.AnswersForFakeIP(ip2); !ok || len(answers) != 1 || answers[0] != "198.51.100.9" {
+		t.Fatalf("reverse lookup for second fake IP failed: %v %v", answers, ok)
+	}
+}
+
 func TestFlowTTLAndIdleTimeoutDropStaleDatagrams(t *testing.T) {
 	m := NewManager()
 	open := protocol.FlowOpen{

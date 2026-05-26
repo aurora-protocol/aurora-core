@@ -3,6 +3,7 @@ package flow
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -316,21 +317,61 @@ func (a *FakeIPAllocator) Assign(domain string, answers []string) (fakeIP string
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if ip, ok := a.byName[name]; ok {
+		a.byIP[ip] = append([]string(nil), answers...)
 		return ip, bindingID(name, answers), nil
 	}
-	hash := sha256.Sum256([]byte(name))
-	base := a.network.IP.To4()
-	if base == nil {
-		return "", nil, fmt.Errorf("flow: fake IP network must be IPv4")
+	fakeIP, err = a.nextAvailableIPLocked(name)
+	if err != nil {
+		return "", nil, err
 	}
-	ip := net.IPv4(base[0], base[1], hash[0], hash[1])
-	if !a.network.Contains(ip) {
-		ip = net.IPv4(198, 18, hash[0], hash[1])
-	}
-	fakeIP = ip.String()
 	a.byName[name] = fakeIP
 	a.byIP[fakeIP] = append([]string(nil), answers...)
 	return fakeIP, bindingID(name, answers), nil
+}
+
+func (a *FakeIPAllocator) AnswersForFakeIP(fakeIP string) ([]string, bool) {
+	ip := net.ParseIP(fakeIP).To4()
+	if ip == nil {
+		return nil, false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	answers, ok := a.byIP[ip.String()]
+	if !ok {
+		return nil, false
+	}
+	return append([]string(nil), answers...), true
+}
+
+func (a *FakeIPAllocator) nextAvailableIPLocked(name string) (string, error) {
+	base := a.network.IP.To4()
+	if base == nil {
+		return "", fmt.Errorf("flow: fake IP network must be IPv4")
+	}
+	ones, bits := a.network.Mask.Size()
+	if bits != 32 || ones < 0 {
+		return "", fmt.Errorf("flow: fake IP network must be IPv4")
+	}
+	span := uint64(1) << uint(32-ones)
+	firstOffset, usable := uint64(0), span
+	if span > 2 {
+		firstOffset, usable = 1, span-2
+	}
+	hash := sha256.Sum256([]byte(name))
+	start := uint64(binary.BigEndian.Uint32(hash[:4])) % usable
+	baseInt := binary.BigEndian.Uint32(base)
+	for probe := uint64(0); probe < usable; probe++ {
+		offset := firstOffset + ((start + probe) % usable)
+		candidate := ipv4FromUint32(baseInt + uint32(offset)).String()
+		if _, exists := a.byIP[candidate]; !exists {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("flow: fake IP network exhausted")
+}
+
+func ipv4FromUint32(v uint32) net.IP {
+	return net.IPv4(byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 }
 
 func canonicalDomain(domain string) string {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -159,6 +160,82 @@ func TestOpaqueBoundaryCases(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVectorElementCountBoundaries(t *testing.T) {
+	e := NewEncoder()
+	e.WriteVarintVector([]uint64{0, 63, 64})
+	encoded, err := e.Bytes()
+	if err != nil {
+		t.Fatalf("vector encode failed: %v", err)
+	}
+	want, _ := hex.DecodeString("03003f4040")
+	if !bytes.Equal(encoded, want) {
+		t.Fatalf("encoded vector = %x, want %x", encoded, want)
+	}
+	r := NewReader(encoded)
+	if got := r.ReadVarintVector(); !equalUint64s(got, []uint64{0, 63, 64}) {
+		t.Fatalf("decoded vector = %v", got)
+	}
+	if !r.EOF() {
+		t.Fatalf("reader did not finish: remaining=%d err=%v", r.Remaining(), r.Err())
+	}
+
+	r = NewReader([]byte{0x02, 0xaa, 0xbb})
+	if count := r.ReadVectorCount("unit vector"); count != 2 {
+		t.Fatalf("exact vector count = %d, want 2", count)
+	}
+	if r.Err() != nil || r.Remaining() != 2 {
+		t.Fatalf("exact vector count changed reader state incorrectly: remaining=%d err=%v", r.Remaining(), r.Err())
+	}
+
+	r = NewReader([]byte{0x03, 0xaa, 0xbb})
+	if count := r.ReadVectorCount("unit vector"); count != 0 {
+		t.Fatalf("overflow vector count = %d, want 0", count)
+	}
+	if err := r.Err(); err == nil {
+		t.Fatalf("overflow vector count unexpectedly succeeded")
+	} else if !strings.Contains(err.Error(), "unit vector count 3 exceeds remaining bytes 2") {
+		t.Fatalf("overflow vector count error = %v", err)
+	}
+
+	r = NewReader([]byte{0x40, 0x00})
+	if count := r.ReadVectorCount("unit vector"); count != 0 {
+		t.Fatalf("non-minimal vector count = %d, want 0", count)
+	}
+	if !errors.Is(r.Err(), ErrNonMinimalVarint) {
+		t.Fatalf("non-minimal vector count err = %v, want ErrNonMinimalVarint", r.Err())
+	}
+
+	r = NewReader([]byte{0x01})
+	if count := r.ReadVectorCount(""); count != 0 {
+		t.Fatalf("default-label overflow count = %d, want 0", count)
+	}
+	if err := r.Err(); err == nil {
+		t.Fatalf("default-label overflow unexpectedly succeeded")
+	} else if !strings.Contains(err.Error(), "vector count 1 exceeds remaining bytes 0") {
+		t.Fatalf("default-label overflow error = %v", err)
+	}
+
+	r = NewReader([]byte{0x02, 0x40, 0x40})
+	if got := r.ReadVarintVector(); got != nil {
+		t.Fatalf("vector with missing element decoded as %v", got)
+	}
+	if err := r.Err(); err == nil {
+		t.Fatalf("vector with missing element unexpectedly succeeded")
+	}
+}
+
+func equalUint64s(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func opaqueBoundaryPayload(n int) []byte {

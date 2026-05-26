@@ -145,7 +145,11 @@ func (r *Reader) ReadVarintVector() []uint64 {
 	}
 	out := make([]uint64, 0, n)
 	for i := uint64(0); i < n; i++ {
-		out = append(out, r.ReadVarint())
+		item := r.ReadVarint()
+		if r.err != nil {
+			return nil
+		}
+		out = append(out, item)
 	}
 	return out
 }

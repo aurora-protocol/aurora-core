@@ -407,6 +407,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "opaque8/16/24 boundary test coverage") {
 		t.Fatalf("capabilities output missing opaque boundary test coverage:\n%s", text)
 	}
+	if !strings.Contains(text, "vector element-count boundary coverage") {
+		t.Fatalf("capabilities output missing vector element-count coverage:\n%s", text)
+	}
 	if !strings.Contains(text, "issuer operations conformance harness") {
 		t.Fatalf("capabilities output missing issuer operations harness:\n%s", text)
 	}

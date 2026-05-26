@@ -244,6 +244,83 @@ func TestComputeServerFinishedRejectsPolicyAcceptVirtualAddressMismatch(t *testi
 	}
 }
 
+func TestComputeServerFinishedRejectsPolicyAcceptOutsideOffer(t *testing.T) {
+	capsule1 := protocol.CoverCapsule1Plain{
+		MsgType:         registry.MsgCoverCapsule1,
+		RouteInstanceID: 5,
+		AdmissionProof: protocol.AdmissionProof{
+			ProofVersion:          registry.Version20,
+			ProofType:             registry.ProofLabStaticToken,
+			IssuerID:              hx(1, 16),
+			TokenKeyID:            hx(2, 32),
+			RelayBucketID:         hx(3, 16),
+			TokenScopeID:          hx(4, 16),
+			ExpiryUnix:            2000000000,
+			TokenNonce:            hx(5, 32),
+			RedemptionContextHash: hx(6, 48),
+			TokenAuthenticator:    []byte("token"),
+		},
+		ReplayProof: protocol.ReplayProof{
+			ProofVersion:        registry.Version20,
+			ReplayEpochID:       1,
+			TokenRedemptionHash: hx(7, 48),
+			ClientReplayNonce:   hx(8, 32),
+			ReplayContextHash:   hx(9, 48),
+			ReplayWindowID:      hx(10, 16),
+		},
+		PolicyOffer: protocol.PolicyOffer{
+			OfferedVersions:         []uint64{registry.Version20},
+			OfferedSuites:           []uint64{registry.SuiteHybrid768AESGCM},
+			OfferedMethods:          []uint64{registry.MethodWebH2Stream},
+			MinimumPolicyID:         registry.PolicyAdversarialDPI,
+			RequestedPolicyID:       registry.PolicyAdversarialDPI,
+			RequestedRouteModeID:    registry.RouteSplit2,
+			RequestedShapeID:        registry.ShapeNormal,
+			TunnelPersonalityOffers: []uint64{registry.PersonalityProxyFlow},
+		},
+	}
+	base := protocol.PolicyAccept{
+		SelectedVersion:           registry.Version20,
+		SelectedSuite:             registry.SuiteHybrid768AESGCM,
+		SelectedMethod:            registry.MethodWebH2Stream,
+		SelectedPolicy:            registry.PolicyAdversarialDPI,
+		SelectedRouteModeID:       registry.RouteSplit2,
+		SelectedShape:             registry.ShapeNormal,
+		SelectedTunnelPersonality: registry.PersonalityProxyFlow,
+	}
+	cases := map[string]func(*protocol.PolicyAccept){
+		"version": func(accept *protocol.PolicyAccept) {
+			accept.SelectedVersion = 0x000199
+		},
+		"suite": func(accept *protocol.PolicyAccept) {
+			accept.SelectedSuite = registry.SuiteHybrid1024AESGCM
+		},
+		"method": func(accept *protocol.PolicyAccept) {
+			accept.SelectedMethod = registry.MethodWebH1WS
+		},
+		"policy": func(accept *protocol.PolicyAccept) {
+			accept.SelectedPolicy = registry.PolicyFastWeb
+		},
+		"personality": func(accept *protocol.PolicyAccept) {
+			accept.SelectedTunnelPersonality = registry.PersonalityIPLite
+			accept.VirtualAddressAssignment = &protocol.VirtualAddressAssignment{
+				AddressFamily: 1,
+				Address:       []byte{10, 0, 0, 2},
+				PrefixLength:  24,
+			}
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			accept := base
+			mutate(&accept)
+			if _, _, _, err := ComputeServerFinished(registry.SuiteHybrid768AESGCM, hx(0x33, 48), hx(0x44, 48), capsule1, accept); err == nil {
+				t.Fatalf("PolicyAccept with non-offered %s was signed: %+v", name, accept)
+			}
+		})
+	}
+}
+
 func TestRouteCapsuleFinishedUsesHopTranscript(t *testing.T) {
 	hopTranscript := hx(0x44, 48)
 	secrets, err := DeriveHandshakeSecrets(registry.SuiteHybrid768AESGCM, hx(1, 32), hx(2, 32), hx(0x43, 48), hopTranscript)

@@ -416,3 +416,34 @@ func (p PolicyAccept) ValidateStructural() error {
 	}
 	return nil
 }
+
+func (p PolicyAccept) ValidateForOffer(offer PolicyOffer) error {
+	if err := p.ValidateStructural(); err != nil {
+		return err
+	}
+	if !containsUint64(offer.OfferedVersions, p.SelectedVersion) {
+		return fmt.Errorf("protocol: selected version 0x%x was not offered", p.SelectedVersion)
+	}
+	if !containsUint64(offer.OfferedSuites, p.SelectedSuite) {
+		return fmt.Errorf("protocol: selected suite 0x%x was not offered", p.SelectedSuite)
+	}
+	if !containsUint64(offer.OfferedMethods, p.SelectedMethod) {
+		return fmt.Errorf("protocol: selected method 0x%x was not offered", p.SelectedMethod)
+	}
+	if p.SelectedPolicy < offer.MinimumPolicyID {
+		return fmt.Errorf("protocol: selected policy 0x%x is weaker than minimum 0x%x", p.SelectedPolicy, offer.MinimumPolicyID)
+	}
+	if !containsUint64(offer.TunnelPersonalityOffers, p.SelectedTunnelPersonality) {
+		return fmt.Errorf("protocol: selected tunnel personality 0x%x was not offered", p.SelectedTunnelPersonality)
+	}
+	return nil
+}
+
+func containsUint64(xs []uint64, want uint64) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}

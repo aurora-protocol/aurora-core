@@ -267,7 +267,7 @@ func ComputeServerFinished(suite uint64, serverFinishedKey, preludeTranscriptHas
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return computeServerFinished(suite, serverFinishedKey, preludeTranscriptHash, encodedCapsule1, accept)
+	return computeServerFinished(suite, serverFinishedKey, preludeTranscriptHash, encodedCapsule1, capsule1.PolicyOffer, accept)
 }
 
 func ComputeRouteServerFinished(suite uint64, serverFinishedKey, hopPreludeTranscriptHash []byte, capsule1 protocol.RouteCapsule1Plain, accept protocol.PolicyAccept) ([]byte, []byte, []byte, error) {
@@ -275,11 +275,11 @@ func ComputeRouteServerFinished(suite uint64, serverFinishedKey, hopPreludeTrans
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return computeServerFinished(suite, serverFinishedKey, hopPreludeTranscriptHash, encodedCapsule1, accept)
+	return computeServerFinished(suite, serverFinishedKey, hopPreludeTranscriptHash, encodedCapsule1, capsule1.PolicyOffer, accept)
 }
 
-func computeServerFinished(suite uint64, serverFinishedKey, transcriptHashForHop, encodedCapsule1 []byte, accept protocol.PolicyAccept) ([]byte, []byte, []byte, error) {
-	if err := accept.ValidateStructural(); err != nil {
+func computeServerFinished(suite uint64, serverFinishedKey, transcriptHashForHop, encodedCapsule1 []byte, offer protocol.PolicyOffer, accept protocol.PolicyAccept) ([]byte, []byte, []byte, error) {
+	if err := accept.ValidateForOffer(offer); err != nil {
 		return nil, nil, nil, err
 	}
 	capsule1Hash, err := auroracrypto.SuiteHash(suite, encodedCapsule1)

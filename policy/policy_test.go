@@ -73,6 +73,14 @@ func TestVisibleProxyMethodsStayProfileAllowlistedWithoutStealthGate(t *testing.
 	if safeCandidate(registry.RouteFast1, registry.MethodMasqueConnectIP, 1).PassesStealthGate(custom) {
 		t.Fatalf("custom non-stealth profile should not pass MASQUE candidate")
 	}
+	namedEnterprise := Profile{Name: "enterprise"}
+	if safeCandidate(registry.RouteFast1, registry.MethodMasqueConnectIP, 1).PassesStealthGate(namedEnterprise) {
+		t.Fatalf("enterprise-named profile without explicit visible-proxy opt-in should not pass MASQUE candidate")
+	}
+	explicitEnterprise := Profile{Name: "enterprise", VisibleProxySemanticsAllowed: true}
+	if !safeCandidate(registry.RouteFast1, registry.MethodMasqueConnectIP, 1).PassesStealthGate(explicitEnterprise) {
+		t.Fatalf("explicit enterprise profile should pass MASQUE candidate")
+	}
 	if safeCandidate(registry.RouteFast1, registry.MethodDirectQUICLab, 1).PassesStealthGate(custom) {
 		t.Fatalf("custom non-stealth profile should not pass direct QUIC candidate")
 	}

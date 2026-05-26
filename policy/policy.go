@@ -20,17 +20,18 @@ const (
 )
 
 type Profile struct {
-	ID                 uint64
-	Name               string
-	DefaultRoute       uint64
-	MethodOrder        []uint64
-	QUIC               QUICMode
-	DefaultPersonality uint64
-	DefaultShape       uint64
-	StealthGate        bool
-	SafetyGate         bool
-	Fast1Forbidden     bool
-	LabOnly            bool
+	ID                           uint64
+	Name                         string
+	DefaultRoute                 uint64
+	MethodOrder                  []uint64
+	QUIC                         QUICMode
+	DefaultPersonality           uint64
+	DefaultShape                 uint64
+	StealthGate                  bool
+	SafetyGate                   bool
+	Fast1Forbidden               bool
+	LabOnly                      bool
+	VisibleProxySemanticsAllowed bool
 }
 
 func ProfileByID(id uint64) (Profile, error) {
@@ -70,14 +71,15 @@ func SmartProfile(pathClass string) Profile {
 
 var allProfiles = []Profile{
 	{
-		ID:                 registry.PolicyFastWeb,
-		Name:               "fast-web",
-		DefaultRoute:       registry.RouteFast1,
-		MethodOrder:        []uint64{registry.MethodWebH3ExtDgram, registry.MethodWebH3Stream, registry.MethodWebH2Stream, registry.MethodWebH1WS},
-		QUIC:               QUICPreferred,
-		DefaultPersonality: registry.PersonalityFullIP,
-		DefaultShape:       registry.ShapeLight,
-		SafetyGate:         true,
+		ID:                           registry.PolicyFastWeb,
+		Name:                         "fast-web",
+		DefaultRoute:                 registry.RouteFast1,
+		MethodOrder:                  []uint64{registry.MethodWebH3ExtDgram, registry.MethodWebH3Stream, registry.MethodWebH2Stream, registry.MethodWebH1WS},
+		QUIC:                         QUICPreferred,
+		DefaultPersonality:           registry.PersonalityFullIP,
+		DefaultShape:                 registry.ShapeLight,
+		SafetyGate:                   true,
+		VisibleProxySemanticsAllowed: true,
 	},
 	{
 		ID:                 registry.PolicyBalancedWeb,
@@ -126,14 +128,15 @@ var allProfiles = []Profile{
 		Fast1Forbidden:     true,
 	},
 	{
-		ID:           registry.PolicyLab,
-		Name:         "lab",
-		DefaultRoute: registry.RouteFast1,
-		MethodOrder:  []uint64{registry.MethodDirectQUICLab},
-		QUIC:         QUICDirectLab,
-		SafetyGate:   true,
-		LabOnly:      true,
-		DefaultShape: registry.ShapeLight,
+		ID:                           registry.PolicyLab,
+		Name:                         "lab",
+		DefaultRoute:                 registry.RouteFast1,
+		MethodOrder:                  []uint64{registry.MethodDirectQUICLab},
+		QUIC:                         QUICDirectLab,
+		SafetyGate:                   true,
+		LabOnly:                      true,
+		VisibleProxySemanticsAllowed: true,
+		DefaultShape:                 registry.ShapeLight,
 	},
 }
 
@@ -208,7 +211,7 @@ func AllowsMASQUE(profile Profile) bool {
 	case registry.PolicyFastWeb, registry.PolicyLab:
 		return true
 	default:
-		return profile.Name == "enterprise"
+		return profile.VisibleProxySemanticsAllowed
 	}
 }
 

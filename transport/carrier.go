@@ -47,6 +47,9 @@ func BuildCarrierRequest(in CarrierRequestInput) (BuiltCarrierRequest, error) {
 	if err != nil {
 		return BuiltCarrierRequest{}, err
 	}
+	if err := validateVisibleHeaders(in.Header); err != nil {
+		return BuiltCarrierRequest{}, err
+	}
 	payload := append([]byte(nil), in.Payload...)
 	switch method {
 	case registry.MethodWebH2Stream:
@@ -80,6 +83,18 @@ func BuildCarrierRequest(in CarrierRequestInput) (BuiltCarrierRequest, error) {
 			RequestClassID:  class.ClassID,
 			Request:         req,
 			InitialMessages: [][]byte{payload},
+			StreamFallback:  in.Plan.UDPMode == UDPOverStreamFallback,
+			NativeDatagrams: in.Plan.UDPMode == UDPNativeDatagram,
+		}, nil
+	case registry.MethodShadowOrigin:
+		req, err := newCarrierHTTPRequest(http.MethodPost, target, in.Authority, cloneHeader(in.Header), bytes.NewReader(payload))
+		if err != nil {
+			return BuiltCarrierRequest{}, err
+		}
+		return BuiltCarrierRequest{
+			MethodID:        method,
+			RequestClassID:  class.ClassID,
+			Request:         req,
 			StreamFallback:  in.Plan.UDPMode == UDPOverStreamFallback,
 			NativeDatagrams: in.Plan.UDPMode == UDPNativeDatagram,
 		}, nil
@@ -121,6 +136,24 @@ func cloneHeader(in http.Header) http.Header {
 		out[http.CanonicalHeaderKey(k)] = copied
 	}
 	return out
+}
+
+func validateVisibleHeaders(header http.Header) error {
+	for k, vs := range header {
+		if containsProtocolMarker(k) {
+			return fmt.Errorf("transport: visible carrier header contains protocol marker")
+		}
+		for _, v := range vs {
+			if containsProtocolMarker(v) {
+				return fmt.Errorf("transport: visible carrier header value contains protocol marker")
+			}
+		}
+	}
+	return nil
+}
+
+func containsProtocolMarker(s string) bool {
+	return strings.Contains(strings.ToLower(s), "aurora")
 }
 
 func websocketKey(seed []byte) (string, error) {

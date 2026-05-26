@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"testing"
 
@@ -205,6 +206,81 @@ func TestBuildCarrierRequestRequiresMatchingPrivateCoverSlot(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("carrier accepted an origin pass-through slot for protocol material")
+	}
+}
+
+func TestBuildShadowOriginCarrierRequestAllowsSidecarBodySlot(t *testing.T) {
+	tpl := transportTemplate(registry.MethodShadowOrigin)
+	tpl.RequestClasses[0].ClassType = registry.RequestSidecarOriginSlot
+	plan := CarrierPlan{
+		Carrier:              Carrier{MethodID: registry.MethodShadowOrigin, Name: "web.shadow-origin"},
+		UDPMode:              UDPOverStreamFallback,
+		PerformanceDowngrade: true,
+	}
+	built, err := BuildCarrierRequest(CarrierRequestInput{
+		Plan:           plan,
+		Template:       tpl,
+		RequestClassID: 1,
+		NeedCapsule:    true,
+		Scheme:         "https",
+		Authority:      "origin.example",
+		Path:           "/upload/media",
+		Header:         http.Header{"Content-Type": []string{"application/octet-stream"}},
+		Payload:        []byte{0x44, 0x55, 0x66},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built.MethodID != registry.MethodShadowOrigin || built.RequestClassID != 1 {
+		t.Fatalf("unexpected shadow-origin metadata: %+v", built)
+	}
+	if built.Request.Method != http.MethodPost || built.Request.URL.Path != "/upload/media" || built.Request.Host != "origin.example" {
+		t.Fatalf("unexpected shadow-origin request: %+v", built.Request)
+	}
+	body, err := io.ReadAll(built.Request.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, []byte{0x44, 0x55, 0x66}) {
+		t.Fatalf("shadow-origin request body = %x", body)
+	}
+	if len(built.InitialMessages) != 0 || !built.StreamFallback || built.NativeDatagrams {
+		t.Fatalf("shadow-origin carrier flags wrong: %+v", built)
+	}
+}
+
+func TestBuildShadowOriginCarrierRequestRejectsOriginPassThroughAndPublicMarkers(t *testing.T) {
+	tpl := transportTemplate(registry.MethodShadowOrigin)
+	tpl.RequestClasses[0].ClassType = registry.RequestOriginPassThrough
+	plan := CarrierPlan{Carrier: Carrier{MethodID: registry.MethodShadowOrigin, Name: "web.shadow-origin"}, UDPMode: UDPOverStreamFallback}
+	_, err := BuildCarrierRequest(CarrierRequestInput{
+		Plan:           plan,
+		Template:       tpl,
+		RequestClassID: 1,
+		NeedCapsule:    true,
+		Scheme:         "https",
+		Authority:      "origin.example",
+		Path:           "/upload/media",
+		Payload:        []byte{0x01},
+	})
+	if err == nil {
+		t.Fatalf("shadow-origin carrier accepted origin pass-through for protocol material")
+	}
+
+	tpl.RequestClasses[0].ClassType = registry.RequestSidecarOriginSlot
+	_, err = BuildCarrierRequest(CarrierRequestInput{
+		Plan:           plan,
+		Template:       tpl,
+		RequestClassID: 1,
+		NeedCapsule:    true,
+		Scheme:         "https",
+		Authority:      "origin.example",
+		Path:           "/upload/media",
+		Header:         http.Header{"X-Aurora-Mode": []string{"capsule"}},
+		Payload:        []byte{0x01},
+	})
+	if err == nil {
+		t.Fatalf("shadow-origin carrier accepted a public protocol marker header")
 	}
 }
 

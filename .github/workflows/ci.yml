@@ -36,3 +36,5 @@ jobs:
         run: go run ./cmd/auroractl proof-check
       - name: Check issuer operations harness
         run: go run ./cmd/auroractl issuer-check
+      - name: Check cover-origin deployment harness
+        run: go run ./cmd/auroractl cover-check

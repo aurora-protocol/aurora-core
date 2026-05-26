@@ -129,6 +129,24 @@ func TestIssuerCheckCommandPrintsOperationsReport(t *testing.T) {
 	}
 }
 
+func TestCoverCheckCommandPrintsDeploymentReport(t *testing.T) {
+	var out bytes.Buffer
+	if err := coverCheck(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"cover_origin_check passed=true template=true gateway_owned_failure=true sidecar_failure=true pass_through=true oversize_failure=true active_probe=true findings=0\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("cover-check output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "passed=false") {
+		t.Fatalf("cover-check output contains failing result:\n%s", text)
+	}
+}
+
 func TestCryptoCheckCommandPrintsProviderAgreement(t *testing.T) {
 	var out bytes.Buffer
 	if err := cryptoCheck(&out); err != nil {
@@ -183,6 +201,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "issuer operations conformance harness") {
 		t.Fatalf("capabilities output missing issuer operations harness:\n%s", text)
 	}
+	if !strings.Contains(text, "cover-origin deployment conformance harness") {
+		t.Fatalf("capabilities output missing cover-origin deployment harness:\n%s", text)
+	}
 	if strings.Contains(text, "not production-complete:\n- ML-DSA") {
 		t.Fatalf("capabilities output still reports ML-DSA work as the first missing item:\n%s", text)
 	}
@@ -192,7 +213,10 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if strings.Contains(text, "production issuer operations") {
 		t.Fatalf("capabilities output still lists local issuer operations as unimplemented:\n%s", text)
 	}
-	if !strings.Contains(text, "issuer daemon deployment/live Privacy Pass issuance, production cover-origin deployment, production platform packaging/device entitlements, external DPI/classifier evaluation, external active-probe evaluation") {
+	if strings.Contains(text, "production cover-origin deployment") {
+		t.Fatalf("capabilities output still lists local cover-origin deployment conformance as unimplemented:\n%s", text)
+	}
+	if !strings.Contains(text, "issuer daemon deployment/live Privacy Pass issuance, production platform packaging/device entitlements, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation") {
 		t.Fatalf("capabilities output stopped tracking remaining production work:\n%s", text)
 	}
 }
@@ -374,6 +398,7 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go run ./cmd/auroractl platform-check",
 		"go run ./cmd/auroractl proof-check",
 		"go run ./cmd/auroractl issuer-check",
+		"go run ./cmd/auroractl cover-check",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("CI workflow missing %q:\n%s", want, text)

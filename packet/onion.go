@@ -15,6 +15,9 @@ func SealSplit2Onion(exitBlock protocol.FrameBlock, entry *Protector, exit *Prot
 	if forward.RouteInstanceID != exit.RouteInstanceID || forward.HopIndex != exit.HopLayer {
 		return AuroraPacket{}, fmt.Errorf("packet: route-forward metadata does not match exit layer")
 	}
+	if err := protocol.ValidateRouteForwardFrame(forward); err != nil {
+		return AuroraPacket{}, err
+	}
 	inner, err := exit.Seal(exitBlock)
 	if err != nil {
 		return AuroraPacket{}, err

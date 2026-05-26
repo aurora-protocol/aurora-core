@@ -444,6 +444,34 @@ func TestSplit2OnionMaintainsIndependentHopCounters(t *testing.T) {
 	}
 }
 
+func TestSplit2OnionRejectsMalformedRouteForwardBeforeCounters(t *testing.T) {
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
+	cases := map[string]func(protocol.RouteForwardFrame) protocol.RouteForwardFrame{
+		"reserved locator": func(forward protocol.RouteForwardFrame) protocol.RouteForwardFrame {
+			forward.NextRelayLocatorType = 0x05
+			return forward
+		},
+		"short descriptor hash": func(forward protocol.RouteForwardFrame) protocol.RouteForwardFrame {
+			forward.NextRelayDescriptorHash = bytesOf(0x91, 47)
+			return forward
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			entry := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 8, HopLayer: 0, Key: bytesOf(0x51, 32), StaticIV: bytesOf(0x52, 12)}
+			exit := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 8, HopLayer: 1, Key: bytesOf(0x61, 32), StaticIV: bytesOf(0x62, 12)}
+			forward := mutate(routeForwardForPacketTest(t, 8, 1))
+
+			if _, err := SealSplit2Onion(block, entry, exit, forward); err == nil {
+				t.Fatalf("malformed route-forward metadata was accepted")
+			}
+			if entry.NextPacket != 0 || exit.NextPacket != 0 {
+				t.Fatalf("malformed route-forward advanced counters: entry=%d exit=%d", entry.NextPacket, exit.NextPacket)
+			}
+		})
+	}
+}
+
 func TestSplit2OnionWrongInnerHopLayerFails(t *testing.T) {
 	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
 	entry := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 9, HopLayer: 0, Key: bytesOf(0x71, 32), StaticIV: bytesOf(0x72, 12)}

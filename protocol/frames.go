@@ -742,6 +742,15 @@ func ValidateRouteFrame(frame AuroraFrame) error {
 }
 
 func ValidateRouteForwardFrame(forward RouteForwardFrame) error {
+	if len(forward.NextRelayDescriptorHash) != 48 {
+		return fmt.Errorf("protocol: route-forward next relay descriptor hash must be 48 bytes")
+	}
+	if len(forward.PreviousHopRelayDescriptorHash) != 48 {
+		return fmt.Errorf("protocol: route-forward previous hop descriptor hash must be 48 bytes")
+	}
+	if len(forward.NextRelayRoutingRecordID) != 16 {
+		return fmt.Errorf("protocol: route-forward routing record id must be 16 bytes")
+	}
 	switch forward.NextRelayLocatorType {
 	case registry.LocatorIPv4Port:
 		if len(forward.NextRelayLocator) != 6 {

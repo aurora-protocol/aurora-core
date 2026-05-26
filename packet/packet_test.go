@@ -188,6 +188,50 @@ func TestReceiverRejectsPacketsOutsideDrainWindow(t *testing.T) {
 	}
 }
 
+func TestReceiverPacketNumbersAreIndependentPerKeyPhase(t *testing.T) {
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
+	phase0 := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 3,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        0,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	phase1 := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 3,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        1,
+		Key:             bytesOf(0x55, 32),
+		StaticIV:        bytesOf(0x66, 12),
+	}
+	pkt0, err := phase0.Seal(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt1, err := phase1.Seal(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pkt0.PacketNumber != 0 || pkt1.PacketNumber != 0 {
+		t.Fatalf("test requires both phases to start at packet 0: phase0=%d phase1=%d", pkt0.PacketNumber, pkt1.PacketNumber)
+	}
+	receiver := NewReceiver(ReceiverConfig{Protector: *phase0, WindowSize: 64})
+	if _, err := receiver.Open(pkt0); err != nil {
+		t.Fatalf("phase 0 packet open failed: %v", err)
+	}
+	if _, err := receiver.Open(pkt0); err == nil {
+		t.Fatalf("duplicate packet number in same key phase accepted")
+	}
+	receiver.protector = *phase1
+	if _, err := receiver.Open(pkt1); err != nil {
+		t.Fatalf("same packet number in new key phase rejected: %v", err)
+	}
+}
+
 func TestSplit2OnionEntrySeesOnlyOpaqueForwardFrame(t *testing.T) {
 	flow := protocol.FlowOpen{
 		FlowOpenVersion:  registry.Version20,

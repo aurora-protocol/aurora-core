@@ -25,6 +25,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/relay"
 	aurorarelease "github.com/aurora-protocol/aurora-core/release"
 	auroraroute "github.com/aurora-protocol/aurora-core/route"
+	auroraserver "github.com/aurora-protocol/aurora-core/server"
 	"github.com/aurora-protocol/aurora-core/transport"
 	corevectors "github.com/aurora-protocol/aurora-core/vectors"
 	"github.com/aurora-protocol/aurora-core/wire"
@@ -65,6 +66,8 @@ func main() {
 		err = issuerDCheck(os.Stdout)
 	case "issuerd-http-check":
 		err = issuerDHTTPCheck(os.Stdout)
+	case "server-check":
+		err = serverCheck(os.Stdout)
 	case "cover-check":
 		err = coverCheck(os.Stdout)
 	case "crypto-check":
@@ -95,7 +98,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|cover-check|crypto-check|wire-check|transport-check|flow-check|route-check|host-build-check [--portable|--apple-simulator|--all]|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|server-check|cover-check|crypto-check|wire-check|transport-check|flow-check|route-check|host-build-check [--portable|--apple-simulator|--all]|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -390,7 +393,7 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, exit-layer packet, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
 	fmt.Fprintln(w, "- P2 negative vector harness for malformed public keys, wrong key_encoding, wrong signatures, wrong AEAD tag, and replay")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
-	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, P0 host build matrix, HTTP CONNECT/SOCKS5 local interface handlers, client FLOW_OPEN frame emission, relay frame-block flow demux, fake-IP mapped UDP flow integration, UDP target confirm TTL enforcement, synthetic local DNS forwarder responses, negative-cache-aware local DNS responses, P5 split-route conformance harness, P6 proxy-flow conformance harness, shared opaque carrier session adapters, P7 transport conformance harness, append-only file replay cache, protocol decode fuzz harness, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, external evaluation evidence verifier, deployment security assessment evidence verifier, platform adapter conformance profiles, packet-to-core platform ABI forwarding, packet, DNS, socket, and network-path platform ABI forwarding, platform packaging and entitlement conformance matrix, release readiness evidence verifier, Privacy Pass Blind RSA production proof harness, private proof-type validation gates, issuer operations conformance harness, issuer service readiness harness, issuer HTTP daemon readiness harness, binary issuer verifier mTLS handler, cover-origin deployment conformance harness")
+	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, P0 host build matrix, HTTP CONNECT/SOCKS5 local interface handlers, client FLOW_OPEN frame emission, relay frame-block flow demux, fake-IP mapped UDP flow integration, UDP target confirm TTL enforcement, synthetic local DNS forwarder responses, negative-cache-aware local DNS responses, P5 split-route conformance harness, P6 proxy-flow conformance harness, shared opaque carrier session adapters, P7 transport conformance harness, append-only file replay cache, protocol decode fuzz harness, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, external evaluation evidence verifier, deployment security assessment evidence verifier, platform adapter conformance profiles, packet-to-core platform ABI forwarding, packet, DNS, socket, and network-path platform ABI forwarding, platform packaging and entitlement conformance matrix, release readiness evidence verifier, Privacy Pass Blind RSA production proof harness, private proof-type validation gates, issuer operations conformance harness, issuer service readiness harness, issuer HTTP daemon readiness harness, runnable Linux server harness, binary issuer verifier mTLS handler, cover-origin deployment conformance harness")
 	fmt.Fprintln(w, "not production-complete:")
 	fmt.Fprintln(w, "- external live issuer deployment, real signed platform release execution/device provisioning, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation")
 }
@@ -772,6 +775,31 @@ func issuerDHTTPCheck(w io.Writer) error {
 	}
 	if !report.Passed {
 		return fmt.Errorf("issuerd-http-check failed daemon readiness")
+	}
+	return nil
+}
+
+func serverCheck(w io.Writer) error {
+	report, err := auroraserver.RunReadinessHarness(200)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(
+		w,
+		"server_check passed=%t health=%t cover=%t issuer_metadata=%t blind_rsa_issue=%t cover_neutral_unknown=%t findings=%d\n",
+		report.Passed,
+		report.HealthEndpoint,
+		report.CoverEndpoint,
+		report.IssuerMetadataEndpoint,
+		report.BlindRSAIssueEndpoint,
+		report.CoverNeutralUnknownPath,
+		len(report.Findings),
+	)
+	for _, finding := range report.Findings {
+		fmt.Fprintf(w, "server_finding %s\n", finding)
+	}
+	if !report.Passed {
+		return fmt.Errorf("server-check failed runnable server readiness")
 	}
 	return nil
 }

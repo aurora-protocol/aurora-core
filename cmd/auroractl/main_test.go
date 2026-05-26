@@ -366,6 +366,28 @@ func TestIssuerDHTTPCheckCommandPrintsDaemonReadinessReport(t *testing.T) {
 	}
 }
 
+func TestServerCheckCommandReportsRunnableLinuxServerSurface(t *testing.T) {
+	var out bytes.Buffer
+	if err := serverCheck(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"server_check passed=true",
+		"health=true",
+		"cover=true",
+		"issuer_metadata=true",
+		"blind_rsa_issue=true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("server-check output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "passed=false") {
+		t.Fatalf("server-check output contains failing result:\n%s", text)
+	}
+}
+
 func TestCoverCheckCommandPrintsDeploymentReport(t *testing.T) {
 	var out bytes.Buffer
 	if err := coverCheck(&out); err != nil {

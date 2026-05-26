@@ -261,6 +261,23 @@ func TestFlowManagementMismatchFailsBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestProtectorRejectsUnknownReservedFrameType(t *testing.T) {
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: 0x1234}}}
+	p := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	pkt, err := p.Seal(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Open(pkt); err == nil {
+		t.Fatalf("unknown reserved frame type accepted")
+	}
+}
+
 func TestKeyUpdateDerivationAndACK(t *testing.T) {
 	frame := protocol.KeyUpdate{
 		RouteInstanceID: 0x42,

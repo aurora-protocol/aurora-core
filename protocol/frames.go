@@ -57,6 +57,46 @@ func DecodeFrameBlock(encoded []byte) (FrameBlock, error) {
 	return block, nil
 }
 
+func ValidateFrameBlock(block FrameBlock) error {
+	for _, frame := range block.Frames {
+		if err := ValidateFrameType(frame.FrameType); err != nil {
+			return err
+		}
+		if err := ValidateFlowManagementFrame(frame); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ValidateFrameType(frameType uint64) error {
+	switch frameType {
+	case registry.FrameStreamData,
+		registry.FrameDatagramData,
+		registry.FrameIPPacket,
+		registry.FrameDNSMessage,
+		registry.FrameControl,
+		registry.FramePathProbe,
+		registry.FrameKeyUpdate,
+		registry.FramePadding,
+		registry.FrameClose,
+		registry.FrameRouteForward,
+		registry.FramePriorityUpdate,
+		registry.FrameAckHint,
+		registry.FrameKeyUpdateAck,
+		registry.FrameKeyUpdateRequest,
+		registry.FrameFlowOpen,
+		registry.FrameUDPTargetConfirm,
+		registry.FrameFlowClose:
+		return nil
+	default:
+		if frameType <= 0x6fff {
+			return fmt.Errorf("protocol: unknown reserved frame type 0x%x", frameType)
+		}
+		return nil
+	}
+}
+
 type KeyUpdate struct {
 	RouteInstanceID uint64
 	HopLayer        uint8

@@ -113,10 +113,8 @@ func (p Protector) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
 	if err != nil {
 		return protocol.FrameBlock{}, err
 	}
-	for _, frame := range block.Frames {
-		if err := protocol.ValidateFlowManagementFrame(frame); err != nil {
-			return protocol.FrameBlock{}, err
-		}
+	if err := protocol.ValidateFrameBlock(block); err != nil {
+		return protocol.FrameBlock{}, err
 	}
 	return block, nil
 }

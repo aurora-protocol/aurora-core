@@ -37,6 +37,24 @@ func TestMasqueRejectedUnderAdversarialProfile(t *testing.T) {
 	}
 }
 
+func TestMasqueAllowedOnlyForNonStealthProfilesWithExplicitCapability(t *testing.T) {
+	fast, _ := policy.ProfileByID(registry.PolicyFastWeb)
+	if !IsMethodAllowed(fast, registry.MethodMasqueConnectUDP, Capabilities{CoverTemplateOK: true, MASQUEAllowed: true}) {
+		t.Fatalf("fast-web should allow MASQUE when explicitly enabled")
+	}
+	lab, _ := policy.ProfileByID(registry.PolicyLab)
+	if !IsMethodAllowed(lab, registry.MethodMasqueConnectIP, Capabilities{CoverTemplateOK: true, MASQUEAllowed: true}) {
+		t.Fatalf("lab should allow MASQUE when explicitly enabled")
+	}
+	balanced, _ := policy.ProfileByID(registry.PolicyBalancedWeb)
+	if IsMethodAllowed(balanced, registry.MethodMasqueConnectUDP, Capabilities{CoverTemplateOK: true, MASQUEAllowed: true}) {
+		t.Fatalf("balanced-web must not allow visible MASQUE semantics while StealthGate is enabled")
+	}
+	if IsMethodAllowed(fast, registry.MethodMasqueConnectUDP, Capabilities{CoverTemplateOK: true, MASQUEAllowed: false}) {
+		t.Fatalf("MASQUE must require explicit capability")
+	}
+}
+
 func TestH3ExtDgramRequiresValidation(t *testing.T) {
 	profile, _ := policy.ProfileByID(registry.PolicyAdversarialDPI)
 	if IsMethodAllowed(profile, registry.MethodWebH3ExtDgram, Capabilities{SupportsH3: true, SupportsH3Dgram: true, H3Validated: false, CoverTemplateOK: true}) {
@@ -368,6 +386,58 @@ func TestBuildH3ExtDatagramCarrierRequestRequiresProfileAndNegotiation(t *testin
 	}
 }
 
+func TestBuildMasqueConnectUDPCarrierRequestRequiresVisibleProxyOptIn(t *testing.T) {
+	plan := CarrierPlan{Carrier: Carrier{MethodID: registry.MethodMasqueConnectUDP, Name: "masque.connect-udp"}, UDPMode: UDPNativeDatagram}
+	tpl := transportTemplate(registry.MethodMasqueConnectUDP)
+	if _, err := BuildCarrierRequest(masqueCarrierInput(plan, tpl, false)); err == nil {
+		t.Fatalf("MASQUE CONNECT-UDP accepted without visible proxy opt-in")
+	}
+
+	built, err := BuildCarrierRequest(masqueCarrierInput(plan, tpl, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built.MethodID != registry.MethodMasqueConnectUDP || built.ProtocolToken != "connect-udp" {
+		t.Fatalf("unexpected MASQUE CONNECT-UDP metadata: %+v", built)
+	}
+	if built.Request.Method != http.MethodConnect || built.Request.URL.Path != "/.well-known/masque/udp/192.0.2.6/443/" {
+		t.Fatalf("unexpected MASQUE CONNECT-UDP request: %+v", built.Request)
+	}
+	if built.Request.Header.Get("Capsule-Protocol") != "?1" {
+		t.Fatalf("missing capsule protocol header: %+v", built.Request.Header)
+	}
+	if built.Request.Body != nil || built.Request.ContentLength != 0 {
+		t.Fatalf("MASQUE request must not put payload in request body")
+	}
+	if len(built.InitialDatagrams) != 1 || !bytes.Equal(built.InitialDatagrams[0], []byte{0xcc, 0xdd}) {
+		t.Fatalf("MASQUE UDP payload was not staged as an initial datagram: %+v", built.InitialDatagrams)
+	}
+	if !built.NativeDatagrams || built.StreamFallback {
+		t.Fatalf("MASQUE CONNECT-UDP carrier flags wrong: %+v", built)
+	}
+}
+
+func TestBuildMasqueConnectIPCarrierRequestUsesStandardToken(t *testing.T) {
+	plan := CarrierPlan{Carrier: Carrier{MethodID: registry.MethodMasqueConnectIP, Name: "masque.connect-ip"}, UDPMode: UDPNativeDatagram}
+	tpl := transportTemplate(registry.MethodMasqueConnectIP)
+	in := masqueCarrierInput(plan, tpl, true)
+	in.Path = "/.well-known/masque/ip/*/*/"
+	in.Payload = []byte{0x45, 0x00}
+	built, err := BuildCarrierRequest(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built.MethodID != registry.MethodMasqueConnectIP || built.ProtocolToken != "connect-ip" {
+		t.Fatalf("unexpected MASQUE CONNECT-IP metadata: %+v", built)
+	}
+	if built.Request.Method != http.MethodConnect || built.Request.URL.Path != "/.well-known/masque/ip/*/*/" {
+		t.Fatalf("unexpected MASQUE CONNECT-IP request: %+v", built.Request)
+	}
+	if len(built.InitialDatagrams) != 1 || !bytes.Equal(built.InitialDatagrams[0], []byte{0x45, 0x00}) {
+		t.Fatalf("MASQUE IP payload was not staged as an initial datagram: %+v", built.InitialDatagrams)
+	}
+}
+
 func transportTemplate(method uint64) protocol.CoverTemplate {
 	return protocol.CoverTemplate{
 		RequestClasses: []protocol.RequestClass{{
@@ -407,5 +477,19 @@ func h3CarrierInput(plan CarrierPlan, tpl protocol.CoverTemplate) CarrierRequest
 		Payload:                  []byte{0x80},
 		H3DatagramSettingsOK:     true,
 		QUICMaxDatagramFrameSize: 1200,
+	}
+}
+
+func masqueCarrierInput(plan CarrierPlan, tpl protocol.CoverTemplate, allowVisible bool) CarrierRequestInput {
+	return CarrierRequestInput{
+		Plan:                       plan,
+		Template:                   tpl,
+		RequestClassID:             1,
+		NeedCapsule:                true,
+		Scheme:                     "https",
+		Authority:                  "proxy.example",
+		Path:                       "/.well-known/masque/udp/192.0.2.6/443/",
+		Payload:                    []byte{0xcc, 0xdd},
+		AllowVisibleProxySemantics: allowVisible,
 	}
 }

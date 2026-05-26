@@ -98,7 +98,7 @@ func IsMethodAllowed(profile policy.Profile, method uint64, caps Capabilities) b
 
 func udpModeForMethod(method uint64) (UDPMode, bool) {
 	switch method {
-	case registry.MethodWebH3ExtDgram, registry.MethodMasqueConnectUDP, registry.MethodDirectQUICLab:
+	case registry.MethodWebH3ExtDgram, registry.MethodMasqueConnectIP, registry.MethodMasqueConnectUDP, registry.MethodDirectQUICLab:
 		return UDPNativeDatagram, false
 	case registry.MethodWebH2Stream, registry.MethodWebH1WS, registry.MethodShadowOrigin, registry.MethodWebH3Stream:
 		return UDPOverStreamFallback, true

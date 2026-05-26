@@ -16,19 +16,20 @@ import (
 )
 
 type CarrierRequestInput struct {
-	Plan                     CarrierPlan
-	Template                 protocol.CoverTemplate
-	RequestClassID           uint64
-	NeedCapsule              bool
-	Scheme                   string
-	Authority                string
-	Path                     string
-	Header                   http.Header
-	Payload                  []byte
-	WebSocketKeySeed         []byte
-	H3DatagramSettingsOK     bool
-	QUICMaxDatagramFrameSize uint64
-	ResetStreamAtNegotiated  bool
+	Plan                       CarrierPlan
+	Template                   protocol.CoverTemplate
+	RequestClassID             uint64
+	NeedCapsule                bool
+	Scheme                     string
+	Authority                  string
+	Path                       string
+	Header                     http.Header
+	Payload                    []byte
+	WebSocketKeySeed           []byte
+	H3DatagramSettingsOK       bool
+	QUICMaxDatagramFrameSize   uint64
+	ResetStreamAtNegotiated    bool
+	AllowVisibleProxySemantics bool
 }
 
 type BuiltCarrierRequest struct {
@@ -120,9 +121,44 @@ func BuildCarrierRequest(in CarrierRequestInput) (BuiltCarrierRequest, error) {
 			StreamFallback:   in.Plan.UDPMode == UDPOverStreamFallback,
 			NativeDatagrams:  in.Plan.UDPMode == UDPNativeDatagram,
 		}, nil
+	case registry.MethodMasqueConnectUDP:
+		return buildMasqueRequest(in, class, target, "connect-udp", payload)
+	case registry.MethodMasqueConnectIP:
+		return buildMasqueRequest(in, class, target, "connect-ip", payload)
 	default:
 		return BuiltCarrierRequest{}, fmt.Errorf("transport: carrier request builder unsupported for method 0x%x", method)
 	}
+}
+
+func buildMasqueRequest(in CarrierRequestInput, class protocol.RequestClass, target *url.URL, token string, payload []byte) (BuiltCarrierRequest, error) {
+	if err := validateMasque(in); err != nil {
+		return BuiltCarrierRequest{}, err
+	}
+	header := cloneHeader(in.Header)
+	header.Set("Capsule-Protocol", "?1")
+	req, err := newCarrierHTTPRequest(http.MethodConnect, target, in.Authority, header, nil)
+	if err != nil {
+		return BuiltCarrierRequest{}, err
+	}
+	return BuiltCarrierRequest{
+		MethodID:         in.Plan.Carrier.MethodID,
+		RequestClassID:   class.ClassID,
+		Request:          req,
+		ProtocolToken:    token,
+		InitialDatagrams: initialDatagrams(payload),
+		StreamFallback:   in.Plan.UDPMode == UDPOverStreamFallback,
+		NativeDatagrams:  in.Plan.UDPMode == UDPNativeDatagram,
+	}, nil
+}
+
+func validateMasque(in CarrierRequestInput) error {
+	if !in.AllowVisibleProxySemantics {
+		return fmt.Errorf("transport: MASQUE requires explicit visible proxy opt-in")
+	}
+	if in.Plan.UDPMode != UDPNativeDatagram {
+		return fmt.Errorf("transport: MASQUE carrier requires native datagram mode")
+	}
+	return nil
 }
 
 func validateH3ExtDatagram(in CarrierRequestInput) error {

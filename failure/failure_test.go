@@ -26,6 +26,7 @@ func TestKindsHaveStableInternalCodes(t *testing.T) {
 		{VerifierUnavailable, 0x000d, "f000d"},
 		{ReplayCacheFailure, 0x000e, "f000e"},
 		{WrongH3Settings, 0x000f, "f000f"},
+		{UnsupportedVersion, 0x0010, "f0010"},
 	}
 	seen := make(map[uint16]bool, len(cases))
 	for _, tc := range cases {
@@ -56,6 +57,7 @@ func TestProbeSensitiveFailuresUseCoverOriginAction(t *testing.T) {
 		InvalidCoverSlot,
 		UnsupportedMethod,
 		WrongH3Settings,
+		UnsupportedVersion,
 		PolicyGate,
 		VerifierUnavailable,
 		ReplayCacheFailure,
@@ -91,6 +93,7 @@ func TestActiveProbeCasesCoverSpecChecklist(t *testing.T) {
 		"bad-aead-tag":              BadAEADTag,
 		"replayed-admission-proof":  ReplayedAdmission,
 		"unsupported-method":        UnsupportedMethod,
+		"unsupported-version":       UnsupportedVersion,
 		"wrong-h3-settings":         WrongH3Settings,
 		"malformed-flow-open":       MalformedFlowOpen,
 		"malformed-key-update":      MalformedKeyUpdate,

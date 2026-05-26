@@ -574,6 +574,18 @@ func TestValidateFrameBlockRejectsMalformedFlowOpenPayload(t *testing.T) {
 			open.TargetKind = 0xff
 			return open
 		}(),
+		"domain upper-case": func() FlowOpen {
+			open := base
+			open.TargetKind = 0x03
+			open.TargetHost = []byte("Example.COM")
+			return open
+		}(),
+		"domain trailing dot": func() FlowOpen {
+			open := base
+			open.TargetKind = 0x03
+			open.TargetHost = []byte("example.com.")
+			return open
+		}(),
 	}
 	for name, open := range cases {
 		t.Run(name, func(t *testing.T) {

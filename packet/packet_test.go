@@ -201,6 +201,41 @@ func TestProtectorRejectsMalformedFrameBlockBeforeSeal(t *testing.T) {
 	}
 }
 
+func TestProtectorRejectsNonCanonicalFlowOpenDomainBeforeSeal(t *testing.T) {
+	open := protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           9,
+		FlowKind:         0x01,
+		TargetKind:       0x03,
+		TargetHost:       []byte("Example.COM"),
+		TargetPort:       443,
+		NameBindingID:    bytesOf(0x11, 16),
+		DNSAnswerSetHash: bytesOf(0x22, 48),
+	}
+	payload, err := protocol.Encode(open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{
+		FrameType: registry.FrameFlowOpen,
+		FlowID:    open.FlowID,
+		Payload:   payload,
+	}}}
+	p := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+
+	if _, err := p.Seal(block); err == nil {
+		t.Fatalf("non-canonical FLOW_OPEN domain was sealed")
+	}
+	if p.NextPacket != 0 {
+		t.Fatalf("rejected FLOW_OPEN domain advanced packet counter to %d", p.NextPacket)
+	}
+}
+
 func TestProtectorRejectsKeyUpdateForOtherDirectionBeforeSeal(t *testing.T) {
 	update := protocol.KeyUpdate{
 		RouteInstanceID: 0x48,

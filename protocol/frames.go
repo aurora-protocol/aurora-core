@@ -410,8 +410,8 @@ func ValidateFlowOpen(open FlowOpen) error {
 			return fmt.Errorf("protocol: FLOW_OPEN IPv6 target must be 16 bytes")
 		}
 	case 0x03:
-		if len(open.TargetHost) == 0 {
-			return fmt.Errorf("protocol: FLOW_OPEN domain target is empty")
+		if err := validateFlowOpenDomainTarget(open.TargetHost); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("protocol: reserved target_kind 0x%x", open.TargetKind)
@@ -439,6 +439,53 @@ func ValidateFlowOpen(open FlowOpen) error {
 	}
 	if err := ValidateExtensions(open.Extensions, nil); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateFlowOpenDomainTarget(host []byte) error {
+	if len(host) == 0 {
+		return fmt.Errorf("protocol: FLOW_OPEN domain target is empty")
+	}
+	if len(host) > 253 {
+		return fmt.Errorf("protocol: FLOW_OPEN domain target exceeds 253 bytes")
+	}
+	if host[len(host)-1] == '.' {
+		return fmt.Errorf("protocol: FLOW_OPEN domain target has trailing dot")
+	}
+	labelLen := 0
+	for i, b := range host {
+		switch {
+		case b >= 'a' && b <= 'z':
+			labelLen++
+		case b >= '0' && b <= '9':
+			labelLen++
+		case b == '-':
+			if labelLen == 0 {
+				return fmt.Errorf("protocol: FLOW_OPEN domain label starts with hyphen")
+			}
+			labelLen++
+		case b == '.':
+			if labelLen == 0 {
+				return fmt.Errorf("protocol: FLOW_OPEN domain target has empty label")
+			}
+			if host[i-1] == '-' {
+				return fmt.Errorf("protocol: FLOW_OPEN domain label ends with hyphen")
+			}
+			labelLen = 0
+			continue
+		default:
+			return fmt.Errorf("protocol: FLOW_OPEN domain target is not lower-case A-label")
+		}
+		if labelLen > 63 {
+			return fmt.Errorf("protocol: FLOW_OPEN domain label exceeds 63 bytes")
+		}
+	}
+	if labelLen == 0 {
+		return fmt.Errorf("protocol: FLOW_OPEN domain target has empty label")
+	}
+	if host[len(host)-1] == '-' {
+		return fmt.Errorf("protocol: FLOW_OPEN domain label ends with hyphen")
 	}
 	return nil
 }

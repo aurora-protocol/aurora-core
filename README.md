@@ -13,7 +13,7 @@ Implemented now:
 - AccessHint computation, spent-hint cache, token redemption hash, token spent key, replay context hash, and bootstrap dedup key;
 - first-hop and split-route prelude transcript hashing, sealed control capsules, Finished messages, application traffic secret derivation, first application packet vectors, and exit-layer packet vectors;
 - signed real-crypto metadata vectors for directory consensus, relay descriptors, and cover templates;
-- policy profiles, PAL scoring, PACE reference behavior, local config parsing, threat-safe logging wrappers, `auroractl`, the local proxy client, cover-template-validated H2/H1/shadow-origin/H3 datagram and explicitly gated MASQUE carrier request builders, relay admission/exit gates, HTTP cover-origin gateway handler, gateway-backed active-probe harness, deterministic DPI/classifier baseline harness, platform adapter conformance profiles, platform packaging and entitlement conformance matrix, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, cover-origin deployment conformance harness, vector drift tests, and ops helpers.
+- policy profiles, PAL scoring, PACE reference behavior, local config parsing, threat-safe logging wrappers, `auroractl`, the local proxy client, cover-template-validated H2/H1/shadow-origin/H3 datagram and explicitly gated MASQUE carrier request builders, relay admission/exit gates, HTTP cover-origin gateway handler, gateway-backed active-probe harness, deterministic DPI/classifier baseline harness, external evaluation evidence verifier, platform adapter conformance profiles, platform packaging and entitlement conformance matrix, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, cover-origin deployment conformance harness, vector drift tests, and ops helpers.
 
 ## Layout
 
@@ -39,6 +39,7 @@ GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl vectors
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl vectors --check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl wire-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl classifier-check
+GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl evaluation-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl platform-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl packaging-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl proof-check

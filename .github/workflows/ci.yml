@@ -30,6 +30,8 @@ jobs:
         run: go run ./cmd/auroractl active-probes
       - name: Check classifier baseline
         run: go run ./cmd/auroractl classifier-check
+      - name: Check external evaluation evidence verifier
+        run: go run ./cmd/auroractl evaluation-check
       - name: Check platform adapter conformance
         run: go run ./cmd/auroractl platform-check
       - name: Check platform packaging conformance

@@ -72,6 +72,24 @@ func TestClassifierCheckCommandPrintsBaselineReport(t *testing.T) {
 	}
 }
 
+func TestEvaluationCheckCommandPrintsExternalEvidenceReport(t *testing.T) {
+	var out bytes.Buffer
+	if err := evaluationCheck(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"evaluation_check passed=true classifier=true active_probe=true interoperability=true security_reviews=true release_gates=true findings=0\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("evaluation-check output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "passed=false") {
+		t.Fatalf("evaluation-check output contains failing evidence:\n%s", text)
+	}
+}
+
 func TestPlatformCheckCommandPrintsAdapterConformance(t *testing.T) {
 	var out bytes.Buffer
 	if err := platformCheck(&out); err != nil {
@@ -212,6 +230,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	}
 	if !strings.Contains(text, "DPI/classifier baseline harness") {
 		t.Fatalf("capabilities output missing classifier baseline harness:\n%s", text)
+	}
+	if !strings.Contains(text, "external evaluation evidence verifier") {
+		t.Fatalf("capabilities output missing external evaluation evidence verifier:\n%s", text)
 	}
 	if !strings.Contains(text, "platform adapter conformance profiles") {
 		t.Fatalf("capabilities output missing platform adapter conformance:\n%s", text)
@@ -422,6 +443,7 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go run ./cmd/auroractl wire-check",
 		"go run ./cmd/auroractl active-probes",
 		"go run ./cmd/auroractl classifier-check",
+		"go run ./cmd/auroractl evaluation-check",
 		"go run ./cmd/auroractl platform-check",
 		"go run ./cmd/auroractl proof-check",
 		"go run ./cmd/auroractl issuer-check",

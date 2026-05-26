@@ -118,10 +118,7 @@ func TestExitFlowHandlerRejectsMismatchedFlowIDBeforeOpen(t *testing.T) {
 }
 
 func TestAdmissionPolicyRejectsVOPRFWithoutVerifierService(t *testing.T) {
-	proof := protocol.AdmissionProof{
-		ProofType:     registry.ProofVOPRFP384SHA384,
-		RelayBucketID: []byte("1234567890abcdef"),
-	}
+	proof := relayAdmissionProof(registry.ProofVOPRFP384SHA384)
 	if err := (AdmissionPolicy{NowUnix: 20}).AllowsProof(proof); err == nil {
 		t.Fatalf("VOPRF proof accepted without verifier service")
 	}
@@ -159,11 +156,7 @@ func TestAdmissionPolicyRejectsVOPRFWithoutVerifierService(t *testing.T) {
 }
 
 func TestAdmissionPolicyRequiresBlindRSAVerifier(t *testing.T) {
-	proof := protocol.AdmissionProof{
-		ProofType:          registry.ProofBlindRSA2048,
-		TokenAuthenticator: []byte("blind-rsa-token"),
-		BindingProof:       []byte("binding-proof"),
-	}
+	proof := relayAdmissionProof(registry.ProofBlindRSA2048)
 	if err := (AdmissionPolicy{}).AllowsProof(proof); err == nil {
 		t.Fatalf("Blind RSA proof accepted without verifier")
 	}
@@ -177,6 +170,32 @@ func TestAdmissionPolicyRequiresBlindRSAVerifier(t *testing.T) {
 	verifier.err = errors.New("bad token")
 	if err := (AdmissionPolicy{BlindRSAVerifier: verifier}).AllowsProof(proof); err == nil {
 		t.Fatalf("Blind RSA verifier rejection was ignored")
+	}
+}
+
+func TestAdmissionPolicyRejectsStructurallyInvalidProofBeforeVerifier(t *testing.T) {
+	for name, mutate := range map[string]func(*protocol.AdmissionProof){
+		"expired": func(proof *protocol.AdmissionProof) {
+			proof.ExpiryUnix = 20
+		},
+		"unsupported version": func(proof *protocol.AdmissionProof) {
+			proof.ProofVersion = 0
+		},
+		"bad redemption hash": func(proof *protocol.AdmissionProof) {
+			proof.RedemptionContextHash = bytesOf(0x55, 47)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			proof := relayAdmissionProof(registry.ProofBlindRSA2048)
+			mutate(&proof)
+			verifier := &recordingBlindRSAVerifier{}
+			if err := (AdmissionPolicy{BlindRSAVerifier: verifier, NowUnix: 20}).AllowsProof(proof); err == nil {
+				t.Fatalf("structurally invalid admission proof accepted")
+			}
+			if verifier.calls != 0 {
+				t.Fatalf("structurally invalid proof reached verifier")
+			}
+		})
 	}
 }
 
@@ -289,6 +308,23 @@ func flowOpenFrame(t *testing.T, open protocol.FlowOpen) protocol.AuroraFrame {
 		FrameType: registry.FrameFlowOpen,
 		FlowID:    open.FlowID,
 		Payload:   payload,
+	}
+}
+
+func relayAdmissionProof(proofType uint64) protocol.AdmissionProof {
+	return protocol.AdmissionProof{
+		ProofVersion:          registry.Version20,
+		ProofType:             proofType,
+		IssuerID:              bytesOf(0x10, 16),
+		TokenKeyID:            bytesOf(0x11, 32),
+		RelayBucketID:         []byte("1234567890abcdef"),
+		TokenScopeID:          bytesOf(0x12, 16),
+		ExpiryUnix:            200,
+		TokenNonce:            bytesOf(0x13, 32),
+		RedemptionContextHash: bytesOf(0x14, 48),
+		TokenPublicMetadata:   []byte("metadata"),
+		TokenAuthenticator:    []byte("authenticator"),
+		BindingProof:          []byte("binding"),
 	}
 }
 

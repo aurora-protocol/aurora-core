@@ -351,6 +351,9 @@ type VOPRFVerifier interface {
 }
 
 func (p AdmissionPolicy) AllowsProof(proof protocol.AdmissionProof) error {
+	if err := proof.ValidateStructural(p.NowUnix, false); err != nil {
+		return err
+	}
 	switch proof.ProofType {
 	case registry.ProofBlindRSA2048:
 		if p.BlindRSAVerifier == nil {

@@ -85,12 +85,34 @@ func ValidateFrameBlockForDirection(block FrameBlock, direction uint8) error {
 	if err := ValidateFrameBlock(block); err != nil {
 		return err
 	}
-	if direction == 1 {
-		for _, frame := range block.Frames {
-			if frame.FrameType == registry.FrameFlowOpen {
-				return fmt.Errorf("protocol: FLOW_OPEN is malformed in backward direction")
-			}
+	for _, frame := range block.Frames {
+		if err := ValidateKeyUpdateFrameForDirection(frame, direction); err != nil {
+			return err
 		}
+		if direction == 1 && frame.FrameType == registry.FrameFlowOpen {
+			return fmt.Errorf("protocol: FLOW_OPEN is malformed in backward direction")
+		}
+	}
+	return nil
+}
+
+func ValidateKeyUpdateFrameForDirection(frame AuroraFrame, direction uint8) error {
+	if frame.FrameType != registry.FrameKeyUpdate {
+		return nil
+	}
+	r := wire.NewReader(frame.Payload)
+	update := DecodeKeyUpdate(r)
+	if r.Err() != nil {
+		return r.Err()
+	}
+	if !r.EOF() {
+		return fmt.Errorf("protocol: trailing KEY_UPDATE payload bytes")
+	}
+	if err := ValidateKeyUpdate(update); err != nil {
+		return err
+	}
+	if update.Direction != direction {
+		return fmt.Errorf("protocol: KEY_UPDATE direction %d does not match packet direction %d", update.Direction, direction)
 	}
 	return nil
 }

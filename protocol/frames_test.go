@@ -279,6 +279,24 @@ func TestValidateFrameBlockRejectsMalformedKeyUpdatePayloads(t *testing.T) {
 	}
 }
 
+func TestValidateFrameBlockForDirectionRejectsKeyUpdateForOtherDirection(t *testing.T) {
+	update := KeyUpdate{
+		RouteInstanceID: 7,
+		HopLayer:        1,
+		Direction:       1,
+		OldKeyPhase:     0,
+		NewKeyPhase:     1,
+		UpdateNonce:     bytes.Repeat([]byte{0x16}, 16),
+		UpdateReason:    1,
+	}
+	err := ValidateFrameBlockForDirection(FrameBlock{Frames: []AuroraFrame{
+		keyUpdateFrameForTest(t, update),
+	}}, 0)
+	if err == nil {
+		t.Fatalf("KEY_UPDATE for other direction was accepted")
+	}
+}
+
 func TestRouteControlPayloadsRoundTrip(t *testing.T) {
 	forward := RouteForwardFrame{
 		RouteInstanceID:                11,

@@ -201,6 +201,41 @@ func TestProtectorRejectsMalformedFrameBlockBeforeSeal(t *testing.T) {
 	}
 }
 
+func TestProtectorRejectsKeyUpdateForOtherDirectionBeforeSeal(t *testing.T) {
+	update := protocol.KeyUpdate{
+		RouteInstanceID: 0x48,
+		HopLayer:        1,
+		Direction:       1,
+		OldKeyPhase:     0,
+		NewKeyPhase:     1,
+		UpdateNonce:     bytesOf(0xa8, 16),
+		UpdateReason:    1,
+	}
+	payload, err := protocol.Encode(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{
+		FrameType: registry.FrameKeyUpdate,
+		Payload:   payload,
+	}}}
+	p := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 0x48,
+		HopLayer:        1,
+		Direction:       0,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+
+	if _, err := p.Seal(block); err == nil {
+		t.Fatalf("KEY_UPDATE for other direction was sealed")
+	}
+	if p.NextPacket != 0 {
+		t.Fatalf("rejected KEY_UPDATE advanced packet counter to %d", p.NextPacket)
+	}
+}
+
 func TestReceiverRejectsDuplicatePacketNumber(t *testing.T) {
 	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
 	protector := &Protector{

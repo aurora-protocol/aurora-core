@@ -251,6 +251,58 @@ func TestLocalProxyOpensUDPWithFakeDNSWithoutDomainLeak(t *testing.T) {
 	}
 }
 
+func TestLocalProxyOpenTCPFrameTracksFlowAndReturnsFlowOpen(t *testing.T) {
+	p := NewLocalProxy()
+	frame, err := p.OpenTCPFrame(59, "Example.COM", 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.FrameType != registry.FrameFlowOpen || frame.FlowID != 59 {
+		t.Fatalf("unexpected TCP FLOW_OPEN frame: %+v", frame)
+	}
+	open := protocol.DecodeFlowOpen(wire.NewReader(frame.Payload))
+	if open.FlowID != 59 || open.FlowKind != flow.FlowKindTCPStream || open.TargetKind != flow.TargetKindDomainName || string(open.TargetHost) != "example.com" || open.TargetPort != 443 {
+		t.Fatalf("unexpected TCP FLOW_OPEN payload: %+v", open)
+	}
+	if open.LocalBindingMode != flow.LocalBindingExplicitProxyAPI || open.PriorityClass != flow.PriorityInteractive {
+		t.Fatalf("TCP FLOW_OPEN used wrong local binding: %+v", open)
+	}
+	state, ok := p.FlowState(59)
+	if !ok {
+		t.Fatalf("TCP frame open did not track flow")
+	}
+	if state.Kind != open.FlowKind || state.TargetKind != open.TargetKind || !bytes.Equal(state.TargetHost, open.TargetHost) {
+		t.Fatalf("tracked TCP flow does not match frame payload: state=%+v open=%+v", state, open)
+	}
+}
+
+func TestLocalProxyOpenUDPWithFakeDNSFrameReturnsIPAuthoritativeFlowOpen(t *testing.T) {
+	p := NewLocalProxy()
+	answer, frame, err := p.OpenUDPWithFakeDNSFrame(60, "Example.COM.", []string{"93.184.216.34"}, 443, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.FrameType != registry.FrameFlowOpen || frame.FlowID != 60 {
+		t.Fatalf("unexpected UDP FLOW_OPEN frame: %+v", frame)
+	}
+	open := protocol.DecodeFlowOpen(wire.NewReader(frame.Payload))
+	if open.FlowID != 60 || open.FlowKind != flow.FlowKindUDPAssociation || open.TargetKind != flow.TargetKindIPv4 || !bytes.Equal(open.TargetHost, []byte{93, 184, 216, 34}) {
+		t.Fatalf("unexpected UDP FLOW_OPEN payload: %+v", open)
+	}
+	if open.UDPFQDNMode != flow.UDPFQDNClientResolvedNameBinding || open.LocalBindingMode != flow.LocalBindingTransparentFakeIP {
+		t.Fatalf("UDP FLOW_OPEN used wrong fake-IP binding: %+v", open)
+	}
+	if len(open.OriginalDomainHint) != 0 || bytes.Contains(open.TargetHost, []byte("example.com")) {
+		t.Fatalf("UDP FLOW_OPEN leaked raw domain: %+v", open)
+	}
+	if !bytes.Equal(open.NameBindingID, answer.NameBindingID) || !bytes.Equal(open.DNSAnswerSetHash, answer.DNSAnswerSetHash) {
+		t.Fatalf("UDP FLOW_OPEN did not carry DNS binding metadata")
+	}
+	if _, ok := p.FlowState(60); !ok {
+		t.Fatalf("UDP frame open did not track flow")
+	}
+}
+
 func TestLocalProxyBuildsTCPStreamDataFrameForLiveTCPFlow(t *testing.T) {
 	p := NewLocalProxy()
 	if err := p.OpenTCP(3, "example.com", 443); err != nil {

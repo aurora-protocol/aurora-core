@@ -129,6 +129,44 @@ func TestNewFlowCloseFrameWrapsPayloadAndCopiesReason(t *testing.T) {
 	}
 }
 
+func TestNewFlowOpenFrameWrapsPayloadAndCopiesFields(t *testing.T) {
+	host := []byte("example.com")
+	binding := bytes.Repeat([]byte{0x11}, 16)
+	hash := bytes.Repeat([]byte{0x22}, 48)
+	frame, err := NewFlowOpenFrame(FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           10,
+		FlowKind:         0x01,
+		TargetKind:       0x03,
+		TargetHost:       host,
+		TargetPort:       443,
+		UDPFQDNMode:      0x00,
+		NameBindingID:    binding,
+		DNSAnswerSetHash: hash,
+		LocalBindingMode: 0x00,
+		PriorityClass:    0x01,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host[0] = 'X'
+	binding[0] = 0xff
+	hash[0] = 0xff
+	if frame.FrameType != registry.FrameFlowOpen || frame.FlowID != 10 || frame.Flags != 0 {
+		t.Fatalf("unexpected FlowOpen frame: %+v", frame)
+	}
+	got := DecodeFlowOpen(bytesReader(frame.Payload))
+	if got.FlowID != 10 || got.FlowKind != 0x01 || got.TargetKind != 0x03 || string(got.TargetHost) != "example.com" || got.TargetPort != 443 {
+		t.Fatalf("decoded FlowOpen payload mismatch: %+v", got)
+	}
+	if !bytes.Equal(got.NameBindingID, bytes.Repeat([]byte{0x11}, 16)) || !bytes.Equal(got.DNSAnswerSetHash, bytes.Repeat([]byte{0x22}, 48)) {
+		t.Fatalf("FlowOpen frame payload reused caller-owned slices: %+v", got)
+	}
+	if err := ValidateFrameBlock(FrameBlock{Frames: []AuroraFrame{frame}}); err != nil {
+		t.Fatalf("FlowOpen frame did not validate: %v", err)
+	}
+}
+
 func TestUDPTargetConfirmEncodesFullPayload(t *testing.T) {
 	hash := bytes.Repeat([]byte{0xaa}, 48)
 	confirm := UDPTargetConfirm{

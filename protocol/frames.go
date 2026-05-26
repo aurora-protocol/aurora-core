@@ -628,6 +628,26 @@ func NewUDPTargetConfirmFrame(confirm UDPTargetConfirm) (AuroraFrame, error) {
 	return frame, nil
 }
 
+func NewFlowOpenFrame(open FlowOpen) (AuroraFrame, error) {
+	if err := ValidateFlowOpen(open); err != nil {
+		return AuroraFrame{}, err
+	}
+	open = cloneFlowOpen(open)
+	payload, err := Encode(open)
+	if err != nil {
+		return AuroraFrame{}, err
+	}
+	frame := AuroraFrame{
+		FrameType: registry.FrameFlowOpen,
+		FlowID:    open.FlowID,
+		Payload:   payload,
+	}
+	if err := ValidateFlowManagementFrame(frame); err != nil {
+		return AuroraFrame{}, err
+	}
+	return frame, nil
+}
+
 func NewFlowCloseFrame(close FlowClose) (AuroraFrame, error) {
 	if err := ValidateFlowClose(close); err != nil {
 		return AuroraFrame{}, err
@@ -646,6 +666,27 @@ func NewFlowCloseFrame(close FlowClose) (AuroraFrame, error) {
 		return AuroraFrame{}, err
 	}
 	return frame, nil
+}
+
+func cloneFlowOpen(open FlowOpen) FlowOpen {
+	open.TargetHost = append([]byte(nil), open.TargetHost...)
+	open.NameBindingID = append([]byte(nil), open.NameBindingID...)
+	open.OriginalDomainHint = append([]byte(nil), open.OriginalDomainHint...)
+	open.DNSAnswerSetHash = append([]byte(nil), open.DNSAnswerSetHash...)
+	open.Extensions = cloneExtensions(open.Extensions)
+	return open
+}
+
+func cloneExtensions(in []Extension) []Extension {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Extension, len(in))
+	for i, ext := range in {
+		out[i] = ext
+		out[i].Body = append([]byte(nil), ext.Body...)
+	}
+	return out
 }
 
 type RouteForwardFrame struct {

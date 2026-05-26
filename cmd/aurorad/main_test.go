@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -75,6 +76,38 @@ func TestRunTunPacketModeOpensLinuxTUNDevice(t *testing.T) {
 	}
 }
 
+func TestRunCoverOriginURLServesReverseProxiedCover(t *testing.T) {
+	restoreCover := setNewCoverOriginForTest(func(raw string) (http.Handler, error) {
+		if raw != "https://cover.example" {
+			t.Fatalf("cover origin URL = %s", raw)
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/cover-page" {
+				t.Fatalf("cover origin path = %s", r.URL.Path)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte("proxied cover"))
+		}), nil
+	})
+	defer restoreCover()
+	restoreListen := setListenAndServeForTest(func(addr string, handler http.Handler) error {
+		req := httptest.NewRequest(http.MethodGet, "/cover-page", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusAccepted || rec.Body.String() != "proxied cover" {
+			t.Fatalf("proxied cover response = %d %q", rec.Code, rec.Body.String())
+		}
+		return http.ErrServerClosed
+	})
+	defer restoreListen()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--cover-origin-url", "https://cover.example"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run returned %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestRunRejectsUnknownPacketMode(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"--packet-mode", "bogus"}, &stdout, &stderr)
@@ -118,5 +151,13 @@ func setListenAndServeForTest(fn func(string, http.Handler) error) func() {
 	listenAndServe = fn
 	return func() {
 		listenAndServe = previous
+	}
+}
+
+func setNewCoverOriginForTest(fn func(string) (http.Handler, error)) func() {
+	previous := newCoverOrigin
+	newCoverOrigin = fn
+	return func() {
+		newCoverOrigin = previous
 	}
 }

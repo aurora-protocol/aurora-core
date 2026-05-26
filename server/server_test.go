@@ -7,10 +7,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aurora-protocol/aurora-core/issuerd"
 )
 
 func TestHarnessHandlerServesCoverAndIssuerEndpoints(t *testing.T) {
@@ -141,6 +144,89 @@ func TestPacketExchangeInvalidProbeFallsBackToCover(t *testing.T) {
 	}
 }
 
+func TestReverseProxyCoverOriginForwardsOrdinaryRequests(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Scheme != "https" || r.URL.Host != "cover.example" {
+			t.Fatalf("upstream origin = %s://%s", r.URL.Scheme, r.URL.Host)
+		}
+		if r.URL.Path != "/ordinary/path" || r.URL.RawQuery != "x=1" {
+			t.Fatalf("upstream request target = %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("upstream method = %s", r.Method)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if !bytes.Equal(body, []byte("ordinary body")) {
+			t.Fatalf("upstream body = %q", body)
+		}
+		return &http.Response{
+			StatusCode: http.StatusCreated,
+			Header:     http.Header{"Content-Type": []string{"text/plain"}},
+			Body:       io.NopCloser(bytes.NewReader([]byte("origin response"))),
+			Request:    r,
+		}, nil
+	})
+	cover, err := NewReverseProxyCoverOriginWithTransport(mustParseURL(t, "https://cover.example"), transport)
+	if err != nil {
+		t.Fatalf("NewReverseProxyCoverOrigin failed: %v", err)
+	}
+	service, err := newServerTestIssuer()
+	if err != nil {
+		t.Fatalf("newServerTestIssuer failed: %v", err)
+	}
+	handler := NewHandler(Options{
+		Issuer:      service,
+		CoverOrigin: cover,
+	})
+
+	response := serveRequestWithContentType(handler, http.MethodPost, "/ordinary/path?x=1", []byte("ordinary body"), "text/plain")
+
+	if response.status != http.StatusCreated || string(response.body) != "origin response" {
+		t.Fatalf("reverse-proxied cover response = %d %q", response.status, response.body)
+	}
+}
+
+func TestReverseProxyCoverOriginSanitizesFailedGatewayOwnedBodies(t *testing.T) {
+	var seenMethod string
+	var seenPath string
+	var seenBody []byte
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		seenMethod = r.Method
+		seenPath = r.URL.Path
+		if r.Body != nil {
+			seenBody, _ = io.ReadAll(r.Body)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/html"}},
+			Body:       io.NopCloser(bytes.NewReader([]byte("<html>origin</html>"))),
+			Request:    r,
+		}, nil
+	})
+	cover, err := NewReverseProxyCoverOriginWithTransport(mustParseURL(t, "https://cover.example"), transport)
+	if err != nil {
+		t.Fatalf("NewReverseProxyCoverOrigin failed: %v", err)
+	}
+	service, err := newServerTestIssuer()
+	if err != nil {
+		t.Fatalf("newServerTestIssuer failed: %v", err)
+	}
+	handler := NewHandler(Options{
+		Issuer:          service,
+		CoverOrigin:     cover,
+		PacketExchanger: LoopbackPacketExchanger{},
+	})
+
+	response := serveRequestWithContentType(handler, http.MethodPost, DefaultPacketExchangePath, []byte("failed capsule body"), "application/octet-stream")
+
+	if response.status != http.StatusOK || string(response.body) != "<html>origin</html>" {
+		t.Fatalf("sanitized failure response = %d %q", response.status, response.body)
+	}
+	if seenMethod != http.MethodGet || seenPath != DefaultPacketExchangePath || len(seenBody) != 0 {
+		t.Fatalf("failed gateway body was not sanitized before cover origin: method=%s path=%s body=%q", seenMethod, seenPath, seenBody)
+	}
+}
+
 func TestDevicePacketExchangerWritesInboundPacketsToDevice(t *testing.T) {
 	device := newScriptedPacketDevice()
 	exchanger, err := NewDevicePacketExchanger(device, DevicePacketExchangerOptions{
@@ -241,6 +327,25 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatalf("json marshal failed: %v", err)
 	}
 	return out
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+	return parsed
+}
+
+func newServerTestIssuer() (*issuerd.Service, error) {
+	return issuerd.NewHarnessService(200)
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
 
 func waitForDeviceOutbound(t *testing.T, exchanger PacketExchanger) PacketBatch {

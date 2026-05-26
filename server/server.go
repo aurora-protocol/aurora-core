@@ -18,12 +18,14 @@ import (
 type HarnessOptions struct {
 	NowUnix         uint64
 	CoverBody       []byte
+	CoverOrigin     http.Handler
 	PacketExchanger PacketExchanger
 }
 
 type Options struct {
 	Issuer             *issuerd.Service
 	Origin             relay.Origin
+	CoverOrigin        http.Handler
 	PacketExchanger    PacketExchanger
 	PacketExchangePath string
 }
@@ -60,6 +62,7 @@ func NewHarnessHandler(opts HarnessOptions) (http.Handler, error) {
 			Status: http.StatusOK,
 			Body:   coverBody,
 		},
+		CoverOrigin: opts.CoverOrigin,
 	}), nil
 }
 
@@ -74,10 +77,10 @@ func NewHandler(opts Options) http.Handler {
 		}
 		mux.HandleFunc(packetPath, func(w http.ResponseWriter, r *http.Request) {
 			if !isPacketExchangeRequest(r) {
-				serveCoverOrigin(w, opts.Origin)
+				serveCoverRequest(w, r, opts.Origin, opts.CoverOrigin)
 				return
 			}
-			servePacketExchange(w, r, opts.Origin, opts.PacketExchanger)
+			servePacketExchange(w, r, opts.Origin, opts.CoverOrigin, opts.PacketExchanger)
 		})
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -86,13 +89,13 @@ func NewHandler(opts Options) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{
-			"ready":  opts.Issuer != nil && opts.Origin != nil,
+			"ready":  opts.Issuer != nil && coverReady(opts),
 			"issuer": opts.Issuer != nil,
-			"cover":  opts.Origin != nil,
+			"cover":  coverReady(opts),
 		})
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		serveCoverOrigin(w, opts.Origin)
+		serveCoverRequest(w, r, opts.Origin, opts.CoverOrigin)
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -202,6 +205,30 @@ func serveCoverOrigin(w http.ResponseWriter, origin relay.Origin) {
 	_, _ = w.Write(resp.Body)
 }
 
+func serveCoverRequest(w http.ResponseWriter, r *http.Request, origin relay.Origin, coverOrigin http.Handler) {
+	if coverOrigin != nil {
+		coverOrigin.ServeHTTP(w, r)
+		return
+	}
+	serveCoverOrigin(w, origin)
+}
+
+func serveCoverFailure(w http.ResponseWriter, r *http.Request, origin relay.Origin, coverOrigin http.Handler) {
+	if coverOrigin == nil {
+		serveCoverOrigin(w, origin)
+		return
+	}
+	if failureOrigin, ok := coverOrigin.(CoverOrigin); ok {
+		failureOrigin.ServeFailureHTTP(w, r)
+		return
+	}
+	coverOrigin.ServeHTTP(w, sanitizedCoverFailureRequest(r))
+}
+
+func coverReady(opts Options) bool {
+	return opts.Origin != nil || opts.CoverOrigin != nil
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -218,25 +245,25 @@ func isPacketExchangeRequest(r *http.Request) bool {
 	return err == nil && mediaType == "application/octet-stream"
 }
 
-func servePacketExchange(w http.ResponseWriter, r *http.Request, origin relay.Origin, exchanger PacketExchanger) {
+func servePacketExchange(w http.ResponseWriter, r *http.Request, origin relay.Origin, coverOrigin http.Handler, exchanger PacketExchanger) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, packetExchangeMaxBodyBytes+1))
 	if err != nil || len(body) > packetExchangeMaxBodyBytes {
-		serveCoverOrigin(w, origin)
+		serveCoverFailure(w, r, origin, coverOrigin)
 		return
 	}
 	inbound, err := DecodePacketBatch(body)
 	if err != nil {
-		serveCoverOrigin(w, origin)
+		serveCoverFailure(w, r, origin, coverOrigin)
 		return
 	}
 	outbound, err := exchanger.ExchangePacketBatch(inbound)
 	if err != nil {
-		serveCoverOrigin(w, origin)
+		serveCoverFailure(w, r, origin, coverOrigin)
 		return
 	}
 	encoded, err := EncodePacketBatch(outbound)
 	if err != nil {
-		serveCoverOrigin(w, origin)
+		serveCoverFailure(w, r, origin, coverOrigin)
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")

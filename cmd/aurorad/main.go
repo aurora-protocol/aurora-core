@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 
 	"github.com/aurora-protocol/aurora-core/platform"
@@ -15,6 +16,7 @@ const packetModeLoopback = "loopback"
 
 var (
 	listenAndServe        = server.ListenAndServe
+	newCoverOrigin        = newReverseProxyCoverOrigin
 	openLinuxPacketDevice = func(config platform.LinuxTUNConfig) (io.ReadWriteCloser, int, error) {
 		device, err := platform.OpenLinuxTUNDevice(config)
 		if err != nil {
@@ -34,6 +36,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	defaultTUN := platform.DefaultLinuxTUNConfig()
 	listen := flags.String("listen", "127.0.0.1:9443", "listen address")
 	coverBody := flags.String("cover-body", "<html><body>ok</body></html>", "ordinary cover-origin response body")
+	coverOriginURL := flags.String("cover-origin-url", "", "ordinary cover-origin URL to reverse proxy")
 	now := flags.Uint64("harness-now", 200, "harness unix timestamp")
 	readinessCheck := flags.Bool("readiness-check", false, "run the server readiness harness and exit")
 	packetMode := flags.String("packet-mode", packetModeLoopback, "packet exchange mode: loopback or tun")
@@ -77,9 +80,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if packetCloser != nil {
 		defer packetCloser.Close()
 	}
+	var coverOrigin http.Handler
+	if *coverOriginURL != "" {
+		coverOrigin, err = newCoverOrigin(*coverOriginURL)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+	}
 	handler, err := server.NewHarnessHandler(server.HarnessOptions{
 		NowUnix:         *now,
 		CoverBody:       []byte(*coverBody),
+		CoverOrigin:     coverOrigin,
 		PacketExchanger: packetExchanger,
 	})
 	if err != nil {
@@ -92,6 +104,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func newReverseProxyCoverOrigin(raw string) (http.Handler, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	return server.NewReverseProxyCoverOrigin(parsed)
 }
 
 func isValidPacketMode(mode string) bool {

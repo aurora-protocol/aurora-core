@@ -168,6 +168,45 @@ func TestLocalProxySOCKS5UDPDatagramOpensRelayResolvedFlow(t *testing.T) {
 	}
 }
 
+func TestLocalProxySOCKS5UDPDatagramFramesPrependsFlowOpenForFirstDatagram(t *testing.T) {
+	p := NewLocalProxy()
+	packet := append([]byte{0x00, 0x00, 0x00, 0x03, 0x0b}, []byte("Example.COM")...)
+	packet = append(packet, 0x01, 0xbb)
+	packet = append(packet, []byte("payload")...)
+
+	frames, err := p.HandleSOCKS5UDPDatagramFrames(61, packet, 100, transport.UDPOverStreamFallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 2 {
+		t.Fatalf("first SOCKS5 UDP datagram should emit FLOW_OPEN and data, got %d frames", len(frames))
+	}
+	if frames[0].FrameType != registry.FrameFlowOpen || frames[0].FlowID != 61 {
+		t.Fatalf("first SOCKS5 UDP frame was not FLOW_OPEN: %+v", frames[0])
+	}
+	open := protocol.DecodeFlowOpen(wire.NewReader(frames[0].Payload))
+	if open.FlowID != 61 || open.FlowKind != flow.FlowKindUDPAssociation || open.TargetKind != flow.TargetKindDomainName || string(open.TargetHost) != "example.com" {
+		t.Fatalf("unexpected SOCKS5 UDP FLOW_OPEN payload: %+v", open)
+	}
+	if open.UDPFQDNMode != flow.UDPFQDNRelayResolvedFlowBound || open.LocalBindingMode != flow.LocalBindingExplicitProxyAPI || string(open.OriginalDomainHint) != "example.com" {
+		t.Fatalf("SOCKS5 UDP FLOW_OPEN used wrong explicit FQDN semantics: %+v", open)
+	}
+	if frames[1].FrameType != registry.FrameStreamData || frames[1].FlowID != 61 || !bytes.Equal(frames[1].Payload, []byte("payload")) {
+		t.Fatalf("second SOCKS5 UDP frame was not stream fallback data: %+v", frames[1])
+	}
+
+	nextPacket := append([]byte{0x00, 0x00, 0x00, 0x03, 0x0b}, []byte("Example.COM")...)
+	nextPacket = append(nextPacket, 0x01, 0xbb)
+	nextPacket = append(nextPacket, []byte("again")...)
+	frames, err = p.HandleSOCKS5UDPDatagramFrames(61, nextPacket, 101, transport.UDPOverStreamFallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 1 || frames[0].FrameType != registry.FrameStreamData || !bytes.Equal(frames[0].Payload, []byte("again")) {
+		t.Fatalf("established SOCKS5 UDP flow should only emit data frame: %+v", frames)
+	}
+}
+
 func TestLocalProxyOpensTransparentUDPFromFakeIPMap(t *testing.T) {
 	p := NewLocalProxy()
 	answer, err := p.ResolveFakeDNS("Example.COM.", []string{"93.184.216.34"}, 100)
@@ -193,6 +232,34 @@ func TestLocalProxyOpensTransparentUDPFromFakeIPMap(t *testing.T) {
 	}
 	if !bytes.Equal(state.NameBindingID, answer.NameBindingID) || !bytes.Equal(state.DNSAnswerSetHash, answer.DNSAnswerSetHash) {
 		t.Fatalf("mapped fake-IP UDP flow leaked or lost DNS binding: %+v", state)
+	}
+}
+
+func TestLocalProxyOpenUDPFromFakeIPFrameReturnsFlowOpen(t *testing.T) {
+	p := NewLocalProxy()
+	answer, err := p.ResolveFakeDNS("Example.COM.", []string{"93.184.216.34"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapped, frame, err := p.OpenUDPFromFakeIPFrame(62, answer.FakeIP, 443, 101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapped.Domain != "example.com" || mapped.FakeIP != answer.FakeIP {
+		t.Fatalf("unexpected mapped fake-IP answer: %+v", mapped)
+	}
+	if frame.FrameType != registry.FrameFlowOpen || frame.FlowID != 62 {
+		t.Fatalf("unexpected mapped fake-IP FLOW_OPEN frame: %+v", frame)
+	}
+	open := protocol.DecodeFlowOpen(wire.NewReader(frame.Payload))
+	if open.FlowID != 62 || open.FlowKind != flow.FlowKindUDPAssociation || open.TargetKind != flow.TargetKindIPv4 || !bytes.Equal(open.TargetHost, []byte{93, 184, 216, 34}) {
+		t.Fatalf("unexpected mapped fake-IP FLOW_OPEN payload: %+v", open)
+	}
+	if open.UDPFQDNMode != flow.UDPFQDNClientResolvedNameBinding || open.LocalBindingMode != flow.LocalBindingTransparentFakeIP || len(open.OriginalDomainHint) != 0 {
+		t.Fatalf("mapped fake-IP FLOW_OPEN leaked domain semantics: %+v", open)
+	}
+	if !bytes.Equal(open.NameBindingID, answer.NameBindingID) || !bytes.Equal(open.DNSAnswerSetHash, answer.DNSAnswerSetHash) {
+		t.Fatalf("mapped fake-IP FLOW_OPEN lost DNS binding metadata")
 	}
 }
 
@@ -300,6 +367,31 @@ func TestLocalProxyOpenUDPWithFakeDNSFrameReturnsIPAuthoritativeFlowOpen(t *test
 	}
 	if _, ok := p.FlowState(60); !ok {
 		t.Fatalf("UDP frame open did not track flow")
+	}
+}
+
+func TestLocalProxyOpenUDPExplicitFrameReturnsRelayResolvedFlowOpen(t *testing.T) {
+	p := NewLocalProxy()
+	frame, err := p.OpenUDPExplicitFrame(63, "Example.COM.", 443, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.FrameType != registry.FrameFlowOpen || frame.FlowID != 63 {
+		t.Fatalf("unexpected explicit UDP FLOW_OPEN frame: %+v", frame)
+	}
+	open := protocol.DecodeFlowOpen(wire.NewReader(frame.Payload))
+	if open.FlowID != 63 || open.FlowKind != flow.FlowKindUDPAssociation || open.TargetKind != flow.TargetKindDomainName || string(open.TargetHost) != "example.com" {
+		t.Fatalf("unexpected explicit UDP FLOW_OPEN payload: %+v", open)
+	}
+	if open.UDPFQDNMode != flow.UDPFQDNRelayResolvedFlowBound || open.LocalBindingMode != flow.LocalBindingExplicitProxyAPI || string(open.OriginalDomainHint) != "example.com" {
+		t.Fatalf("explicit UDP FLOW_OPEN used wrong FQDN semantics: %+v", open)
+	}
+	state, ok := p.FlowState(63)
+	if !ok {
+		t.Fatalf("explicit UDP frame open did not track flow")
+	}
+	if state.Kind != open.FlowKind || state.TargetKind != open.TargetKind || !bytes.Equal(state.TargetHost, open.TargetHost) {
+		t.Fatalf("tracked explicit UDP flow does not match frame payload: state=%+v open=%+v", state, open)
 	}
 }
 

@@ -99,17 +99,33 @@ func HandleSOCKS5UDPAssociateRequest(request []byte, bindHost string, bindPort u
 }
 
 func (p *LocalProxy) HandleSOCKS5UDPDatagram(flowID uint64, packet []byte, now uint64, udpMode transport.UDPMode) (protocol.AuroraFrame, error) {
-	if udpMode != transport.UDPNativeDatagram && udpMode != transport.UDPOverStreamFallback {
-		return protocol.AuroraFrame{}, fmt.Errorf("client: UDP mode %d is unsupported", udpMode)
-	}
-	host, port, payloadOffset, err := parseSOCKS5UDPHeader(packet)
+	frames, err := p.HandleSOCKS5UDPDatagramFrames(flowID, packet, now, udpMode)
 	if err != nil {
 		return protocol.AuroraFrame{}, err
 	}
-	if err := p.ensureSOCKS5UDPFlow(flowID, host, port, now); err != nil {
-		return protocol.AuroraFrame{}, err
+	return frames[len(frames)-1], nil
+}
+
+func (p *LocalProxy) HandleSOCKS5UDPDatagramFrames(flowID uint64, packet []byte, now uint64, udpMode transport.UDPMode) ([]protocol.AuroraFrame, error) {
+	if udpMode != transport.UDPNativeDatagram && udpMode != transport.UDPOverStreamFallback {
+		return nil, fmt.Errorf("client: UDP mode %d is unsupported", udpMode)
 	}
-	return p.SendUDPWithOptions(flowID, packet[payloadOffset:], UDPSendOptions{NowUnix: now, UDPMode: udpMode})
+	host, port, payloadOffset, err := parseSOCKS5UDPHeader(packet)
+	if err != nil {
+		return nil, err
+	}
+	openFrame, opened, err := p.ensureSOCKS5UDPFlowFrame(flowID, host, port, now)
+	if err != nil {
+		return nil, err
+	}
+	dataFrame, err := p.SendUDPWithOptions(flowID, packet[payloadOffset:], UDPSendOptions{NowUnix: now, UDPMode: udpMode})
+	if err != nil {
+		return nil, err
+	}
+	if !opened {
+		return []protocol.AuroraFrame{dataFrame}, nil
+	}
+	return []protocol.AuroraFrame{openFrame, dataFrame}, nil
 }
 
 func socks5BindResponse(bindHost string, bindPort uint16) ([]byte, error) {
@@ -141,18 +157,24 @@ func socks5BindResponse(bindHost string, bindPort uint16) ([]byte, error) {
 }
 
 func (p *LocalProxy) ensureSOCKS5UDPFlow(flowID uint64, host string, port uint16, now uint64) error {
+	_, _, err := p.ensureSOCKS5UDPFlowFrame(flowID, host, port, now)
+	return err
+}
+
+func (p *LocalProxy) ensureSOCKS5UDPFlowFrame(flowID uint64, host string, port uint16, now uint64) (protocol.AuroraFrame, bool, error) {
 	state, ok := p.FlowState(flowID)
 	if !ok {
-		return p.OpenUDPExplicit(flowID, host, port, now)
+		frame, err := p.OpenUDPExplicitFrame(flowID, host, port, now)
+		return frame, true, err
 	}
 	targetKind, targetHost, err := localTarget(host)
 	if err != nil {
-		return err
+		return protocol.AuroraFrame{}, false, err
 	}
 	if state.Kind != flow.FlowKindUDPAssociation || state.TargetKind != targetKind || !bytes.Equal(state.TargetHost, targetHost) || state.TargetPort != port {
-		return fmt.Errorf("client: SOCKS5 UDP target changed for flow %d", flowID)
+		return protocol.AuroraFrame{}, false, fmt.Errorf("client: SOCKS5 UDP target changed for flow %d", flowID)
 	}
-	return nil
+	return protocol.AuroraFrame{}, false, nil
 }
 
 func parseAuthority(authority string) (string, uint16, error) {

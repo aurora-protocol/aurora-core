@@ -115,9 +115,14 @@ func (p *LocalProxy) OpenTCPFrameWithPriority(flowID uint64, host string, port u
 }
 
 func (p *LocalProxy) OpenUDPExplicit(flowID uint64, host string, port uint16, now uint64) error {
+	_, err := p.OpenUDPExplicitFrame(flowID, host, port, now)
+	return err
+}
+
+func (p *LocalProxy) OpenUDPExplicitFrame(flowID uint64, host string, port uint16, now uint64) (protocol.AuroraFrame, error) {
 	targetKind, targetHost, err := localTarget(host)
 	if err != nil {
-		return err
+		return protocol.AuroraFrame{}, err
 	}
 	udpFQDNMode := uint8(flow.UDPFQDNNoneIPAuthoritative)
 	var originalDomainHint []byte
@@ -125,7 +130,7 @@ func (p *LocalProxy) OpenUDPExplicit(flowID uint64, host string, port uint16, no
 		udpFQDNMode = flow.UDPFQDNRelayResolvedFlowBound
 		originalDomainHint = append([]byte(nil), targetHost...)
 	}
-	return p.flows.OpenWithOptions(protocol.FlowOpen{
+	open := protocol.FlowOpen{
 		FlowOpenVersion:    registry.Version20,
 		FlowID:             flowID,
 		FlowKind:           flow.FlowKindUDPAssociation,
@@ -138,7 +143,15 @@ func (p *LocalProxy) OpenUDPExplicit(flowID uint64, host string, port uint16, no
 		LocalBindingMode:   flow.LocalBindingExplicitProxyAPI,
 		PriorityClass:      flow.PriorityRealtime,
 		OriginalDomainHint: originalDomainHint,
-	}, flow.FlowOptions{NowUnix: now, TTLSeconds: 300, IdleTimeoutSeconds: 30})
+	}
+	frame, err := protocol.NewFlowOpenFrame(open)
+	if err != nil {
+		return protocol.AuroraFrame{}, err
+	}
+	if err := p.flows.OpenWithOptions(open, flow.FlowOptions{NowUnix: now, TTLSeconds: 300, IdleTimeoutSeconds: 30}); err != nil {
+		return protocol.AuroraFrame{}, err
+	}
+	return frame, nil
 }
 
 func localTarget(host string) (uint8, []byte, error) {
@@ -199,14 +212,23 @@ func (p *LocalProxy) OpenUDPWithFakeDNSFrame(flowID uint64, host string, answers
 }
 
 func (p *LocalProxy) OpenUDPFromFakeIP(flowID uint64, fakeIP string, port uint16, now uint64) (flow.SyntheticAnswer, error) {
+	answer, _, err := p.OpenUDPFromFakeIPFrame(flowID, fakeIP, port, now)
+	return answer, err
+}
+
+func (p *LocalProxy) OpenUDPFromFakeIPFrame(flowID uint64, fakeIP string, port uint16, now uint64) (flow.SyntheticAnswer, protocol.AuroraFrame, error) {
 	open, answer, err := p.dns.OpenMappedFakeIPUDPFlow(flowID, fakeIP, port, now)
 	if err != nil {
-		return flow.SyntheticAnswer{}, err
+		return flow.SyntheticAnswer{}, protocol.AuroraFrame{}, err
+	}
+	frame, err := protocol.NewFlowOpenFrame(open)
+	if err != nil {
+		return flow.SyntheticAnswer{}, protocol.AuroraFrame{}, err
 	}
 	if err := p.flows.OpenWithOptions(open, flow.FlowOptions{NowUnix: now, TTLSeconds: 300, IdleTimeoutSeconds: 30}); err != nil {
-		return flow.SyntheticAnswer{}, err
+		return flow.SyntheticAnswer{}, protocol.AuroraFrame{}, err
 	}
-	return answer, nil
+	return answer, frame, nil
 }
 
 func (p *LocalProxy) SendTCP(flowID uint64, data []byte, flags uint64) (protocol.AuroraFrame, error) {

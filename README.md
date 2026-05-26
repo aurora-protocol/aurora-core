@@ -35,6 +35,7 @@ Use a workspace-local Go build cache in sandboxed environments:
 ```bash
 GOCACHE=/private/tmp/aurora-gocache go test ./...
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl vectors
+GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl vectors --check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl capabilities
 ```
 

@@ -376,6 +376,9 @@ func ValidateFlowManagementFrame(frame AuroraFrame) error {
 	if r.Err() != nil {
 		return r.Err()
 	}
+	if !r.EOF() {
+		return fmt.Errorf("protocol: trailing flow-management payload bytes")
+	}
 	if frame.FrameType == registry.FrameFlowClose {
 		if err := ValidateFlowClose(closePayload); err != nil {
 			return err

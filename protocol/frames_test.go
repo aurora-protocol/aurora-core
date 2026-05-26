@@ -165,6 +165,56 @@ func TestNewUDPTargetConfirmFrameValidatesAndCopiesPayload(t *testing.T) {
 	}
 }
 
+func TestValidateFrameBlockRejectsTrailingFlowManagementPayload(t *testing.T) {
+	openPayload, err := Encode(FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           11,
+		FlowKind:         0x01,
+		TargetKind:       0x01,
+		TargetHost:       []byte{93, 184, 216, 34},
+		TargetPort:       443,
+		NameBindingID:    bytes.Repeat([]byte{0x01}, 16),
+		DNSAnswerSetHash: bytes.Repeat([]byte{0x02}, 48),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmPayload, err := Encode(UDPTargetConfirm{
+		FlowID:           12,
+		TargetKind:       0x01,
+		SelectedIP:       []byte{93, 184, 216, 34},
+		SelectedPort:     443,
+		DNSAnswerSetHash: bytes.Repeat([]byte{0x03}, 48),
+		TTLSeconds:       60,
+		ResolutionSource: UDPResolutionClientSuppliedIP,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closePayload, err := Encode(FlowClose{FlowID: 13, CloseCode: CloseNormal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []AuroraFrame{{
+		FrameType: registry.FrameFlowOpen,
+		FlowID:    11,
+		Payload:   append(openPayload, 0xff),
+	}, {
+		FrameType: registry.FrameUDPTargetConfirm,
+		FlowID:    12,
+		Payload:   append(confirmPayload, 0xff),
+	}, {
+		FrameType: registry.FrameFlowClose,
+		FlowID:    13,
+		Payload:   append(closePayload, 0xff),
+	}}
+	for _, frame := range cases {
+		if err := ValidateFrameBlock(FrameBlock{Frames: []AuroraFrame{frame}}); err == nil {
+			t.Fatalf("flow-management frame accepted trailing payload byte: %+v", frame)
+		}
+	}
+}
+
 func TestValidateUDPTargetConfirmRejectsMalformedTarget(t *testing.T) {
 	base := UDPTargetConfirm{
 		FlowID:           10,

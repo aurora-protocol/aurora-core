@@ -233,6 +233,76 @@ func TestReceiverPacketNumbersAreIndependentPerKeyPhase(t *testing.T) {
 	}
 }
 
+func TestReceiverOpensOldAndNewKeyPhaseOnlyDuringDrain(t *testing.T) {
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
+	original := KeyMaterial{
+		AppSecret: bytesOf(0x21, 48),
+		Key:       bytesOf(0x22, 32),
+		IV:        bytesOf(0x23, 12),
+	}
+	state := DirectionState{
+		RouteInstanceID: 4,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        0,
+		Material:        original,
+	}
+	update := protocol.KeyUpdate{
+		RouteInstanceID: 4,
+		HopLayer:        1,
+		Direction:       0,
+		OldKeyPhase:     0,
+		NewKeyPhase:     1,
+		UpdateNonce:     bytesOf(0x24, 16),
+		UpdateReason:    1,
+	}
+	if _, err := state.ApplyReceivedUpdate(registry.SuiteHybrid768AESGCM, update, nil); err != nil {
+		t.Fatal(err)
+	}
+	oldProtector := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 4,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        0,
+		Key:             original.Key,
+		StaticIV:        original.IV,
+	}
+	oldDuring, err := oldProtector.Seal(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldAfterDrain, err := oldProtector.Seal(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newProtector := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 4,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        1,
+		Key:             state.Material.Key,
+		StaticIV:        state.Material.IV,
+	}
+	newPacket, err := newProtector.Seal(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := NewReceiver(ReceiverConfig{WindowSize: 64})
+	now := time.Now()
+	if _, err := receiver.OpenWithDirectionState(oldDuring, &state, registry.SuiteHybrid768AESGCM, now); err != nil {
+		t.Fatalf("old-phase packet rejected during drain: %v", err)
+	}
+	if _, err := receiver.OpenWithDirectionState(newPacket, &state, registry.SuiteHybrid768AESGCM, now); err != nil {
+		t.Fatalf("new-phase packet rejected during drain: %v", err)
+	}
+	state.DrainUntil = time.Now().Add(-time.Second)
+	if _, err := receiver.OpenWithDirectionState(oldAfterDrain, &state, registry.SuiteHybrid768AESGCM, time.Now()); err == nil {
+		t.Fatalf("old-phase packet accepted after drain expiry")
+	}
+}
+
 func TestSplit2OnionEntrySeesOnlyOpaqueForwardFrame(t *testing.T) {
 	flow := protocol.FlowOpen{
 		FlowOpenVersion:  registry.Version20,

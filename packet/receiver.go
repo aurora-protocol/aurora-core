@@ -3,6 +3,7 @@ package packet
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/aurora-protocol/aurora-core/protocol"
 )
@@ -50,6 +51,29 @@ func NewReceiver(cfg ReceiverConfig) *Receiver {
 }
 
 func (r *Receiver) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
+	return r.openWithProtector(pkt, r.protector)
+}
+
+func (r *Receiver) OpenWithDirectionState(pkt AuroraPacket, state *DirectionState, suite uint64, now time.Time) (protocol.FrameBlock, error) {
+	if state == nil {
+		return protocol.FrameBlock{}, fmt.Errorf("packet: missing direction state")
+	}
+	material, err := state.MaterialForPacket(pkt, now)
+	if err != nil {
+		return protocol.FrameBlock{}, err
+	}
+	return r.openWithProtector(pkt, Protector{
+		Suite:           suite,
+		RouteInstanceID: state.RouteInstanceID,
+		HopLayer:        state.HopLayer,
+		Direction:       state.Direction,
+		KeyPhase:        pkt.KeyPhase,
+		Key:             material.Key,
+		StaticIV:        material.IV,
+	})
+}
+
+func (r *Receiver) openWithProtector(pkt AuroraPacket, protector Protector) (protocol.FrameBlock, error) {
 	r.mu.Lock()
 	if err := r.checkPacketNumberLocked(pkt); err != nil {
 		r.mu.Unlock()
@@ -57,7 +81,7 @@ func (r *Receiver) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
 	}
 	r.mu.Unlock()
 
-	block, err := r.protector.Open(pkt)
+	block, err := protector.Open(pkt)
 	if err != nil {
 		return protocol.FrameBlock{}, err
 	}

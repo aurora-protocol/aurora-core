@@ -24,6 +24,11 @@ type AdmissionProof struct {
 	Extensions            []Extension
 }
 
+type ProofValidationOptions struct {
+	AllowLabProofs         bool
+	AllowPrivateProofTypes bool
+}
+
 func (p AdmissionProof) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(p.ProofVersion)
 	e.WriteVarint(p.ProofType)
@@ -59,6 +64,10 @@ func DecodeAdmissionProof(r *wire.Reader) AdmissionProof {
 }
 
 func (p AdmissionProof) ValidateStructural(now uint64, allowLab bool) error {
+	return p.ValidateStructuralWithOptions(now, ProofValidationOptions{AllowLabProofs: allowLab})
+}
+
+func (p AdmissionProof) ValidateStructuralWithOptions(now uint64, opts ProofValidationOptions) error {
 	if p.ProofVersion != registry.Version20 {
 		return fmt.Errorf("protocol: unsupported admission proof version 0x%x", p.ProofVersion)
 	}
@@ -66,9 +75,13 @@ func (p AdmissionProof) ValidateStructural(now uint64, allowLab bool) error {
 		return fmt.Errorf("protocol: admission proof expired")
 	}
 	switch p.ProofType {
-	case registry.ProofVOPRFP384SHA384, registry.ProofBlindRSA2048, registry.ProofOpaqueIssuer:
+	case registry.ProofVOPRFP384SHA384, registry.ProofBlindRSA2048:
+	case registry.ProofOpaqueIssuer:
+		if !opts.AllowPrivateProofTypes {
+			return fmt.Errorf("protocol: private admission proof type 0x%x disabled", p.ProofType)
+		}
 	case registry.ProofLabStaticToken:
-		if !allowLab {
+		if !opts.AllowLabProofs {
 			return fmt.Errorf("protocol: lab admission proof disabled")
 		}
 	default:

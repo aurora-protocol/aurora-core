@@ -39,6 +39,10 @@ func DecodeIssuerTokenKeyRecord(r *wire.Reader) IssuerTokenKeyRecord {
 }
 
 func (r IssuerTokenKeyRecord) Validate(now uint64) error {
+	return r.ValidateWithOptions(now, ProofValidationOptions{})
+}
+
+func (r IssuerTokenKeyRecord) ValidateWithOptions(now uint64, opts ProofValidationOptions) error {
 	if len(r.TokenKeyID) != 32 {
 		return fmt.Errorf("protocol: issuer token key id must be 32 bytes")
 	}
@@ -64,10 +68,16 @@ func (r IssuerTokenKeyRecord) Validate(now uint64) error {
 			return err
 		}
 	case registry.ProofOpaqueIssuer:
+		if !opts.AllowPrivateProofTypes {
+			return fmt.Errorf("protocol: private issuer token key proof type 0x%x disabled", r.ProofType)
+		}
 		if r.TokenVerificationKey.TokenVerificationKeyScheme < 0x7000 || r.TokenVerificationKey.TokenVerificationKeyScheme > 0x7eff {
 			return fmt.Errorf("protocol: opaque issuer proof requires private token key scheme")
 		}
 	case registry.ProofLabStaticToken:
+		if !opts.AllowLabProofs {
+			return fmt.Errorf("protocol: lab issuer token key disabled")
+		}
 		if r.TokenVerificationKey.TokenVerificationKeyScheme != registry.TokenKeyLabStaticNoKey {
 			return fmt.Errorf("protocol: lab static proof requires lab token key scheme")
 		}
@@ -81,6 +91,10 @@ func (r IssuerTokenKeyRecord) Validate(now uint64) error {
 }
 
 func (r IssuerTokenKeyRecord) validateStructural(allowLab bool) error {
+	return r.validateStructuralWithOptions(ProofValidationOptions{AllowLabProofs: allowLab})
+}
+
+func (r IssuerTokenKeyRecord) validateStructuralWithOptions(opts ProofValidationOptions) error {
 	if len(r.TokenKeyID) != 32 {
 		return fmt.Errorf("protocol: issuer token key id must be 32 bytes")
 	}
@@ -102,11 +116,14 @@ func (r IssuerTokenKeyRecord) validateStructural(allowLab bool) error {
 		}
 		return r.validateProductionTokenKeyID()
 	case registry.ProofOpaqueIssuer:
+		if !opts.AllowPrivateProofTypes {
+			return fmt.Errorf("protocol: private issuer token key proof type 0x%x disabled", r.ProofType)
+		}
 		if r.TokenVerificationKey.TokenVerificationKeyScheme < 0x7000 || r.TokenVerificationKey.TokenVerificationKeyScheme > 0x7eff {
 			return fmt.Errorf("protocol: opaque issuer proof requires private token key scheme")
 		}
 	case registry.ProofLabStaticToken:
-		if !allowLab {
+		if !opts.AllowLabProofs {
 			return fmt.Errorf("protocol: lab issuer token key disabled")
 		}
 		if r.TokenVerificationKey.TokenVerificationKeyScheme != registry.TokenKeyLabStaticNoKey {
@@ -391,6 +408,10 @@ func DecodeIssuerMetadata(r *wire.Reader) IssuerMetadata {
 }
 
 func (m IssuerMetadata) ValidateStructural(now uint64, allowLab bool) error {
+	return m.ValidateStructuralWithOptions(now, ProofValidationOptions{AllowLabProofs: allowLab})
+}
+
+func (m IssuerMetadata) ValidateStructuralWithOptions(now uint64, opts ProofValidationOptions) error {
 	if m.MetadataVersion != registry.Version20 {
 		return fmt.Errorf("protocol: unsupported issuer metadata version 0x%x", m.MetadataVersion)
 	}
@@ -403,19 +424,19 @@ func (m IssuerMetadata) ValidateStructural(now uint64, allowLab bool) error {
 	if len(m.MetadataSigningKeyID) != 16 {
 		return fmt.Errorf("protocol: metadata signing key id must be 16 bytes")
 	}
-	if !allowLab && m.SignatureScheme == registry.SigEd25519Lab {
+	if !opts.AllowLabProofs && m.SignatureScheme == registry.SigEd25519Lab {
 		return fmt.Errorf("protocol: lab signature scheme disabled")
 	}
 	if err := validateSignatureKeyEncodingCompatibility(m.SignatureScheme, m.KeyEncoding); err != nil {
 		return err
 	}
 	for _, proofType := range m.SupportedProofTypes {
-		if err := validateIssuerProofTypeKnown(proofType, allowLab); err != nil {
+		if err := validateIssuerProofTypeKnown(proofType, opts); err != nil {
 			return err
 		}
 	}
 	for _, key := range m.TokenKeyMappings {
-		if err := key.validateStructural(allowLab); err != nil {
+		if err := key.validateStructuralWithOptions(opts); err != nil {
 			return err
 		}
 	}
@@ -433,12 +454,12 @@ func (m IssuerMetadata) ValidateStructural(now uint64, allowLab bool) error {
 		}
 	}
 	for _, policy := range m.AuxiliaryBindingPolicies {
-		if err := validateIssuerProofTypeKnown(policy.ProofType, allowLab); err != nil {
+		if err := validateIssuerProofTypeKnown(policy.ProofType, opts); err != nil {
 			return err
 		}
 	}
 	for _, service := range m.VerifierServices {
-		if err := service.validateStructural(allowLab); err != nil {
+		if err := service.validateStructuralWithOptions(opts); err != nil {
 			return err
 		}
 	}
@@ -448,12 +469,17 @@ func (m IssuerMetadata) ValidateStructural(now uint64, allowLab bool) error {
 	return nil
 }
 
-func validateIssuerProofTypeKnown(proofType uint64, allowLab bool) error {
+func validateIssuerProofTypeKnown(proofType uint64, opts ProofValidationOptions) error {
 	switch proofType {
-	case registry.ProofVOPRFP384SHA384, registry.ProofBlindRSA2048, registry.ProofOpaqueIssuer:
+	case registry.ProofVOPRFP384SHA384, registry.ProofBlindRSA2048:
 		return nil
+	case registry.ProofOpaqueIssuer:
+		if opts.AllowPrivateProofTypes {
+			return nil
+		}
+		return fmt.Errorf("protocol: private issuer proof type 0x%x disabled", proofType)
 	case registry.ProofLabStaticToken:
-		if allowLab {
+		if opts.AllowLabProofs {
 			return nil
 		}
 		return fmt.Errorf("protocol: lab proof type disabled")
@@ -463,10 +489,14 @@ func validateIssuerProofTypeKnown(proofType uint64, allowLab bool) error {
 }
 
 func (s IssuerVerifierServiceRecord) validateStructural(allowLab bool) error {
+	return s.validateStructuralWithOptions(ProofValidationOptions{AllowLabProofs: allowLab})
+}
+
+func (s IssuerVerifierServiceRecord) validateStructuralWithOptions(opts ProofValidationOptions) error {
 	if len(s.ServiceID) != 16 {
 		return fmt.Errorf("protocol: verifier service id must be 16 bytes")
 	}
-	if err := validateVerifierServiceKind(s.ServiceKind, allowLab); err != nil {
+	if err := validateVerifierServiceKind(s.ServiceKind, opts.AllowLabProofs); err != nil {
 		return err
 	}
 	if err := validateVerifierServiceProtocol(s.ServiceProtocolID); err != nil {
@@ -478,11 +508,11 @@ func (s IssuerVerifierServiceRecord) validateStructural(allowLab bool) error {
 	if err := validateIssuerStatusKnown(s.ServiceStatus, "verifier service"); err != nil {
 		return err
 	}
-	if err := validateIssuerPublicKeyCompatibility(s.ServiceAuthKey, allowLab); err != nil {
+	if err := validateIssuerPublicKeyCompatibility(s.ServiceAuthKey, opts.AllowLabProofs); err != nil {
 		return err
 	}
 	for _, proofType := range s.AllowedProofTypes {
-		if err := validateIssuerProofTypeKnown(proofType, allowLab); err != nil {
+		if err := validateIssuerProofTypeKnown(proofType, opts); err != nil {
 			return err
 		}
 	}

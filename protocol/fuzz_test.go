@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"testing"
 
@@ -500,10 +501,12 @@ func fuzzSampleCoverTemplate() CoverTemplate {
 }
 
 func fuzzSampleIssuerTokenKeyRecord() IssuerTokenKeyRecord {
+	tokenKey := fuzzSampleTokenVerificationKeyRecord()
+	tokenKeyID := sha256.Sum256(tokenKey.TokenVerificationKey)
 	return IssuerTokenKeyRecord{
 		ProofType:            registry.ProofBlindRSA2048,
-		TokenKeyID:           fb(0x3c, 32),
-		TokenVerificationKey: fuzzSampleTokenVerificationKeyRecord(),
+		TokenKeyID:           tokenKeyID[:],
+		TokenVerificationKey: tokenKey,
 		ValidFromUnix:        10,
 		ValidUntilUnix:       20,
 		KeyStatus:            registry.IssuerStatusActive,
@@ -532,7 +535,7 @@ func fuzzSampleRelayBucketScope() RelayBucketScope {
 
 func fuzzSampleAuxiliaryBindingPolicy() AuxiliaryBindingPolicy {
 	return AuxiliaryBindingPolicy{
-		ProofType:            registry.ProofOpaqueIssuer,
+		ProofType:            registry.ProofBlindRSA2048,
 		BindingProofRequired: true,
 		MaxBindingProofLen:   256,
 		BindingPolicyID:      1,
@@ -614,9 +617,9 @@ func fuzzSampleIssuerVerifierResponse() IssuerVerifierResponse {
 }
 
 func fuzzSampleAdmissionProof() AdmissionProof {
-	return AdmissionProof{
+	proof := AdmissionProof{
 		ProofVersion:          registry.Version20,
-		ProofType:             registry.ProofOpaqueIssuer,
+		ProofType:             registry.ProofBlindRSA2048,
 		IssuerID:              fb(0x55, 16),
 		TokenKeyID:            fb(0x56, 32),
 		RelayBucketID:         fb(0x57, 16),
@@ -624,10 +627,13 @@ func fuzzSampleAdmissionProof() AdmissionProof {
 		ExpiryUnix:            20,
 		TokenNonce:            fb(0x59, 32),
 		RedemptionContextHash: fb(0x5a, 48),
-		TokenPublicMetadata:   []byte("metadata"),
 		TokenAuthenticator:    fb(0x5b, 64),
-		BindingProof:          fb(0x5c, 32),
 	}
+	metadata := fuzzSampleAuroraTokenMetadata()
+	metadata.RFC9577TokenType = uint16(proof.ProofType)
+	metadata.RFC9577TokenKeyID = append([]byte(nil), proof.TokenKeyID...)
+	proof.TokenPublicMetadata = mustEncodeFuzzSeed(metadata)
+	return proof
 }
 
 func fuzzSampleAuroraTokenMetadata() AuroraTokenMetadata {

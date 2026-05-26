@@ -179,6 +179,47 @@ func TestUDPConfirmRejectsInvalidSelectedTargetBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestUDPConfirmFrameRejectsFlowIDMismatchBeforeMutation(t *testing.T) {
+	m := NewManager()
+	if err := m.Open(protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           19,
+		FlowKind:         FlowKindUDPAssociation,
+		TargetKind:       TargetKindIPv4,
+		TargetHost:       []byte{203, 0, 113, 19},
+		TargetPort:       443,
+		UDPFQDNMode:      UDPFQDNClientResolvedNameBinding,
+		NameBindingID:    fb(0xaa, 16),
+		DNSAnswerSetHash: fb(0xbb, 48),
+		LocalBindingMode: LocalBindingTransparentFakeIP,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := protocol.NewUDPTargetConfirmFrame(protocol.UDPTargetConfirm{
+		FlowID:           19,
+		TargetKind:       TargetKindIPv4,
+		SelectedIP:       []byte{203, 0, 113, 19},
+		SelectedPort:     443,
+		DNSAnswerSetHash: fb(0xbb, 48),
+		TTLSeconds:       60,
+		ResolutionSource: protocol.UDPResolutionClientSuppliedIP,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame.FlowID = 20
+	if err := m.ConfirmUDPFrame(frame); err == nil {
+		t.Fatalf("mismatched UDP target confirm frame was accepted")
+	}
+	state, ok := m.DemuxInbound(19)
+	if !ok {
+		t.Fatalf("flow should remain tracked after rejected frame")
+	}
+	if len(state.ConfirmedHost) != 0 || state.ConfirmedPort != 0 {
+		t.Fatalf("mismatched target confirm mutated flow state: %+v", state)
+	}
+}
+
 func TestTransparentUDPRejectsRelayResolvedByDefault(t *testing.T) {
 	m := NewManager()
 	err := m.Open(protocol.FlowOpen{
@@ -440,6 +481,39 @@ func TestFlowClosePurgeReleasesHalfClosedAfterDrain(t *testing.T) {
 	m.PurgeClosed(203)
 	if _, ok := m.DemuxInbound(16); ok {
 		t.Fatalf("half-closed flow survived drain expiry")
+	}
+}
+
+func TestFlowCloseFrameRejectsFlowIDMismatchBeforeMutation(t *testing.T) {
+	m := NewManager()
+	if err := m.Open(protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           23,
+		FlowKind:         FlowKindTCPStream,
+		TargetKind:       TargetKindDomainName,
+		TargetHost:       []byte("example.com"),
+		TargetPort:       443,
+		NameBindingID:    fb(0xaa, 16),
+		DNSAnswerSetHash: fb(0xbb, 48),
+		LocalBindingMode: LocalBindingExplicitProxyAPI,
+		PriorityClass:    PriorityInteractive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := protocol.NewFlowCloseFrame(protocol.FlowClose{FlowID: 23, CloseCode: protocol.CloseNormal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame.FlowID = 24
+	if err := m.MarkPeerCloseFrame(frame, CloseOptions{NowUnix: 300, DrainSeconds: 5}); err == nil {
+		t.Fatalf("mismatched FLOW_CLOSE frame was accepted")
+	}
+	state, ok := m.DemuxInbound(23)
+	if !ok {
+		t.Fatalf("flow should remain tracked after rejected frame")
+	}
+	if state.PeerClosed || state.LocalClosed || state.DrainUntilUnix != 0 {
+		t.Fatalf("mismatched close frame mutated flow state: %+v", state)
 	}
 }
 

@@ -243,6 +243,14 @@ func (p *LocalProxy) ReceiveFlowClose(close protocol.FlowClose, now uint64, drai
 	return p.flows.MarkPeerClose(close, flow.CloseOptions{NowUnix: now, DrainSeconds: drainSeconds})
 }
 
+func (p *LocalProxy) ReceiveFlowCloseFrame(frame protocol.AuroraFrame, now uint64, drainSeconds uint64) error {
+	return p.flows.MarkPeerCloseFrame(frame, flow.CloseOptions{NowUnix: now, DrainSeconds: drainSeconds})
+}
+
+func (p *LocalProxy) ReceiveUDPTargetConfirmFrame(frame protocol.AuroraFrame) error {
+	return p.flows.ConfirmUDPFrame(frame)
+}
+
 func (p *LocalProxy) PurgeClosed(now uint64) {
 	p.flows.PurgeClosed(now)
 }

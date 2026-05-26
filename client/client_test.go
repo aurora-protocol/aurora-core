@@ -148,6 +148,36 @@ func TestLocalProxyBuildsUDPDatagramFrameForLiveUDPFlow(t *testing.T) {
 	}
 }
 
+func TestLocalProxyReceiveUDPTargetConfirmFrameRejectsMismatchBeforeMutation(t *testing.T) {
+	p := NewLocalProxy()
+	if _, err := p.OpenUDPWithFakeDNS(44, "example.com", []string{"93.184.216.34"}, 443, 100); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := protocol.NewUDPTargetConfirmFrame(protocol.UDPTargetConfirm{
+		FlowID:           44,
+		TargetKind:       flow.TargetKindIPv4,
+		SelectedIP:       []byte{93, 184, 216, 34},
+		SelectedPort:     443,
+		DNSAnswerSetHash: flow.DNSAnswerSetHash([]string{"93.184.216.34"}),
+		TTLSeconds:       60,
+		ResolutionSource: protocol.UDPResolutionClientSuppliedIP,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame.FlowID = 45
+	if err := p.ReceiveUDPTargetConfirmFrame(frame); err == nil {
+		t.Fatalf("mismatched UDP target confirm frame was accepted")
+	}
+	state, ok := p.FlowState(44)
+	if !ok {
+		t.Fatalf("flow should remain tracked after rejected frame")
+	}
+	if len(state.ConfirmedHost) != 0 || state.ConfirmedPort != 0 {
+		t.Fatalf("mismatched target confirm mutated local flow state: %+v", state)
+	}
+}
+
 func TestLocalProxyBuildsUDPStreamFrameForFallbackCarrier(t *testing.T) {
 	p := NewLocalProxy()
 	if _, err := p.OpenUDPWithFakeDNS(41, "example.com", []string{"93.184.216.34"}, 443, 100); err != nil {
@@ -281,5 +311,27 @@ func TestLocalProxyGracefulCloseKeepsHalfClosedStateAndCompletesOnPeerClose(t *t
 	}
 	if p.HasFlow(40) {
 		t.Fatalf("flow remained tracked after both sides closed")
+	}
+}
+
+func TestLocalProxyReceiveFlowCloseFrameRejectsMismatchBeforeMutation(t *testing.T) {
+	p := NewLocalProxy()
+	if err := p.OpenTCP(46, "example.com", 443); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := protocol.NewFlowCloseFrame(protocol.FlowClose{FlowID: 46, CloseCode: protocol.CloseNormal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame.FlowID = 47
+	if err := p.ReceiveFlowCloseFrame(frame, 101, 5); err == nil {
+		t.Fatalf("mismatched FLOW_CLOSE frame was accepted")
+	}
+	state, ok := p.FlowState(46)
+	if !ok {
+		t.Fatalf("flow should remain tracked after rejected frame")
+	}
+	if state.PeerClosed || state.LocalClosed || state.DrainUntilUnix != 0 {
+		t.Fatalf("mismatched close frame mutated local flow state: %+v", state)
 	}
 }

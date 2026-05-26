@@ -13,6 +13,8 @@ import (
 
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/protocol"
+	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/aurora-protocol/aurora-core/wire"
 )
 
 const (
@@ -151,6 +153,29 @@ func (m *Manager) ConfirmUDP(confirm protocol.UDPTargetConfirm) error {
 	return nil
 }
 
+func (m *Manager) ConfirmUDPFrame(frame protocol.AuroraFrame) error {
+	confirm, err := decodeUDPTargetConfirmFrame(frame)
+	if err != nil {
+		return err
+	}
+	return m.ConfirmUDP(confirm)
+}
+
+func decodeUDPTargetConfirmFrame(frame protocol.AuroraFrame) (protocol.UDPTargetConfirm, error) {
+	if frame.FrameType != registry.FrameUDPTargetConfirm {
+		return protocol.UDPTargetConfirm{}, fmt.Errorf("flow: expected UDP_TARGET_CONFIRM frame, got 0x%x", frame.FrameType)
+	}
+	if err := protocol.ValidateFlowManagementFrame(frame); err != nil {
+		return protocol.UDPTargetConfirm{}, err
+	}
+	r := wire.NewReader(frame.Payload)
+	confirm := protocol.DecodeUDPTargetConfirm(r)
+	if r.Err() != nil {
+		return protocol.UDPTargetConfirm{}, r.Err()
+	}
+	return confirm, nil
+}
+
 func validateUDPConfirmAgainstFlow(state FlowState, confirm protocol.UDPTargetConfirm) error {
 	switch state.UDPFQDNMode {
 	case UDPFQDNNoneIPAuthoritative, UDPFQDNClientResolvedNameBinding:
@@ -219,6 +244,37 @@ func (m *Manager) MarkLocalClose(close protocol.FlowClose, opts CloseOptions) er
 
 func (m *Manager) MarkPeerClose(close protocol.FlowClose, opts CloseOptions) error {
 	return m.markClose(close, opts, false)
+}
+
+func (m *Manager) MarkLocalCloseFrame(frame protocol.AuroraFrame, opts CloseOptions) error {
+	close, err := decodeFlowCloseFrame(frame)
+	if err != nil {
+		return err
+	}
+	return m.MarkLocalClose(close, opts)
+}
+
+func (m *Manager) MarkPeerCloseFrame(frame protocol.AuroraFrame, opts CloseOptions) error {
+	close, err := decodeFlowCloseFrame(frame)
+	if err != nil {
+		return err
+	}
+	return m.MarkPeerClose(close, opts)
+}
+
+func decodeFlowCloseFrame(frame protocol.AuroraFrame) (protocol.FlowClose, error) {
+	if frame.FrameType != registry.FrameFlowClose {
+		return protocol.FlowClose{}, fmt.Errorf("flow: expected FLOW_CLOSE frame, got 0x%x", frame.FrameType)
+	}
+	if err := protocol.ValidateFlowManagementFrame(frame); err != nil {
+		return protocol.FlowClose{}, err
+	}
+	r := wire.NewReader(frame.Payload)
+	close := protocol.DecodeFlowClose(r)
+	if r.Err() != nil {
+		return protocol.FlowClose{}, r.Err()
+	}
+	return close, nil
 }
 
 func (m *Manager) markClose(close protocol.FlowClose, opts CloseOptions, local bool) error {

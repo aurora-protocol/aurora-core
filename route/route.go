@@ -269,6 +269,7 @@ type RoutePreludeVerificationInput struct {
 	Prelude1        protocol.RoutePrelude1
 	Descriptor      protocol.RelayDescriptor
 	RequirePQ       bool
+	NowUnix         uint64
 }
 
 func HopPreludeTranscriptHash(suite uint64, routeHopBinding []byte, p0 PrivatePrelude, p1 protocol.RoutePrelude1) ([]byte, error) {
@@ -330,6 +331,9 @@ func VerifyRoutePrelude1Signatures(in RoutePreludeVerificationInput) ([]byte, er
 	}
 	if in.Prelude1.NextRelayEpochID != in.Descriptor.EpochID {
 		return nil, fmt.Errorf("route: next relay epoch mismatch")
+	}
+	if in.NowUnix != 0 && (in.NowUnix < in.Descriptor.EpochValidFromUnix || in.NowUnix >= in.Descriptor.EpochValidUntilUnix) {
+		return nil, fmt.Errorf("route: next relay epoch outside validity window")
 	}
 	descriptorHash, err := trust.RelayDescriptorHash(in.Descriptor)
 	if err != nil {

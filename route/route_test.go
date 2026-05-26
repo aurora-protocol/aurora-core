@@ -263,6 +263,14 @@ func TestVerifyRoutePrelude1RequiresCanonicalRouteHopBinding(t *testing.T) {
 	}
 }
 
+func TestVerifyRoutePrelude1RejectsEpochOutsideValidityWindow(t *testing.T) {
+	in := signedRoutePreludeVerificationInput(t)
+	in.NowUnix = in.Descriptor.EpochValidUntilUnix + 1
+	if _, err := VerifyRoutePrelude1Signatures(in); err == nil {
+		t.Fatalf("ROUTE_PRELUDE1 with expired next relay epoch was accepted")
+	}
+}
+
 func TestRouteClientDoesNotReleaseCapsuleBeforePreludeVerification(t *testing.T) {
 	session := NewClientSession()
 	capsule := protocol.RouteCapsule1Plain{

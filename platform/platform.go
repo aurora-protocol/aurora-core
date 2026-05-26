@@ -159,7 +159,7 @@ func (a *ThinAdapter) SubmitTCPFlow(open protocol.FlowOpen) error {
 	if a.core == nil {
 		return fmt.Errorf("platform: missing core sink")
 	}
-	return a.core.SubmitTCPFlow(open)
+	return a.core.SubmitTCPFlow(cloneFlowOpen(open))
 }
 
 func (a *ThinAdapter) SubmitUDPDatagram(flowID uint64, datagram []byte) error {
@@ -194,6 +194,27 @@ func (a *ThinAdapter) ExportRedactedDiagnostics() []byte {
 		return nil
 	}
 	return append([]byte(nil), a.core.ExportRedactedDiagnostics()...)
+}
+
+func cloneFlowOpen(open protocol.FlowOpen) protocol.FlowOpen {
+	open.TargetHost = append([]byte(nil), open.TargetHost...)
+	open.NameBindingID = append([]byte(nil), open.NameBindingID...)
+	open.OriginalDomainHint = append([]byte(nil), open.OriginalDomainHint...)
+	open.DNSAnswerSetHash = append([]byte(nil), open.DNSAnswerSetHash...)
+	open.Extensions = cloneExtensions(open.Extensions)
+	return open
+}
+
+func cloneExtensions(in []protocol.Extension) []protocol.Extension {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]protocol.Extension, len(in))
+	for i, ext := range in {
+		out[i] = ext
+		out[i].Body = append([]byte(nil), ext.Body...)
+	}
+	return out
 }
 
 type MockAdapter struct {

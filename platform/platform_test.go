@@ -107,6 +107,7 @@ func TestThinAdapterForwardsCoreABIWithoutCryptoState(t *testing.T) {
 	if err := adapter.SubmitTCPFlow(open); err != nil {
 		t.Fatal(err)
 	}
+	open.TargetHost[0] = 'x'
 	if err := adapter.SubmitUDPDatagram(2, []byte{9, 8, 7}); err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +120,9 @@ func TestThinAdapterForwardsCoreABIWithoutCryptoState(t *testing.T) {
 	if sink.openSessions != 1 || sink.tcpFlows != 1 || sink.udpDatagrams != 1 || sink.dnsMessages != 1 || sink.networkChanges != 1 {
 		t.Fatalf("adapter did not forward ABI calls: %+v", sink)
 	}
+	if !bytes.Equal(sink.lastTCPFlow.TargetHost, []byte("example.com")) {
+		t.Fatalf("TCP flow target host was not copied before forwarding: %q", sink.lastTCPFlow.TargetHost)
+	}
 	if !bytes.Equal(sink.lastDNSMessage, []byte{0x12, 0x34, 0x01, 0x00}) {
 		t.Fatalf("DNS message was not copied before forwarding: %x", sink.lastDNSMessage)
 	}
@@ -130,6 +134,7 @@ type recordingCoreSink struct {
 	udpDatagrams   int
 	dnsMessages    int
 	networkChanges int
+	lastTCPFlow     protocol.FlowOpen
 	lastDNSMessage []byte
 }
 
@@ -145,8 +150,9 @@ func (s *recordingCoreSink) CloseSession(string) error {
 	return nil
 }
 
-func (s *recordingCoreSink) SubmitTCPFlow(protocol.FlowOpen) error {
+func (s *recordingCoreSink) SubmitTCPFlow(open protocol.FlowOpen) error {
 	s.tcpFlows++
+	s.lastTCPFlow = open
 	return nil
 }
 

@@ -403,6 +403,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "issuer HTTP daemon readiness harness") {
 		t.Fatalf("capabilities output missing issuer HTTP daemon harness:\n%s", text)
 	}
+	if !strings.Contains(text, "binary issuer verifier mTLS handler") {
+		t.Fatalf("capabilities output missing binary issuer verifier mTLS handler:\n%s", text)
+	}
 	if !strings.Contains(text, "release readiness evidence verifier") {
 		t.Fatalf("capabilities output missing release readiness verifier:\n%s", text)
 	}

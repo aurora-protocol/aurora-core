@@ -2,14 +2,24 @@ package issuerd
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aurora-protocol/aurora-core/admission"
+	"github.com/aurora-protocol/aurora-core/ops"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	auroratrust "github.com/aurora-protocol/aurora-core/trust"
@@ -156,6 +166,106 @@ func TestHTTPDaemonRejectsTrailingJSON(t *testing.T) {
 	}
 }
 
+func TestVerifierHTTPHandlerExchangesSignedBinaryResponseOverMTLS(t *testing.T) {
+	service, err := NewHarnessService(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifierService := service.PublishIssuerMetadata().VerifierServices[0]
+	server, client := startVerifierHTTPTestServer(t, service, &verifierService, true, true)
+	defer server.Close()
+
+	req := verifierHTTPTestRequest(t, service, verifierService)
+	transport := ops.MTLSIssuerVerifierTransport{Client: client}
+	resp, err := transport.ExchangeIssuerVerifier(verifierService, req)
+	if err != nil {
+		t.Fatalf("binary verifier exchange failed: %v", err)
+	}
+	if err := ops.ValidateIssuerVerifierResponse(verifierService, req, resp, 200); err != nil {
+		t.Fatalf("signed binary verifier response did not validate: %v", err)
+	}
+
+	replayed, err := transport.ExchangeIssuerVerifier(verifierService, req)
+	if err != nil {
+		t.Fatalf("duplicate verifier exchange did not return a signed decision: %v", err)
+	}
+	if replayed.Decision != registry.VerifierDecisionRejectReplayOrSpent {
+		t.Fatalf("duplicate token_spent_key decision = 0x%x, want replay reject", replayed.Decision)
+	}
+}
+
+func TestVerifierHTTPHandlerRequiresMTLSClientCertificate(t *testing.T) {
+	service, err := NewHarnessService(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifierService := service.PublishIssuerMetadata().VerifierServices[0]
+	server, client := startVerifierHTTPTestServer(t, service, &verifierService, false, false)
+	defer server.Close()
+
+	_, err = ops.MTLSIssuerVerifierTransport{Client: client}.ExchangeIssuerVerifier(verifierService, verifierHTTPTestRequest(t, service, verifierService))
+	if err == nil {
+		t.Fatalf("verifier handler accepted a request without relay mTLS client authentication")
+	}
+}
+
+func TestVerifierHTTPHandlerRejectsUnauthorizedMTLSClientCertificate(t *testing.T) {
+	service, err := NewHarnessService(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifierService := service.PublishIssuerMetadata().VerifierServices[0]
+	server, client := startVerifierHTTPTestServer(t, service, &verifierService, true, false)
+	defer server.Close()
+
+	_, err = ops.MTLSIssuerVerifierTransport{Client: client}.ExchangeIssuerVerifier(verifierService, verifierHTTPTestRequest(t, service, verifierService))
+	if err == nil {
+		t.Fatalf("verifier handler accepted an unauthorized relay mTLS client certificate")
+	}
+}
+
+func TestVerifierServiceRejectsEmptyAuthenticatorBeforeSpending(t *testing.T) {
+	service, err := NewHarnessService(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifierService := service.PublishIssuerMetadata().VerifierServices[0]
+	req := verifierHTTPTestRequest(t, service, verifierService)
+	emptyAuthenticator := req
+	emptyAuthenticator.TokenAuthenticator = nil
+	if _, err := service.VerifyIssuerVerifierRequest(emptyAuthenticator); err == nil {
+		t.Fatalf("verifier service accepted an empty token authenticator")
+	}
+	resp, err := service.VerifyIssuerVerifierRequest(req)
+	if err != nil {
+		t.Fatalf("valid verifier request was rejected after empty-authenticator attempt: %v", err)
+	}
+	if resp.Decision != registry.VerifierDecisionAccept {
+		t.Fatalf("token_spent_key was consumed by rejected empty-authenticator request: decision=0x%x", resp.Decision)
+	}
+}
+
+func TestVerifierServiceRejectsExpiredRequestBeforeSpending(t *testing.T) {
+	service, err := NewHarnessService(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifierService := service.PublishIssuerMetadata().VerifierServices[0]
+	req := verifierHTTPTestRequest(t, service, verifierService)
+	expired := req
+	expired.ReplayEpochValidUntilUnix = 199
+	if _, err := service.VerifyIssuerVerifierRequest(expired); err == nil {
+		t.Fatalf("verifier service accepted an expired replay epoch")
+	}
+	resp, err := service.VerifyIssuerVerifierRequest(req)
+	if err != nil {
+		t.Fatalf("valid verifier request was rejected after expired request attempt: %v", err)
+	}
+	if resp.Decision != registry.VerifierDecisionAccept {
+		t.Fatalf("token_spent_key was consumed by rejected expired request: decision=0x%x", resp.Decision)
+	}
+}
+
 func serveHTTP(t *testing.T, handler http.Handler, method, target string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, target, bytes.NewReader(body))
@@ -190,4 +300,116 @@ func mustIssuerMetadataHash(t *testing.T, metadata protocol.IssuerMetadata) []by
 		t.Fatal(err)
 	}
 	return hash
+}
+
+func startVerifierHTTPTestServer(t *testing.T, service *Service, verifierService *protocol.IssuerVerifierServiceRecord, withClientCertificate bool, authorizeClientCertificate bool) (*httptest.Server, *http.Client) {
+	t.Helper()
+	signer := service.verifierServiceSigners[string(verifierService.ServiceID)]
+	if signer == nil {
+		t.Fatal("harness service did not retain verifier service signer")
+	}
+	serverCert := testVerifierTLSCertificate(t, signer)
+	clientSigner, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientCert := testVerifierTLSCertificate(t, clientSigner)
+	if authorizeClientCertificate {
+		service.AuthorizeRelayClientKey(verifierService.RequestAuthPolicyID, protocol.PublicKeyRecord{
+			SignatureScheme: registry.SigECDSAP256SHA384DER,
+			KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+			PublicKey:       elliptic.Marshal(elliptic.P256(), clientSigner.PublicKey.X, clientSigner.PublicKey.Y),
+		})
+	}
+
+	server := httptest.NewUnstartedServer(NewVerifierHTTPHandler(service))
+	server.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequestClientCert,
+	}
+	verifierService.ServiceLocator = protocol.RoutingRecord{
+		RoutingRecordID:   fill(0x70, 16),
+		TransportFamilyID: registry.IssuerVerifierVOPRFMTLS13,
+		LocatorType:       registry.LocatorAuthority,
+		LocatorBody:       []byte(server.Listener.Addr().String()),
+		Priority:          1,
+		NotBeforeUnix:     100,
+		NotAfterUnix:      1000,
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(serverCert.Leaf)
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		RootCAs:    roots,
+	}
+	if withClientCertificate {
+		tlsConfig.Certificates = []tls.Certificate{clientCert}
+	}
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}}
+	server.StartTLS()
+	return server, client
+}
+
+func verifierHTTPTestRequest(t *testing.T, service *Service, verifierService protocol.IssuerVerifierServiceRecord) protocol.IssuerVerifierRequest {
+	t.Helper()
+	metadata := service.PublishIssuerMetadata()
+	var tokenKeyID []byte
+	for _, mapping := range metadata.TokenKeyMappings {
+		if mapping.ProofType == registry.ProofVOPRFP384SHA384 {
+			tokenKeyID = append([]byte(nil), mapping.TokenKeyID...)
+			break
+		}
+	}
+	if tokenKeyID == nil {
+		t.Fatal("harness metadata lacks VOPRF token key")
+	}
+	return protocol.IssuerVerifierRequest{
+		RequestVersion:            registry.Version20,
+		ServiceID:                 append([]byte(nil), verifierService.ServiceID...),
+		IssuerID:                  append([]byte(nil), metadata.IssuerID...),
+		IssuerMetadataHash:        mustIssuerMetadataHash(t, metadata),
+		RelayDescriptorHash:       fill(0x91, 48),
+		RelayBucketID:             append([]byte(nil), metadata.RelayBucketScopes[0].RelayBucketID...),
+		RouteInstanceID:           77,
+		HopIndex:                  1,
+		ProofType:                 registry.ProofVOPRFP384SHA384,
+		TokenKeyID:                tokenKeyID,
+		TokenNonce:                fill(0x92, 32),
+		ChallengeDigest:           fill(0x93, 32),
+		AuthenticatorInputHash:    fill(0x94, 48),
+		TokenAuthenticator:        []byte("private-voprf-authenticator"),
+		TokenSpentKey:             fill(0x95, 48),
+		ReplayEpochID:             11,
+		ReplayEpochValidUntilUnix: 400,
+		RequestNonce:              fill(0x96, 32),
+		RequestTimeUnix:           200,
+	}
+}
+
+func testVerifierTLSCertificate(t *testing.T, priv *ecdsa.PrivateKey) tls.Certificate {
+	t.Helper()
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+		DNSNames:     []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  priv,
+		Leaf:        leaf,
+	}
 }

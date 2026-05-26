@@ -2,6 +2,7 @@ package issuerd
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -63,6 +64,45 @@ type SpendRequest struct {
 type SpendResponse struct {
 	Spent    bool   `json:"spent"`
 	SpentKey string `json:"spent_key"`
+}
+
+func NewVerifierHTTPHandler(service *Service) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", methodHandler(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
+		if !hasMutualTLSClientAuth(r) {
+			writeError(w, http.StatusServiceUnavailable, "verifier unavailable")
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid verifier request")
+			return
+		}
+		reader := wire.NewReader(body)
+		req := protocol.DecodeIssuerVerifierRequest(reader)
+		if reader.Err() != nil || !reader.EOF() {
+			writeError(w, http.StatusBadRequest, "invalid verifier request")
+			return
+		}
+		if err := service.AuthorizeVerifierRequestClient(req, r.TLS.PeerCertificates[0]); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "verifier unavailable")
+			return
+		}
+		resp, err := service.VerifyIssuerVerifierRequest(req)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "verifier unavailable")
+			return
+		}
+		encoded, err := protocol.Encode(resp)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "verifier unavailable")
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(encoded)
+	}))
+	return mux
 }
 
 func NewHTTPHandler(service *Service) http.Handler {
@@ -319,6 +359,13 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func hasMutualTLSClientAuth(r *http.Request) bool {
+	return r != nil &&
+		r.TLS != nil &&
+		r.TLS.Version == tls.VersionTLS13 &&
+		len(r.TLS.PeerCertificates) > 0
 }
 
 func decodeJSONBody(r *http.Request, out any) error {

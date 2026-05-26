@@ -9,6 +9,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/sha512"
+	"crypto/x509"
 	"encoding/asn1"
 	"encoding/hex"
 	"fmt"
@@ -29,6 +30,8 @@ type Service struct {
 	blindRSAKey            *rsa.PrivateKey
 	blindRSATokenKeyDER    []byte
 	spentTokens            *admission.MemoryReplayCache
+	verifierServiceSigners map[string]*ecdsa.PrivateKey
+	authorizedRelayKeys    map[uint64][]protocol.PublicKeyRecord
 	voprfVerifierAvailable bool
 }
 
@@ -173,6 +176,8 @@ func NewHarnessService(nowUnix uint64) (*Service, error) {
 		blindRSAKey:            blindRSAKey,
 		blindRSATokenKeyDER:    blindRSAKeyDER,
 		spentTokens:            admission.NewMemoryReplayCache(),
+		verifierServiceSigners: map[string]*ecdsa.PrivateKey{string(metadata.VerifierServices[0].ServiceID): serviceSigner},
+		authorizedRelayKeys:    make(map[uint64][]protocol.PublicKeyRecord),
 		voprfVerifierAvailable: true,
 	}, nil
 }
@@ -364,6 +369,226 @@ func (s *Service) VerifyVOPRFRequest(req VOPRFVerifierRequest) error {
 		}
 	}
 	return fmt.Errorf("issuerd: no verifier service authorizes request")
+}
+
+func (s *Service) VerifyIssuerVerifierRequest(req protocol.IssuerVerifierRequest) (protocol.IssuerVerifierResponse, error) {
+	service, signer, err := s.verifierServiceForRequest(req)
+	if err != nil {
+		return protocol.IssuerVerifierResponse{}, err
+	}
+	requestHash, err := auroratrust.IssuerVerifierRequestHash(req)
+	if err != nil {
+		return protocol.IssuerVerifierResponse{}, err
+	}
+	validUntil, err := verifierResponseValidUntil(s.nowUnix, req, service)
+	if err != nil {
+		return protocol.IssuerVerifierResponse{}, err
+	}
+	decision := registry.VerifierDecisionAccept
+	if !s.spentTokens.InsertIfAbsent(req.TokenSpentKey) {
+		decision = registry.VerifierDecisionRejectReplayOrSpent
+	}
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		return protocol.IssuerVerifierResponse{}, err
+	}
+	resp := protocol.IssuerVerifierResponse{
+		ResponseVersion: registry.Version20,
+		ServiceID:       append([]byte(nil), service.ServiceID...),
+		RequestHash:     requestHash,
+		Decision:        decision,
+		DecisionDetail:  decision,
+		TokenSpentKey:   append([]byte(nil), req.TokenSpentKey...),
+		ValidUntilUnix:  validUntil,
+		ResponseNonce:   nonce,
+	}
+	if decision == registry.VerifierDecisionAccept {
+		resp.DecisionDetail = 0
+	}
+	input, err := auroratrust.IssuerVerifierResponseSignatureInput(requestHash, resp)
+	if err != nil {
+		return protocol.IssuerVerifierResponse{}, err
+	}
+	resp.ServiceSignature, err = ecdsa.SignASN1(rand.Reader, signer, input)
+	if err != nil {
+		return protocol.IssuerVerifierResponse{}, err
+	}
+	return resp, nil
+}
+
+func (s *Service) AuthorizeRelayClientKey(requestAuthPolicyID uint64, key protocol.PublicKeyRecord) {
+	if s.authorizedRelayKeys == nil {
+		s.authorizedRelayKeys = make(map[uint64][]protocol.PublicKeyRecord)
+	}
+	key.PublicKey = append([]byte(nil), key.PublicKey...)
+	s.authorizedRelayKeys[requestAuthPolicyID] = append(s.authorizedRelayKeys[requestAuthPolicyID], key)
+}
+
+func (s *Service) AuthorizeVerifierRequestClient(req protocol.IssuerVerifierRequest, cert *x509.Certificate) error {
+	service, _, err := s.verifierServiceForRequest(req)
+	if err != nil {
+		return err
+	}
+	if cert == nil {
+		return fmt.Errorf("issuerd: verifier request lacks relay client certificate")
+	}
+	for _, key := range s.authorizedRelayKeys[service.RequestAuthPolicyID] {
+		if certificateMatchesPublicKeyRecord(cert, key) {
+			return nil
+		}
+	}
+	return fmt.Errorf("issuerd: relay client certificate is not authorized for request auth policy")
+}
+
+func (s *Service) verifierServiceForRequest(req protocol.IssuerVerifierRequest) (protocol.IssuerVerifierServiceRecord, *ecdsa.PrivateKey, error) {
+	if s == nil || !s.ready() {
+		return protocol.IssuerVerifierServiceRecord{}, nil, fmt.Errorf("issuerd: verifier unavailable")
+	}
+	if !s.voprfVerifierAvailable {
+		return protocol.IssuerVerifierServiceRecord{}, nil, fmt.Errorf("issuerd: VOPRF verifier unavailable")
+	}
+	if err := validateIssuerVerifierRequestShape(req); err != nil {
+		return protocol.IssuerVerifierServiceRecord{}, nil, err
+	}
+	if !bytes.Equal(req.IssuerID, s.metadata.IssuerID) {
+		return protocol.IssuerVerifierServiceRecord{}, nil, fmt.Errorf("issuerd: issuer mismatch")
+	}
+	metadataHash, err := auroratrust.IssuerMetadataHash(s.metadata)
+	if err != nil {
+		return protocol.IssuerVerifierServiceRecord{}, nil, err
+	}
+	if !bytes.Equal(req.IssuerMetadataHash, metadataHash) {
+		return protocol.IssuerVerifierServiceRecord{}, nil, fmt.Errorf("issuerd: issuer metadata hash mismatch")
+	}
+	if !s.hasUsableTokenKey(req.ProofType, req.TokenKeyID) {
+		return protocol.IssuerVerifierServiceRecord{}, nil, fmt.Errorf("issuerd: token key is not usable")
+	}
+	var matched []protocol.IssuerVerifierServiceRecord
+	for _, service := range s.metadata.VerifierServices {
+		if !bytes.Equal(service.ServiceID, req.ServiceID) {
+			continue
+		}
+		if err := service.Allows(req.ProofType, req.RelayBucketID, s.nowUnix, true); err != nil {
+			continue
+		}
+		matched = append(matched, service)
+	}
+	if len(matched) != 1 {
+		return protocol.IssuerVerifierServiceRecord{}, nil, fmt.Errorf("issuerd: verifier service selection returned %d matches", len(matched))
+	}
+	signer := s.verifierServiceSigners[string(matched[0].ServiceID)]
+	if signer == nil {
+		return protocol.IssuerVerifierServiceRecord{}, nil, fmt.Errorf("issuerd: verifier service signer unavailable")
+	}
+	return matched[0], signer, nil
+}
+
+func validateIssuerVerifierRequestShape(req protocol.IssuerVerifierRequest) error {
+	if req.RequestVersion != registry.Version20 {
+		return fmt.Errorf("issuerd: unsupported verifier request version 0x%x", req.RequestVersion)
+	}
+	for name, field := range map[string][]byte{
+		"service_id":               req.ServiceID,
+		"issuer_id":                req.IssuerID,
+		"relay_bucket_id":          req.RelayBucketID,
+		"token_nonce":              req.TokenNonce,
+		"challenge_digest":         req.ChallengeDigest,
+		"authenticator_input_hash": req.AuthenticatorInputHash,
+		"token_spent_key":          req.TokenSpentKey,
+		"request_nonce":            req.RequestNonce,
+		"issuer_metadata_hash":     req.IssuerMetadataHash,
+		"relay_descriptor_hash":    req.RelayDescriptorHash,
+		"token_key_id":             req.TokenKeyID,
+	} {
+		if expectedVerifierRequestFieldLength(name) != len(field) {
+			return fmt.Errorf("issuerd: verifier request %s length %d", name, len(field))
+		}
+	}
+	if req.ProofType != registry.ProofVOPRFP384SHA384 {
+		return fmt.Errorf("issuerd: verifier request proof type 0x%x is not VOPRF", req.ProofType)
+	}
+	if len(req.TokenAuthenticator) == 0 {
+		return fmt.Errorf("issuerd: verifier request lacks token authenticator")
+	}
+	if req.ReplayEpochValidUntilUnix == 0 {
+		return fmt.Errorf("issuerd: verifier request lacks replay epoch expiry")
+	}
+	if req.RequestTimeUnix == 0 {
+		return fmt.Errorf("issuerd: verifier request lacks request time")
+	}
+	return nil
+}
+
+func expectedVerifierRequestFieldLength(name string) int {
+	switch name {
+	case "service_id", "issuer_id", "relay_bucket_id":
+		return 16
+	case "token_nonce", "challenge_digest", "request_nonce", "token_key_id":
+		return 32
+	default:
+		return 48
+	}
+}
+
+func (s *Service) hasUsableTokenKey(proofType uint64, tokenKeyID []byte) bool {
+	for _, key := range s.metadata.TokenKeyMappings {
+		if key.ProofType != proofType || !bytes.Equal(key.TokenKeyID, tokenKeyID) {
+			continue
+		}
+		if s.nowUnix < key.ValidFromUnix || s.nowUnix >= key.ValidUntilUnix {
+			return false
+		}
+		return key.KeyStatus == registry.IssuerStatusActive || key.KeyStatus == registry.IssuerStatusRetiring
+	}
+	return false
+}
+
+func certificateMatchesPublicKeyRecord(cert *x509.Certificate, key protocol.PublicKeyRecord) bool {
+	switch key.SignatureScheme {
+	case registry.SigECDSAP256SHA256DER, registry.SigECDSAP256SHA384DER:
+		return certificateECDSAKeyMatchesRecord(cert, elliptic.P256(), registry.KeyP256SEC1Uncompressed, registry.KeyP256SPKI, key)
+	case registry.SigECDSAP384SHA384DER:
+		return certificateECDSAKeyMatchesRecord(cert, elliptic.P384(), registry.KeyP384SEC1Uncompressed, registry.KeyP384SPKI, key)
+	default:
+		return false
+	}
+}
+
+func certificateECDSAKeyMatchesRecord(cert *x509.Certificate, curve elliptic.Curve, sec1Encoding, spkiEncoding uint64, key protocol.PublicKeyRecord) bool {
+	if cert == nil {
+		return false
+	}
+	pk, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok || pk.Curve != curve {
+		return false
+	}
+	var encoded []byte
+	var err error
+	switch key.KeyEncoding {
+	case sec1Encoding:
+		encoded = elliptic.Marshal(curve, pk.X, pk.Y)
+	case spkiEncoding:
+		encoded, err = x509.MarshalPKIXPublicKey(pk)
+		if err != nil {
+			return false
+		}
+	default:
+		return false
+	}
+	return bytes.Equal(encoded, key.PublicKey)
+}
+
+func verifierResponseValidUntil(nowUnix uint64, req protocol.IssuerVerifierRequest, service protocol.IssuerVerifierServiceRecord) (uint64, error) {
+	validUntil := req.RequestTimeUnix + 300
+	for _, candidate := range []uint64{service.ValidUntilUnix, req.ReplayEpochValidUntilUnix, nowUnix + 100} {
+		if candidate < validUntil {
+			validUntil = candidate
+		}
+	}
+	if validUntil <= nowUnix {
+		return 0, fmt.Errorf("issuerd: verifier response freshness window already expired")
+	}
+	return validUntil, nil
 }
 
 func (s *Service) SetVOPRFVerifierAvailable(available bool) {

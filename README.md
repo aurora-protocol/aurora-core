@@ -12,6 +12,7 @@ Implemented now:
 - SHA-384/SHA-512 suite hashes, TLS-style HKDF labels, AES-256-GCM, route-prelude wrapping, packet protection, standard-library ML-KEM wrappers with CIRCL agreement checks, and ML-DSA verification;
 - AccessHint computation, spent-hint cache, token redemption hash, token spent key, replay context hash, and bootstrap dedup key;
 - first-hop prelude transcript hashing, handshake key schedule, ClientFinished, ServerFinished, and application traffic secret derivation;
+- signed real-crypto metadata vectors for directory consensus, relay descriptors, and cover templates;
 - policy profiles, PAL scoring, PACE reference behavior, local config parsing, threat-safe logging wrappers, `auroractl`, the local proxy client, cover-template-validated H2/H1/shadow-origin/H3 datagram and explicitly gated MASQUE carrier request builders, relay admission/exit gates, vector drift tests, and ops helpers.
 
 ## Layout

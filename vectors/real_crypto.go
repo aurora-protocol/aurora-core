@@ -52,6 +52,254 @@ type RoutePreludeRealCryptoBundle struct {
 	RouteServerPreludeSignaturePQ        string
 }
 
+type TrustMetadataRealCryptoBundle struct {
+	DirectoryAuthorityClassicalKey        string
+	DirectoryAuthorityPQKey               string
+	DirectoryConsensus                    string
+	DirectoryConsensusHash                string
+	DirectoryConsensusSignatureInputClass string
+	DirectoryConsensusSignatureInputPQ    string
+	DirectoryConsensusSignatureClassical  string
+	DirectoryConsensusSignaturePQ         string
+	RelayDescriptor                       string
+	RelayDescriptorHash                   string
+	RelayDescriptorSignatureInput         string
+	RelayDescriptorSignatureClassical     string
+	RelayDescriptorSignaturePQ            string
+	CoverTemplate                         string
+	CoverTemplateHash                     string
+	CoverTemplateFamilySignatureInput     string
+	CoverTemplateInstanceSignatureInput   string
+	CoverTemplateFamilySignature          string
+	CoverTemplateInstanceSignature        string
+}
+
+func GenerateTrustMetadataRealCryptoBundle() (TrustMetadataRealCryptoBundle, error) {
+	const nowUnix = 1700000100
+
+	directoryClassicalSigner, err := ecdsaPrivateKeyFromScalar(repeated(0xd1, 32))
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	directoryClassicalKey := ecdsaPublicKeyRecord(directoryClassicalSigner)
+	directoryClassicalKeyID, err := authorityKeyID(directoryClassicalKey)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	directoryClassicalAuthority := protocol.AuthorityKeyRecord{
+		AuthorityID:    repeated(0xd0, 16),
+		AuthorityKeyID: directoryClassicalKeyID,
+		AuthorityRole:  1,
+		PublicKey:      directoryClassicalKey,
+		ValidFromUnix:  1700000000,
+		ValidUntilUnix: 1700003600,
+		KeyStatus:      registry.AuthorityActive,
+		UsageFlags:     registry.UsageMaySignDirectoryConsensus,
+	}
+
+	var directoryPQSeed [mldsa65.SeedSize]byte
+	copy(directoryPQSeed[:], repeated(0xd2, len(directoryPQSeed)))
+	directoryPQPublic, directoryPQPrivate := mldsa65.NewKeyFromSeed(&directoryPQSeed)
+	directoryPQKey := protocol.PublicKeyRecord{
+		SignatureScheme: registry.SigMLDSA65,
+		KeyEncoding:     registry.KeyMLDSA65RawPublic,
+		PublicKey:       directoryPQPublic.Bytes(),
+	}
+	directoryPQKeyID, err := authorityKeyID(directoryPQKey)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	directoryPQAuthority := protocol.AuthorityKeyRecord{
+		AuthorityID:    repeated(0xd3, 16),
+		AuthorityKeyID: directoryPQKeyID,
+		AuthorityRole:  1,
+		PublicKey:      directoryPQKey,
+		ValidFromUnix:  1700000000,
+		ValidUntilUnix: 1700003600,
+		KeyStatus:      registry.AuthorityActive,
+		UsageFlags:     registry.UsageMaySignDirectoryConsensus,
+	}
+
+	relayLongtermClassicalSigner, err := ecdsaPrivateKeyFromScalar(repeated(0xd4, 32))
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	relayLongtermClassicalKey := ecdsaPublicKeyRecord(relayLongtermClassicalSigner)
+	var relayLongtermPQSeed [mldsa65.SeedSize]byte
+	copy(relayLongtermPQSeed[:], repeated(0xd5, len(relayLongtermPQSeed)))
+	relayLongtermPQPublic, relayLongtermPQPrivate := mldsa65.NewKeyFromSeed(&relayLongtermPQSeed)
+	relayLongtermPQKey := protocol.PublicKeyRecord{
+		SignatureScheme: registry.SigMLDSA65,
+		KeyEncoding:     registry.KeyMLDSA65RawPublic,
+		PublicKey:       relayLongtermPQPublic.Bytes(),
+	}
+	relayEpochClassicalSigner, err := ecdsaPrivateKeyFromScalar(repeated(0xd6, 32))
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	relayEpochClassicalKey := ecdsaPublicKeyRecord(relayEpochClassicalSigner)
+	var relayEpochPQSeed [mldsa65.SeedSize]byte
+	copy(relayEpochPQSeed[:], repeated(0xd7, len(relayEpochPQSeed)))
+	relayEpochPQPublic, _ := mldsa65.NewKeyFromSeed(&relayEpochPQSeed)
+	relayEpochPQKey := protocol.PublicKeyRecord{
+		SignatureScheme: registry.SigMLDSA65,
+		KeyEncoding:     registry.KeyMLDSA65RawPublic,
+		PublicKey:       relayEpochPQPublic.Bytes(),
+	}
+
+	coverTemplate := sampleCoverTemplate()
+	coverTemplate.TemplateFamilySignature = nil
+	coverTemplate.TemplateInstanceSignature = nil
+	coverTemplate.CoverOriginCommitment, err = trust.CoverOriginCommitment(coverTemplate)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	coverTemplateHash, err := trust.CoverTemplateHash(coverTemplate)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+
+	relayDescriptor := sampleRelayDescriptor()
+	relayDescriptor.RelayLongtermClassicalKey = relayLongtermClassicalKey
+	relayDescriptor.RelayLongtermPQKey = relayLongtermPQKey
+	relayDescriptor.EpochAuthClassicalKey = relayEpochClassicalKey
+	relayDescriptor.EpochAuthPQKey = relayEpochPQKey
+	relayDescriptor.SupportedSuiteIDs = []uint64{registry.SuiteHybrid768P256AESGCM}
+	relayDescriptor.CoverTemplateInstanceHashes = [][]byte{coverTemplateHash}
+	relayDescriptor.SignatureByLongtermClassical = nil
+	relayDescriptor.SignatureByLongtermPQ = nil
+	relayDescriptorHash, err := trust.RelayDescriptorHash(relayDescriptor)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	relayDescriptorInput, err := trust.RelayDescriptorSignatureInput(relayDescriptor)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	relayDescriptor.SignatureByLongtermClassical, err = relayLongtermClassicalSigner.Sign(nil, relayDescriptorInput, crypto.SHA384)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	relayDescriptor.SignatureByLongtermPQ = make([]byte, mldsa65.SignatureSize)
+	if err := mldsa65.SignTo(relayLongtermPQPrivate, relayDescriptorInput, nil, false, relayDescriptor.SignatureByLongtermPQ); err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	if err := auroracrypto.VerifySignature(relayDescriptor.RelayLongtermClassicalKey.SignatureScheme, relayDescriptor.RelayLongtermClassicalKey.KeyEncoding, relayDescriptor.RelayLongtermClassicalKey.PublicKey, relayDescriptorInput, relayDescriptor.SignatureByLongtermClassical); err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	if err := auroracrypto.VerifySignature(relayDescriptor.RelayLongtermPQKey.SignatureScheme, relayDescriptor.RelayLongtermPQKey.KeyEncoding, relayDescriptor.RelayLongtermPQKey.PublicKey, relayDescriptorInput, relayDescriptor.SignatureByLongtermPQ); err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+
+	coverFamilyInput, err := trust.CoverTemplateFamilySignatureInput(coverTemplate)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	coverInstanceInput, err := trust.CoverTemplateInstanceSignatureInput(relayDescriptorHash, coverTemplate)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	coverTemplate.TemplateFamilySignature, err = directoryClassicalSigner.Sign(nil, coverFamilyInput, crypto.SHA384)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	coverTemplate.TemplateInstanceSignature, err = relayLongtermClassicalSigner.Sign(nil, coverInstanceInput, crypto.SHA384)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	if err := auroracrypto.VerifySignature(directoryClassicalKey.SignatureScheme, directoryClassicalKey.KeyEncoding, directoryClassicalKey.PublicKey, coverFamilyInput, coverTemplate.TemplateFamilySignature); err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	if err := auroracrypto.VerifySignature(relayLongtermClassicalKey.SignatureScheme, relayLongtermClassicalKey.KeyEncoding, relayLongtermClassicalKey.PublicKey, coverInstanceInput, coverTemplate.TemplateInstanceSignature); err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+
+	classicalEntry := protocol.SignatureEntry{
+		AuthorityID:     directoryClassicalAuthority.AuthorityID,
+		AuthorityKeyID:  directoryClassicalAuthority.AuthorityKeyID,
+		SignatureScheme: directoryClassicalAuthority.PublicKey.SignatureScheme,
+		KeyEncoding:     directoryClassicalAuthority.PublicKey.KeyEncoding,
+	}
+	pqEntry := protocol.SignatureEntry{
+		AuthorityID:     directoryPQAuthority.AuthorityID,
+		AuthorityKeyID:  directoryPQAuthority.AuthorityKeyID,
+		SignatureScheme: directoryPQAuthority.PublicKey.SignatureScheme,
+		KeyEncoding:     directoryPQAuthority.PublicKey.KeyEncoding,
+	}
+	directoryConsensus := sampleDirectoryConsensus()
+	directoryConsensus.RelayDescriptorRoot = relayDescriptorHash
+	directoryConsensus.CoverTemplateFamilyRoot = coverTemplateHash
+	directoryConsensus.AuthoritySignatures = []protocol.SignatureEntry{classicalEntry, pqEntry}
+	directoryClassicalInput, err := trust.DirectoryConsensusSignatureInput(directoryConsensus, classicalEntry)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	directoryPQInput, err := trust.DirectoryConsensusSignatureInput(directoryConsensus, pqEntry)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	directoryConsensus.AuthoritySignatures[0].Signature, err = directoryClassicalSigner.Sign(nil, directoryClassicalInput, crypto.SHA384)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	directoryConsensus.AuthoritySignatures[1].Signature = make([]byte, mldsa65.SignatureSize)
+	if err := mldsa65.SignTo(directoryPQPrivate, directoryPQInput, nil, false, directoryConsensus.AuthoritySignatures[1].Signature); err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	if err := trust.VerifyDirectoryConsensusSignatures(directoryConsensus, []protocol.AuthorityKeyRecord{directoryClassicalAuthority, directoryPQAuthority}, nowUnix, 2); err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	if err := trust.VerifyStrictDirectoryConsensusSignatures(directoryConsensus, []protocol.AuthorityKeyRecord{directoryClassicalAuthority, directoryPQAuthority}, nowUnix, 1); err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	directoryConsensusHash, err := trust.DirectoryConsensusHash(directoryConsensus)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+
+	encodedClassicalAuthority, err := wire.Encode(directoryClassicalAuthority)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	encodedPQAuthority, err := wire.Encode(directoryPQAuthority)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	encodedConsensus, err := wire.Encode(directoryConsensus)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	encodedRelayDescriptor, err := wire.Encode(relayDescriptor)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	encodedCoverTemplate, err := wire.Encode(coverTemplate)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
+	return TrustMetadataRealCryptoBundle{
+		DirectoryAuthorityClassicalKey:        hex.EncodeToString(encodedClassicalAuthority),
+		DirectoryAuthorityPQKey:               hex.EncodeToString(encodedPQAuthority),
+		DirectoryConsensus:                    hex.EncodeToString(encodedConsensus),
+		DirectoryConsensusHash:                hex.EncodeToString(directoryConsensusHash),
+		DirectoryConsensusSignatureInputClass: hex.EncodeToString(directoryClassicalInput),
+		DirectoryConsensusSignatureInputPQ:    hex.EncodeToString(directoryPQInput),
+		DirectoryConsensusSignatureClassical:  hex.EncodeToString(directoryConsensus.AuthoritySignatures[0].Signature),
+		DirectoryConsensusSignaturePQ:         hex.EncodeToString(directoryConsensus.AuthoritySignatures[1].Signature),
+		RelayDescriptor:                       hex.EncodeToString(encodedRelayDescriptor),
+		RelayDescriptorHash:                   hex.EncodeToString(relayDescriptorHash),
+		RelayDescriptorSignatureInput:         hex.EncodeToString(relayDescriptorInput),
+		RelayDescriptorSignatureClassical:     hex.EncodeToString(relayDescriptor.SignatureByLongtermClassical),
+		RelayDescriptorSignaturePQ:            hex.EncodeToString(relayDescriptor.SignatureByLongtermPQ),
+		CoverTemplate:                         hex.EncodeToString(encodedCoverTemplate),
+		CoverTemplateHash:                     hex.EncodeToString(coverTemplateHash),
+		CoverTemplateFamilySignatureInput:     hex.EncodeToString(coverFamilyInput),
+		CoverTemplateInstanceSignatureInput:   hex.EncodeToString(coverInstanceInput),
+		CoverTemplateFamilySignature:          hex.EncodeToString(coverTemplate.TemplateFamilySignature),
+		CoverTemplateInstanceSignature:        hex.EncodeToString(coverTemplate.TemplateInstanceSignature),
+	}, nil
+}
+
 func GenerateFirstHopRealCryptoBundle() (FirstHopRealCryptoBundle, error) {
 	const suite = registry.SuiteHybrid768P256AESGCM
 
@@ -417,4 +665,20 @@ func ecdsaPrivateKeyFromScalar(scalar []byte) (*ecdsa.PrivateKey, error) {
 		PublicKey: ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y},
 		D:         d,
 	}, nil
+}
+
+func ecdsaPublicKeyRecord(privateKey *ecdsa.PrivateKey) protocol.PublicKeyRecord {
+	return protocol.PublicKeyRecord{
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+		PublicKey:       elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y),
+	}
+}
+
+func authorityKeyID(record protocol.PublicKeyRecord) ([]byte, error) {
+	encoded, err := wire.Encode(record)
+	if err != nil {
+		return nil, err
+	}
+	return auroracrypto.Truncate128(auroracrypto.PreHashLabel("aurora v2.0 authority key id", encoded)), nil
 }

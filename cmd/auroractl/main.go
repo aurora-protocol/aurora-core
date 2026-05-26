@@ -110,6 +110,10 @@ func checkVectorSnapshot(kind, path string, write func(io.Writer) error) error {
 }
 
 func writeRealCryptoVectors(w io.Writer) error {
+	metadata, err := corevectors.GenerateTrustMetadataRealCryptoBundle()
+	if err != nil {
+		return err
+	}
 	firstHop, err := corevectors.GenerateFirstHopRealCryptoBundle()
 	if err != nil {
 		return err
@@ -122,6 +126,25 @@ func writeRealCryptoVectors(w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	fmt.Fprintln(w, "metadata_directory_authority_classical_key:", metadata.DirectoryAuthorityClassicalKey)
+	fmt.Fprintln(w, "metadata_directory_authority_pq_key:", metadata.DirectoryAuthorityPQKey)
+	fmt.Fprintln(w, "metadata_directory_consensus:", metadata.DirectoryConsensus)
+	fmt.Fprintln(w, "metadata_directory_consensus_hash:", metadata.DirectoryConsensusHash)
+	fmt.Fprintln(w, "metadata_directory_consensus_signature_input_classical:", metadata.DirectoryConsensusSignatureInputClass)
+	fmt.Fprintln(w, "metadata_directory_consensus_signature_input_pq:", metadata.DirectoryConsensusSignatureInputPQ)
+	fmt.Fprintln(w, "metadata_directory_consensus_signature_classical:", metadata.DirectoryConsensusSignatureClassical)
+	fmt.Fprintln(w, "metadata_directory_consensus_signature_pq:", metadata.DirectoryConsensusSignaturePQ)
+	fmt.Fprintln(w, "metadata_relay_descriptor:", metadata.RelayDescriptor)
+	fmt.Fprintln(w, "metadata_relay_descriptor_hash:", metadata.RelayDescriptorHash)
+	fmt.Fprintln(w, "metadata_relay_descriptor_signature_input:", metadata.RelayDescriptorSignatureInput)
+	fmt.Fprintln(w, "metadata_relay_descriptor_signature_classical:", metadata.RelayDescriptorSignatureClassical)
+	fmt.Fprintln(w, "metadata_relay_descriptor_signature_pq:", metadata.RelayDescriptorSignaturePQ)
+	fmt.Fprintln(w, "metadata_cover_template:", metadata.CoverTemplate)
+	fmt.Fprintln(w, "metadata_cover_template_hash:", metadata.CoverTemplateHash)
+	fmt.Fprintln(w, "metadata_cover_template_family_signature_input:", metadata.CoverTemplateFamilySignatureInput)
+	fmt.Fprintln(w, "metadata_cover_template_instance_signature_input:", metadata.CoverTemplateInstanceSignatureInput)
+	fmt.Fprintln(w, "metadata_cover_template_family_signature:", metadata.CoverTemplateFamilySignature)
+	fmt.Fprintln(w, "metadata_cover_template_instance_signature:", metadata.CoverTemplateInstanceSignature)
 	fmt.Fprintln(w, "first_hop_client_classical_eph_pub:", firstHop.ClientClassicalEphPub)
 	fmt.Fprintln(w, "first_hop_server_classical_eph_pub:", firstHop.ServerClassicalEphPub)
 	fmt.Fprintln(w, "first_hop_classical_shared_secret:", firstHop.ClassicalSharedSecret)
@@ -258,6 +281,7 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- DirectoryConsensus, RelayDescriptor, CoverTemplate trust hashes, signature inputs, and strict ML-DSA authority quorum")
 	fmt.Fprintln(w, "- AES-256-GCM, HKDF labels, SHA-384/SHA-512 suite hashes, ML-KEM wrappers, ML-KEM provider agreement, and ML-DSA verification")
 	fmt.Fprintln(w, "- first-hop prelude transcript hashing, Finished messages, and application secret derivation")
+	fmt.Fprintln(w, "- signed directory, relay descriptor, and cover-template real-crypto vectors")
 	fmt.Fprintln(w, "- first-hop, split-2 route-prelude, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, and ML-DSA artifacts")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
 	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing")

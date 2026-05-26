@@ -81,6 +81,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "first-hop, split-2 route-prelude, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors") {
 		t.Fatalf("capabilities output missing real-crypto vector coverage:\n%s", text)
 	}
+	if !strings.Contains(text, "signed directory, relay descriptor, and cover-template real-crypto vectors") {
+		t.Fatalf("capabilities output missing signed metadata vector coverage:\n%s", text)
+	}
 	if !strings.Contains(text, "ML-KEM provider agreement") {
 		t.Fatalf("capabilities output missing ML-KEM provider agreement:\n%s", text)
 	}
@@ -122,6 +125,16 @@ func TestVectorsCommandPrintsFirstHopRealCryptoVectors(t *testing.T) {
 	}
 	text := out.String()
 	for _, want := range []string{
+		"metadata_directory_consensus: ",
+		"metadata_directory_consensus_hash: ",
+		"metadata_directory_consensus_signature_pq: ",
+		"metadata_relay_descriptor: ",
+		"metadata_relay_descriptor_hash: ",
+		"metadata_relay_descriptor_signature_pq: ",
+		"metadata_cover_template: ",
+		"metadata_cover_template_hash: ",
+		"metadata_cover_template_family_signature: ",
+		"metadata_cover_template_instance_signature: ",
 		"first_hop_cover_prelude0: ",
 		"first_hop_cover_prelude1: ",
 		"first_hop_prelude_transcript_hash: ",

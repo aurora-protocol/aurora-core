@@ -318,6 +318,10 @@ func (p *LocalProxy) ReceiveUDPTargetConfirmFrame(frame protocol.AuroraFrame) er
 	return p.flows.ConfirmUDPFrame(frame)
 }
 
+func (p *LocalProxy) ReceiveUDPTargetConfirmFrameAt(frame protocol.AuroraFrame, now uint64) error {
+	return p.flows.ConfirmUDPFrameWithOptions(frame, flow.UDPConfirmOptions{NowUnix: now})
+}
+
 func (p *LocalProxy) PurgeClosed(now uint64) {
 	p.flows.PurgeClosed(now)
 }

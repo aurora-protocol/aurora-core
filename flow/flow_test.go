@@ -381,6 +381,94 @@ func TestFlowTTLIsHardCapEvenWhenActive(t *testing.T) {
 	}
 }
 
+func TestUDPConfirmTTLShortensActiveFlowTTL(t *testing.T) {
+	m := NewManager()
+	open := protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           24,
+		FlowKind:         FlowKindUDPAssociation,
+		TargetKind:       TargetKindIPv4,
+		TargetHost:       []byte{203, 0, 113, 24},
+		TargetPort:       443,
+		UDPFQDNMode:      UDPFQDNClientResolvedNameBinding,
+		NameBindingID:    fb(0xaa, 16),
+		DNSAnswerSetHash: fb(0xbb, 48),
+		LocalBindingMode: LocalBindingTransparentFakeIP,
+		PriorityClass:    PriorityRealtime,
+	}
+	if err := m.OpenWithOptions(open, FlowOptions{NowUnix: 100, TTLSeconds: 300, IdleTimeoutSeconds: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ConfirmUDPWithOptions(protocol.UDPTargetConfirm{
+		FlowID:           24,
+		TargetKind:       TargetKindIPv4,
+		SelectedIP:       []byte{203, 0, 113, 24},
+		SelectedPort:     443,
+		DNSAnswerSetHash: fb(0xbb, 48),
+		TTLSeconds:       5,
+		ResolutionSource: protocol.UDPResolutionClientSuppliedIP,
+	}, UDPConfirmOptions{NowUnix: 110}); err != nil {
+		t.Fatal(err)
+	}
+	state, ok := m.DemuxInbound(24)
+	if !ok {
+		t.Fatalf("confirmed UDP flow was removed")
+	}
+	if state.ConfirmedTTLSeconds != 5 || state.ConfirmedAtUnix != 110 {
+		t.Fatalf("confirm metadata was not recorded with time: %+v", state)
+	}
+	if state.TTLSeconds != 15 {
+		t.Fatalf("confirmed TTL did not shorten flow lifetime: %+v", state)
+	}
+	if _, ok := m.AcceptDatagram(24, 114); !ok {
+		t.Fatalf("flow expired before confirmed TTL")
+	}
+	if _, ok := m.AcceptDatagram(24, 116); ok {
+		t.Fatalf("datagram accepted after confirmed UDP target TTL")
+	}
+}
+
+func TestUDPConfirmTTLDoesNotExtendShorterFlowTTL(t *testing.T) {
+	m := NewManager()
+	open := protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           25,
+		FlowKind:         FlowKindUDPAssociation,
+		TargetKind:       TargetKindIPv4,
+		TargetHost:       []byte{203, 0, 113, 25},
+		TargetPort:       443,
+		UDPFQDNMode:      UDPFQDNClientResolvedNameBinding,
+		NameBindingID:    fb(0xaa, 16),
+		DNSAnswerSetHash: fb(0xbb, 48),
+		LocalBindingMode: LocalBindingTransparentFakeIP,
+		PriorityClass:    PriorityRealtime,
+	}
+	if err := m.OpenWithOptions(open, FlowOptions{NowUnix: 100, TTLSeconds: 20, IdleTimeoutSeconds: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ConfirmUDPWithOptions(protocol.UDPTargetConfirm{
+		FlowID:           25,
+		TargetKind:       TargetKindIPv4,
+		SelectedIP:       []byte{203, 0, 113, 25},
+		SelectedPort:     443,
+		DNSAnswerSetHash: fb(0xbb, 48),
+		TTLSeconds:       300,
+		ResolutionSource: protocol.UDPResolutionClientSuppliedIP,
+	}, UDPConfirmOptions{NowUnix: 110}); err != nil {
+		t.Fatal(err)
+	}
+	state, ok := m.DemuxInbound(25)
+	if !ok {
+		t.Fatalf("confirmed UDP flow was removed")
+	}
+	if state.TTLSeconds != 20 {
+		t.Fatalf("longer confirm TTL extended flow lifetime: %+v", state)
+	}
+	if _, ok := m.AcceptDatagram(25, 121); ok {
+		t.Fatalf("datagram accepted after original shorter flow TTL")
+	}
+}
+
 func TestRealtimeDatagramAgeDropDoesNotRefreshFlow(t *testing.T) {
 	m := NewManager()
 	open := protocol.FlowOpen{

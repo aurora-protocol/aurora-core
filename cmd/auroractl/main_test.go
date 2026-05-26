@@ -355,6 +355,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "fake-IP mapped UDP flow integration") {
 		t.Fatalf("capabilities output missing fake-IP mapped UDP flow integration:\n%s", text)
 	}
+	if !strings.Contains(text, "UDP target confirm TTL enforcement") {
+		t.Fatalf("capabilities output missing UDP target confirm TTL enforcement:\n%s", text)
+	}
 	if !strings.Contains(text, "synthetic local DNS forwarder responses") {
 		t.Fatalf("capabilities output missing local DNS forwarder response support:\n%s", text)
 	}

@@ -354,6 +354,41 @@ func TestLocalProxyReceiveUDPTargetConfirmFrameRejectsMismatchBeforeMutation(t *
 	}
 }
 
+func TestLocalProxyReceiveUDPTargetConfirmFrameAppliesTTL(t *testing.T) {
+	p := NewLocalProxy()
+	if _, err := p.OpenUDPWithFakeDNS(47, "example.com", []string{"93.184.216.34"}, 443, 100); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := protocol.NewUDPTargetConfirmFrame(protocol.UDPTargetConfirm{
+		FlowID:           47,
+		TargetKind:       flow.TargetKindIPv4,
+		SelectedIP:       []byte{93, 184, 216, 34},
+		SelectedPort:     443,
+		DNSAnswerSetHash: flow.DNSAnswerSetHash([]string{"93.184.216.34"}),
+		TTLSeconds:       5,
+		ResolutionSource: protocol.UDPResolutionClientSuppliedIP,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ReceiveUDPTargetConfirmFrameAt(frame, 110); err != nil {
+		t.Fatal(err)
+	}
+	state, ok := p.FlowState(47)
+	if !ok {
+		t.Fatalf("confirmed local UDP flow was removed")
+	}
+	if state.ConfirmedTTLSeconds != 5 || state.ConfirmedAtUnix != 110 || state.TTLSeconds != 15 {
+		t.Fatalf("local UDP confirm TTL was not applied: %+v", state)
+	}
+	if _, err := p.SendUDP(47, []byte("fresh"), 114); err != nil {
+		t.Fatalf("fresh UDP datagram before confirmed TTL was rejected: %v", err)
+	}
+	if _, err := p.SendUDP(47, []byte("late"), 116); err == nil {
+		t.Fatalf("UDP datagram after confirmed target TTL was accepted")
+	}
+}
+
 func TestLocalProxyBuildsUDPStreamFrameForFallbackCarrier(t *testing.T) {
 	p := NewLocalProxy()
 	if _, err := p.OpenUDPWithFakeDNS(41, "example.com", []string{"93.184.216.34"}, 443, 100); err != nil {

@@ -60,6 +60,7 @@ type FlowState struct {
 	ConfirmedPort             uint16
 	ConfirmedDNSAnswerSetHash []byte
 	ConfirmedTTLSeconds       uint32
+	ConfirmedAtUnix           uint64
 	ConfirmedResolutionSource uint8
 	LocalClosed               bool
 	PeerClosed                bool
@@ -79,6 +80,10 @@ type DatagramOptions struct {
 	NowUnix               uint64
 	SentAtUnix            uint64
 	MaxRealtimeAgeSeconds uint64
+}
+
+type UDPConfirmOptions struct {
+	NowUnix uint64
 }
 
 type CloseOptions struct {
@@ -129,6 +134,10 @@ func (m *Manager) OpenWithOptions(open protocol.FlowOpen, opts FlowOptions) erro
 }
 
 func (m *Manager) ConfirmUDP(confirm protocol.UDPTargetConfirm) error {
+	return m.ConfirmUDPWithOptions(confirm, UDPConfirmOptions{})
+}
+
+func (m *Manager) ConfirmUDPWithOptions(confirm protocol.UDPTargetConfirm, opts UDPConfirmOptions) error {
 	if err := protocol.ValidateUDPTargetConfirm(confirm); err != nil {
 		return err
 	}
@@ -148,17 +157,23 @@ func (m *Manager) ConfirmUDP(confirm protocol.UDPTargetConfirm) error {
 	state.ConfirmedPort = confirm.SelectedPort
 	state.ConfirmedDNSAnswerSetHash = append([]byte(nil), confirm.DNSAnswerSetHash...)
 	state.ConfirmedTTLSeconds = confirm.TTLSeconds
+	state.ConfirmedAtUnix = opts.NowUnix
 	state.ConfirmedResolutionSource = confirm.ResolutionSource
+	applyUDPConfirmTTL(&state, opts.NowUnix, confirm.TTLSeconds)
 	m.flows[confirm.FlowID] = state
 	return nil
 }
 
 func (m *Manager) ConfirmUDPFrame(frame protocol.AuroraFrame) error {
+	return m.ConfirmUDPFrameWithOptions(frame, UDPConfirmOptions{})
+}
+
+func (m *Manager) ConfirmUDPFrameWithOptions(frame protocol.AuroraFrame, opts UDPConfirmOptions) error {
 	confirm, err := decodeUDPTargetConfirmFrame(frame)
 	if err != nil {
 		return err
 	}
-	return m.ConfirmUDP(confirm)
+	return m.ConfirmUDPWithOptions(confirm, opts)
 }
 
 func decodeUDPTargetConfirmFrame(frame protocol.AuroraFrame) (protocol.UDPTargetConfirm, error) {
@@ -192,6 +207,19 @@ func validateUDPConfirmAgainstFlow(state FlowState, confirm protocol.UDPTargetCo
 		return fmt.Errorf("flow: UDP target confirm DNS answer hash mismatch")
 	}
 	return nil
+}
+
+func applyUDPConfirmTTL(state *FlowState, now uint64, ttlSeconds uint32) {
+	if now == 0 || ttlSeconds == 0 {
+		return
+	}
+	if now < state.CreatedAtUnix {
+		now = state.CreatedAtUnix
+	}
+	confirmedTTL := now - state.CreatedAtUnix + uint64(ttlSeconds)
+	if state.TTLSeconds == 0 || confirmedTTL < state.TTLSeconds {
+		state.TTLSeconds = confirmedTTL
+	}
 }
 
 func (m *Manager) DemuxInbound(flowID uint64) (FlowState, bool) {

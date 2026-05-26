@@ -110,6 +110,9 @@ func VerifyCoverPrelude1Signatures(in CoverPreludeVerificationInput) ([]byte, er
 	if !suiteOffered(in.Descriptor.SupportedSuiteIDs, in.Suite) {
 		return nil, fmt.Errorf("handshake: selected suite is not supported by descriptor")
 	}
+	if err := ValidatePreludeHybridShares(in.Suite, in.Prelude0, in.Prelude1); err != nil {
+		return nil, err
+	}
 	if in.Prelude1.RelayEpochID != in.Descriptor.EpochID {
 		return nil, fmt.Errorf("handshake: relay epoch mismatch")
 	}

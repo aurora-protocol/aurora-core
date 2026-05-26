@@ -4,9 +4,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"testing"
 
 	"github.com/aurora-protocol/aurora-core/admission"
+	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
+	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/trust"
@@ -76,6 +79,39 @@ func TestVerifyCoverPrelude1SignaturesRequiresDescriptorBoundHash(t *testing.T) 
 	in.Prelude1.RelayDescriptorHash = hs(0xee, 48)
 	if _, err := VerifyCoverPrelude1Signatures(in); err == nil {
 		t.Fatalf("CoverPrelude1 with wrong descriptor hash accepted")
+	}
+}
+
+func TestVerifyCoverPrelude1ClassifiesMalformedHybridShares(t *testing.T) {
+	for name, mutate := range map[string]func(*CoverPreludeVerificationInput){
+		"client classical": func(in *CoverPreludeVerificationInput) {
+			in.Prelude0.ClientClassicalEphPub = []byte{0x01}
+		},
+		"server classical": func(in *CoverPreludeVerificationInput) {
+			in.Prelude1.ServerClassicalEphPub = []byte{0x02}
+		},
+		"client mlkem": func(in *CoverPreludeVerificationInput) {
+			in.Prelude0.ClientMLKEMEncapsulationKey = []byte{0x03}
+		},
+		"server mlkem": func(in *CoverPreludeVerificationInput) {
+			in.Prelude1.ServerMLKEMCiphertextToClient = []byte{0x04}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := signedCoverPreludeVerificationInput(t)
+			mutate(&in)
+			_, err := VerifyCoverPrelude1Signatures(in)
+			if err == nil {
+				t.Fatalf("malformed hybrid share was accepted")
+			}
+			var failureErr *FailureError
+			if !errors.As(err, &failureErr) || failureErr.Kind != failure.MalformedHybridShare {
+				t.Fatalf("malformed hybrid share error = %T %[1]v, want %v", err, failure.MalformedHybridShare)
+			}
+			if got := failure.Classify(failureErr.Kind); got.Action != failure.CoverOrigin {
+				t.Fatalf("malformed hybrid share classification = %+v", got)
+			}
+		})
 	}
 }
 
@@ -196,14 +232,30 @@ func signedCoverPreludeVerificationInput(t *testing.T) CoverPreludeVerificationI
 	if err != nil {
 		t.Fatal(err)
 	}
+	clientECDH, err := auroracrypto.GenerateECDHForSuite(registry.SuiteHybrid768AESGCM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverECDH, err := auroracrypto.GenerateECDHForSuite(registry.SuiteHybrid768AESGCM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientKEM, err := auroracrypto.GenerateMLKEM768()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, serverKEMCiphertext, err := auroracrypto.EncapsulateMLKEM768(clientKEM.EncapsulationKeyBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
 	coverTemplateHash := hs(0x07, 48)
 	p0 := protocol.CoverPrelude0{
 		MsgType:                     registry.MsgCoverPrelude0,
 		Version:                     registry.Version20,
 		SuiteOffers:                 []uint64{registry.SuiteHybrid768AESGCM},
 		ClientNonce:                 hs(0x08, 32),
-		ClientClassicalEphPub:       []byte{0x09},
-		ClientMLKEMEncapsulationKey: []byte{0x0a},
+		ClientClassicalEphPub:       clientECDH.PublicKeyBytes(),
+		ClientMLKEMEncapsulationKey: clientKEM.EncapsulationKeyBytes(),
 		RelayDescriptorHash:         descriptorHash,
 		CoverTemplateHash:           coverTemplateHash,
 		RequestClassID:              3,
@@ -222,8 +274,8 @@ func signedCoverPreludeVerificationInput(t *testing.T) CoverPreludeVerificationI
 		CoverTemplateHash:             coverTemplateHash,
 		RelayEpochID:                  descriptor.EpochID,
 		ServerNonce:                   hs(0x10, 32),
-		ServerClassicalEphPub:         []byte{0x11},
-		ServerMLKEMCiphertextToClient: []byte{0x12},
+		ServerClassicalEphPub:         serverECDH.PublicKeyBytes(),
+		ServerMLKEMCiphertextToClient: serverKEMCiphertext,
 		SelectedCoverProfileID:        hs(0x13, 16),
 		SelectedBootstrapEnvelopeID:   hs(0x14, 16),
 	}

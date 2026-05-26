@@ -3,6 +3,8 @@ package auroracrypto
 import (
 	"crypto/mlkem"
 	"fmt"
+
+	"github.com/aurora-protocol/aurora-core/registry"
 )
 
 type MLKEM768DecapsulationKey struct {
@@ -77,6 +79,41 @@ func EncapsulateMLKEM1024(encapsulationKey []byte) (sharedKey, ciphertext []byte
 	}
 	sharedKey, ciphertext = ek.Encapsulate()
 	return sharedKey, ciphertext, nil
+}
+
+func ValidateMLKEMEncapsulationKeyForSuite(suite uint64, encapsulationKey []byte) error {
+	switch suite {
+	case registry.SuiteHybrid768AESGCM, registry.SuiteHybrid768P256AESGCM, registry.SuiteHybrid768ChaCha20, registry.SuiteHybrid768P256ChaCha20:
+		_, err := mlkem.NewEncapsulationKey768(encapsulationKey)
+		return err
+	case registry.SuiteHybrid1024AESGCM, registry.SuiteHybrid1024ChaCha20:
+		_, err := mlkem.NewEncapsulationKey1024(encapsulationKey)
+		return err
+	default:
+		return fmt.Errorf("crypto: unsupported ML-KEM suite 0x%x", suite)
+	}
+}
+
+func ValidateMLKEMCiphertextForSuite(suite uint64, ciphertext []byte) error {
+	want, err := MLKEMCiphertextSizeForSuite(suite)
+	if err != nil {
+		return err
+	}
+	if len(ciphertext) != want {
+		return fmt.Errorf("crypto: ML-KEM ciphertext length %d, want %d", len(ciphertext), want)
+	}
+	return nil
+}
+
+func MLKEMCiphertextSizeForSuite(suite uint64) (int, error) {
+	switch suite {
+	case registry.SuiteHybrid768AESGCM, registry.SuiteHybrid768P256AESGCM, registry.SuiteHybrid768ChaCha20, registry.SuiteHybrid768P256ChaCha20:
+		return mlkem.CiphertextSize768, nil
+	case registry.SuiteHybrid1024AESGCM, registry.SuiteHybrid1024ChaCha20:
+		return mlkem.CiphertextSize1024, nil
+	default:
+		return 0, fmt.Errorf("crypto: unsupported ML-KEM suite 0x%x", suite)
+	}
 }
 
 func VerifyMLDSAUnsupported() error {

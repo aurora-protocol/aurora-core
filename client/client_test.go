@@ -148,6 +148,37 @@ func TestLocalProxyBuildsUDPDatagramFrameForLiveUDPFlow(t *testing.T) {
 	}
 }
 
+func TestLocalProxyBuildsUDPStreamFrameForFallbackCarrier(t *testing.T) {
+	p := NewLocalProxy()
+	if _, err := p.OpenUDPWithFakeDNS(41, "example.com", []string{"93.184.216.34"}, 443, 100); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := p.SendUDPWithMode(41, []byte("payload"), 101, transport.UDPOverStreamFallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.FrameType != registry.FrameStreamData || frame.FlowID != 41 || !bytes.Equal(frame.Payload, []byte("payload")) {
+		t.Fatalf("unexpected UDP stream fallback frame: %+v", frame)
+	}
+}
+
+func TestLocalProxyRejectsUnsupportedUDPModeWithoutRefreshingFlow(t *testing.T) {
+	p := NewLocalProxy()
+	if _, err := p.OpenUDPWithFakeDNS(42, "example.com", []string{"93.184.216.34"}, 443, 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.SendUDPWithMode(42, []byte("payload"), 101, transport.UDPUnsupported); err == nil {
+		t.Fatalf("unsupported UDP mode was accepted")
+	}
+	state, ok := p.FlowState(42)
+	if !ok {
+		t.Fatalf("flow was unexpectedly removed")
+	}
+	if state.LastActivityUnix != 100 {
+		t.Fatalf("unsupported UDP mode refreshed flow activity to %d", state.LastActivityUnix)
+	}
+}
+
 func TestLocalProxyRejectsDataForWrongOrExpiredFlow(t *testing.T) {
 	p := NewLocalProxy()
 	if err := p.OpenTCP(5, "example.com", 443); err != nil {

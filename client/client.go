@@ -161,6 +161,15 @@ func (p *LocalProxy) NextTCPFrame() (protocol.AuroraFrame, bool, error) {
 }
 
 func (p *LocalProxy) SendUDP(flowID uint64, data []byte, now uint64) (protocol.AuroraFrame, error) {
+	return p.SendUDPWithMode(flowID, data, now, transport.UDPNativeDatagram)
+}
+
+func (p *LocalProxy) SendUDPWithMode(flowID uint64, data []byte, now uint64, udpMode transport.UDPMode) (protocol.AuroraFrame, error) {
+	switch udpMode {
+	case transport.UDPNativeDatagram, transport.UDPOverStreamFallback:
+	default:
+		return protocol.AuroraFrame{}, fmt.Errorf("client: UDP mode %d is unsupported", udpMode)
+	}
 	state, ok := p.flows.AcceptDatagram(flowID, now)
 	if !ok {
 		return protocol.AuroraFrame{}, fmt.Errorf("client: UDP flow %d is unavailable", flowID)
@@ -168,7 +177,10 @@ func (p *LocalProxy) SendUDP(flowID uint64, data []byte, now uint64) (protocol.A
 	if state.Kind != flow.FlowKindUDPAssociation {
 		return protocol.AuroraFrame{}, fmt.Errorf("client: flow %d is not UDP", flowID)
 	}
-	return protocol.NewDatagramDataFrame(flowID, data, 0)
+	if udpMode == transport.UDPNativeDatagram {
+		return protocol.NewDatagramDataFrame(flowID, data, 0)
+	}
+	return protocol.NewStreamDataFrame(flowID, data, 0)
 }
 
 func (p *LocalProxy) CloseFrame(flowID uint64, finalSequenceHint uint64, reason []byte) (protocol.AuroraFrame, error) {

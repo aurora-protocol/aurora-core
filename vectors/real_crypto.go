@@ -11,6 +11,7 @@ import (
 
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/handshake"
+	"github.com/aurora-protocol/aurora-core/packet"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/route"
@@ -33,6 +34,23 @@ type FirstHopRealCryptoBundle struct {
 	CoverPrelude0                   string
 	CoverPrelude1                   string
 	PreludeTranscriptHash           string
+}
+
+type FirstHopControlApplicationRealCryptoBundle struct {
+	HandshakeBindingContext          string
+	CoverCapsule1Plaintext           string
+	CoverCapsule1Ciphertext          string
+	ClientFinished                   string
+	CoverCapsule2Plaintext           string
+	CoverCapsule2Ciphertext          string
+	ServerFinished                   string
+	ApplicationTranscriptHash        string
+	ClientAppSecret0                 string
+	ClientAppKey0                    string
+	ClientAppIV0                     string
+	FirstApplicationPacket           string
+	FirstApplicationPacketFrameBlock string
+	FirstApplicationPacketAuthTag    string
 }
 
 type RoutePreludeRealCryptoBundle struct {
@@ -447,6 +465,186 @@ func GenerateFirstHopRealCryptoBundle() (FirstHopRealCryptoBundle, error) {
 	}, nil
 }
 
+func GenerateFirstHopControlAndApplicationRealCryptoBundle() (FirstHopControlApplicationRealCryptoBundle, error) {
+	const suite = registry.SuiteHybrid768P256AESGCM
+
+	prelude, err := GenerateFirstHopRealCryptoBundle()
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	decode := func(name, value string) ([]byte, error) {
+		decoded, err := hex.DecodeString(value)
+		if err != nil {
+			return nil, fmt.Errorf("vectors: decode %s: %w", name, err)
+		}
+		return decoded, nil
+	}
+	classicalShared, err := decode("first_hop_classical_shared_secret", prelude.ClassicalSharedSecret)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	mlkemShared, err := decode("first_hop_mlkem_shared_secret", prelude.MLKEMSharedSecret)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	transcript, err := decode("first_hop_prelude_transcript_hash", prelude.PreludeTranscriptHash)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	handshakeBindingContext, err := handshake.FirstHopBindingContext(repeated(0xa0, 48), repeated(0xa1, 48))
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	secrets, err := handshake.DeriveHandshakeSecrets(suite, mlkemShared, classicalShared, handshakeBindingContext, transcript)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	ctx := handshake.ControlCapsuleContext{
+		SelectedVersion:                 registry.Version20,
+		SelectedSuite:                   suite,
+		RouteInstanceID:                 1,
+		HopIndex:                        0,
+		HandshakeBindingContext:         handshakeBindingContext,
+		PreludeTranscriptHashForThisHop: transcript,
+		ClientHSKey:                     secrets.ClientHSKey,
+		ClientHSIV:                      secrets.ClientHSIV,
+		ServerHSKey:                     secrets.ServerHSKey,
+		ServerHSIV:                      secrets.ServerHSIV,
+	}
+
+	capsule1 := protocol.CoverCapsule1Plain{
+		MsgType:              registry.MsgCoverCapsule1,
+		RouteInstanceID:      ctx.RouteInstanceID,
+		AdmissionProof:       sampleFirstHopAdmissionProof(),
+		ReplayProof:          sampleFirstHopReplayProof(),
+		PolicyOffer:          sampleFirstHopPolicyOffer(),
+		ClientTransportHints: sampleFirstHopClientTransportHints(),
+		Padding:              repeated(0xd9, 16),
+	}
+	if err := capsule1.AdmissionProof.ValidateStructural(1700000100, true); err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	if err := capsule1.ReplayProof.ValidateStructural(); err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	if err := capsule1.ClientTransportHints.ValidatePrototype(); err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	capsule1.ClientFinished, err = handshake.ComputeClientFinished(suite, secrets.ClientFinishedKey, transcript, capsule1)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	capsule1Plaintext, err := wire.Encode(capsule1)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	capsule1Ciphertext, err := handshake.SealCoverCapsule1(ctx, capsule1)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	openedCapsule1, err := handshake.OpenCoverCapsule1(ctx, capsule1Ciphertext)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	openedCapsule1Plaintext, err := wire.Encode(openedCapsule1)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	if !bytes.Equal(capsule1Plaintext, openedCapsule1Plaintext) {
+		return FirstHopControlApplicationRealCryptoBundle{}, fmt.Errorf("vectors: CoverCapsule1 open mismatch")
+	}
+
+	accept := sampleFirstHopPolicyAccept()
+	serverFinished, capsule1Hash, policyAcceptHash, err := handshake.ComputeServerFinished(suite, secrets.ServerFinishedKey, transcript, capsule1, accept)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	capsule2 := protocol.CoverCapsule2Plain{
+		MsgType:         registry.MsgCoverCapsule2,
+		RouteInstanceID: ctx.RouteInstanceID,
+		PolicyAccept:    accept,
+		ServerFinished:  serverFinished,
+		Padding:         repeated(0xda, 16),
+	}
+	capsule2Plaintext, err := wire.Encode(capsule2)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	capsule2Ciphertext, err := handshake.SealCoverCapsule2(ctx, capsule2)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	openedCapsule2, err := handshake.OpenCoverCapsule2(ctx, capsule2Ciphertext)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	openedCapsule2Plaintext, err := wire.Encode(openedCapsule2)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	if !bytes.Equal(capsule2Plaintext, openedCapsule2Plaintext) {
+		return FirstHopControlApplicationRealCryptoBundle{}, fmt.Errorf("vectors: CoverCapsule2 open mismatch")
+	}
+
+	app, err := handshake.DeriveApplicationSecrets(suite, secrets.HandshakeSecret, transcript, capsule1Hash, policyAcceptHash, serverFinished)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	firstPacketBlock, err := firstHopApplicationFrameBlock()
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	firstPacketFrameBlock, err := wire.Encode(firstPacketBlock)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	protector := &packet.Protector{
+		Suite:           suite,
+		RouteInstanceID: ctx.RouteInstanceID,
+		HopLayer:        0,
+		Direction:       handshake.ControlDirectionClientToHop,
+		KeyPhase:        0,
+		Key:             app.ClientAppKey0,
+		StaticIV:        app.ClientAppIV0,
+	}
+	firstPacket, err := protector.Seal(firstPacketBlock)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	openedFirstPacketBlock, err := protector.Open(firstPacket)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	openedFirstPacketFrameBlock, err := wire.Encode(openedFirstPacketBlock)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+	if !bytes.Equal(firstPacketFrameBlock, openedFirstPacketFrameBlock) {
+		return FirstHopControlApplicationRealCryptoBundle{}, fmt.Errorf("vectors: first application packet open mismatch")
+	}
+	encodedFirstPacket, err := wire.Encode(firstPacket)
+	if err != nil {
+		return FirstHopControlApplicationRealCryptoBundle{}, err
+	}
+
+	return FirstHopControlApplicationRealCryptoBundle{
+		HandshakeBindingContext:          hex.EncodeToString(handshakeBindingContext),
+		CoverCapsule1Plaintext:           hex.EncodeToString(capsule1Plaintext),
+		CoverCapsule1Ciphertext:          hex.EncodeToString(capsule1Ciphertext),
+		ClientFinished:                   hex.EncodeToString(capsule1.ClientFinished),
+		CoverCapsule2Plaintext:           hex.EncodeToString(capsule2Plaintext),
+		CoverCapsule2Ciphertext:          hex.EncodeToString(capsule2Ciphertext),
+		ServerFinished:                   hex.EncodeToString(serverFinished),
+		ApplicationTranscriptHash:        hex.EncodeToString(app.ApplicationTranscriptHash),
+		ClientAppSecret0:                 hex.EncodeToString(app.ClientAppSecret0),
+		ClientAppKey0:                    hex.EncodeToString(app.ClientAppKey0),
+		ClientAppIV0:                     hex.EncodeToString(app.ClientAppIV0),
+		FirstApplicationPacketFrameBlock: hex.EncodeToString(firstPacketFrameBlock),
+		FirstApplicationPacket:           hex.EncodeToString(encodedFirstPacket),
+		FirstApplicationPacketAuthTag:    hex.EncodeToString(firstPacket.AuthTag),
+	}, nil
+}
+
 func GenerateRoutePreludeRealCryptoBundle() (RoutePreludeRealCryptoBundle, error) {
 	const suite = registry.SuiteHybrid768P256AESGCM
 
@@ -634,6 +832,108 @@ func GenerateRoutePreludeRealCryptoBundle() (RoutePreludeRealCryptoBundle, error
 		RouteServerPreludeSignatureClassical: hex.EncodeToString(p1.ServerPreludeSignatureClassical),
 		RouteServerPreludeSignaturePQ:        hex.EncodeToString(p1.ServerPreludeSignaturePQ),
 	}, nil
+}
+
+func sampleFirstHopAdmissionProof() protocol.AdmissionProof {
+	return protocol.AdmissionProof{
+		ProofVersion:          registry.Version20,
+		ProofType:             registry.ProofLabStaticToken,
+		IssuerID:              repeated(0xd0, 16),
+		TokenKeyID:            repeated(0xd1, 32),
+		RelayBucketID:         repeated(0xd2, 16),
+		TokenScopeID:          repeated(0xd3, 16),
+		ExpiryUnix:            1700007200,
+		TokenNonce:            repeated(0xd4, 32),
+		RedemptionContextHash: repeated(0xd5, 48),
+		TokenPublicMetadata:   []byte("first-hop lab token"),
+		TokenAuthenticator:    repeated(0xd6, 32),
+	}
+}
+
+func sampleFirstHopReplayProof() protocol.ReplayProof {
+	return protocol.ReplayProof{
+		ProofVersion:        registry.Version20,
+		ReplayEpochID:       10,
+		TokenRedemptionHash: repeated(0xd7, 48),
+		ClientReplayNonce:   repeated(0xd8, 32),
+		ReplayContextHash:   repeated(0xd9, 48),
+		ReplayWindowID:      repeated(0xda, 16),
+	}
+}
+
+func sampleFirstHopPolicyOffer() protocol.PolicyOffer {
+	return protocol.PolicyOffer{
+		OfferedVersions:         []uint64{registry.Version20},
+		OfferedSuites:           []uint64{registry.SuiteHybrid768P256AESGCM},
+		OfferedMethods:          []uint64{registry.MethodWebH2Stream, registry.MethodWebH1WS},
+		MinimumPolicyID:         registry.PolicyAdversarialDPI,
+		RequestedPolicyID:       registry.PolicyAdversarialDPI,
+		RequestedRouteModeID:    registry.RouteSplit2,
+		RequestedShapeID:        registry.ShapeNormal,
+		TunnelPersonalityOffers: []uint64{registry.PersonalityProxyFlow},
+		FlowCapabilities:        0x03,
+		MaxPaddingOverheadPct:   15,
+	}
+}
+
+func sampleFirstHopClientTransportHints() protocol.ClientTransportHints {
+	return protocol.ClientTransportHints{
+		ObservedPathMTUBucket:  2,
+		RecentQUICResult:       1,
+		RecentH2Result:         3,
+		CongestionClass:        1,
+		MaxDatagramPayloadHint: 1200,
+		NetworkCohortHint:      []byte("fh-cohort"),
+		Padding:                repeated(0xdb, 8),
+	}
+}
+
+func sampleFirstHopPolicyAccept() protocol.PolicyAccept {
+	return protocol.PolicyAccept{
+		SelectedVersion:           registry.Version20,
+		SelectedSuite:             registry.SuiteHybrid768P256AESGCM,
+		SelectedMethod:            registry.MethodWebH2Stream,
+		SelectedPolicy:            registry.PolicyAdversarialDPI,
+		SelectedRouteModeID:       registry.RouteSplit2,
+		SelectedShape:             registry.ShapeNormal,
+		SelectedTunnelPersonality: registry.PersonalityProxyFlow,
+		FallbackMethods:           []uint64{registry.MethodWebH1WS},
+		RetryPolicyID:             registry.PolicyAdversarialDPI,
+		PathValidationPolicyID:    registry.PolicyAdversarialDPI,
+	}
+}
+
+func firstHopApplicationFrameBlock() (protocol.FrameBlock, error) {
+	flowOpen := protocol.FlowOpen{
+		FlowOpenVersion:    registry.Version20,
+		FlowID:             7,
+		FlowKind:           0x02,
+		TargetKind:         0x03,
+		TargetHost:         []byte("example.net"),
+		TargetPort:         443,
+		UDPFQDNMode:        0x01,
+		NameBindingID:      repeated(0xe1, 16),
+		OriginalDomainHint: []byte("example.net"),
+		DNSAnswerSetHash:   repeated(0xe2, 48),
+		LocalBindingMode:   0x02,
+		PriorityClass:      0x03,
+	}
+	if err := protocol.ValidateFlowOpen(flowOpen); err != nil {
+		return protocol.FrameBlock{}, err
+	}
+	payload, err := protocol.Encode(flowOpen)
+	if err != nil {
+		return protocol.FrameBlock{}, err
+	}
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{
+		FrameType: registry.FrameFlowOpen,
+		FlowID:    flowOpen.FlowID,
+		Payload:   payload,
+	}}}
+	if err := protocol.ValidateFrameBlockForDirection(block, handshake.ControlDirectionClientToHop); err != nil {
+		return protocol.FrameBlock{}, err
+	}
+	return block, nil
 }
 
 func routeWrapInput(env route.EnvelopeInput) auroracrypto.RouteWrapInput {

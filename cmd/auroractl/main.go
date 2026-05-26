@@ -118,6 +118,10 @@ func writeRealCryptoVectors(w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	firstHopControl, err := corevectors.GenerateFirstHopControlAndApplicationRealCryptoBundle()
+	if err != nil {
+		return err
+	}
 	routePrelude, err := corevectors.GenerateRoutePreludeRealCryptoBundle()
 	if err != nil {
 		return err
@@ -157,6 +161,20 @@ func writeRealCryptoVectors(w io.Writer) error {
 	fmt.Fprintln(w, "first_hop_cover_prelude0:", firstHop.CoverPrelude0)
 	fmt.Fprintln(w, "first_hop_cover_prelude1:", firstHop.CoverPrelude1)
 	fmt.Fprintln(w, "first_hop_prelude_transcript_hash:", firstHop.PreludeTranscriptHash)
+	fmt.Fprintln(w, "first_hop_handshake_binding_context:", firstHopControl.HandshakeBindingContext)
+	fmt.Fprintln(w, "first_hop_cover_capsule1_plaintext:", firstHopControl.CoverCapsule1Plaintext)
+	fmt.Fprintln(w, "first_hop_cover_capsule1_ciphertext:", firstHopControl.CoverCapsule1Ciphertext)
+	fmt.Fprintln(w, "first_hop_client_finished:", firstHopControl.ClientFinished)
+	fmt.Fprintln(w, "first_hop_cover_capsule2_plaintext:", firstHopControl.CoverCapsule2Plaintext)
+	fmt.Fprintln(w, "first_hop_cover_capsule2_ciphertext:", firstHopControl.CoverCapsule2Ciphertext)
+	fmt.Fprintln(w, "first_hop_server_finished:", firstHopControl.ServerFinished)
+	fmt.Fprintln(w, "first_hop_application_transcript_hash:", firstHopControl.ApplicationTranscriptHash)
+	fmt.Fprintln(w, "first_hop_client_app_secret0:", firstHopControl.ClientAppSecret0)
+	fmt.Fprintln(w, "first_hop_client_app_key0:", firstHopControl.ClientAppKey0)
+	fmt.Fprintln(w, "first_hop_client_app_iv0:", firstHopControl.ClientAppIV0)
+	fmt.Fprintln(w, "first_hop_first_application_packet_frame_block:", firstHopControl.FirstApplicationPacketFrameBlock)
+	fmt.Fprintln(w, "first_hop_first_application_packet:", firstHopControl.FirstApplicationPacket)
+	fmt.Fprintln(w, "first_hop_first_application_packet_auth_tag:", firstHopControl.FirstApplicationPacketAuthTag)
 	fmt.Fprintln(w, "split2_route_prelude_envelope:", routePrelude.RoutePreludeEnvelope)
 	fmt.Fprintln(w, "split2_route_prelude0_plaintext:", routePrelude.RoutePrelude0Plaintext)
 	fmt.Fprintln(w, "split2_route_prelude1:", routePrelude.RoutePrelude1)
@@ -280,9 +298,9 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- Appendix B.4 and B.5 structural vectors")
 	fmt.Fprintln(w, "- DirectoryConsensus, RelayDescriptor, CoverTemplate trust hashes, signature inputs, and strict ML-DSA authority quorum")
 	fmt.Fprintln(w, "- AES-256-GCM, HKDF labels, SHA-384/SHA-512 suite hashes, ML-KEM wrappers, ML-KEM provider agreement, and ML-DSA verification")
-	fmt.Fprintln(w, "- first-hop prelude transcript hashing, Finished messages, and application secret derivation")
+	fmt.Fprintln(w, "- first-hop prelude transcript hashing, sealed control capsules, Finished messages, application secret derivation, and first packet sealing")
 	fmt.Fprintln(w, "- signed directory, relay descriptor, and cover-template real-crypto vectors")
-	fmt.Fprintln(w, "- first-hop, split-2 route-prelude, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, and ML-DSA artifacts")
+	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
 	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing")
 	fmt.Fprintln(w, "not production-complete:")

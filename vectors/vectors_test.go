@@ -69,6 +69,41 @@ func TestFirstHopRealCryptoBundleIsDeterministicAndVerifiable(t *testing.T) {
 	}
 }
 
+func TestFirstHopControlAndApplicationRealCryptoBundleIsDeterministicAndVerifiable(t *testing.T) {
+	first, err := GenerateFirstHopControlAndApplicationRealCryptoBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := GenerateFirstHopControlAndApplicationRealCryptoBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("first-hop control/application real crypto vector is not deterministic:\nfirst=%+v\nsecond=%+v", first, second)
+	}
+	assertHexLen := func(name, value string, wantBytes int) {
+		t.Helper()
+		decoded, err := hex.DecodeString(value)
+		if err != nil {
+			t.Fatalf("%s is not hex: %v", name, err)
+		}
+		if len(decoded) != wantBytes {
+			t.Fatalf("%s length = %d, want %d", name, len(decoded), wantBytes)
+		}
+	}
+	assertHexLen("first_hop_handshake_binding_context", first.HandshakeBindingContext, 48)
+	assertHexLen("first_hop_client_finished", first.ClientFinished, 48)
+	assertHexLen("first_hop_server_finished", first.ServerFinished, 48)
+	assertHexLen("first_hop_application_transcript_hash", first.ApplicationTranscriptHash, 48)
+	assertHexLen("first_hop_client_app_secret0", first.ClientAppSecret0, 48)
+	assertHexLen("first_hop_client_app_key0", first.ClientAppKey0, 32)
+	assertHexLen("first_hop_client_app_iv0", first.ClientAppIV0, 12)
+	assertHexLen("first_hop_first_application_packet_auth_tag", first.FirstApplicationPacketAuthTag, 16)
+	if first.CoverCapsule1Plaintext == "" || first.CoverCapsule1Ciphertext == "" || first.CoverCapsule2Plaintext == "" || first.CoverCapsule2Ciphertext == "" || first.FirstApplicationPacket == "" || first.FirstApplicationPacketFrameBlock == "" {
+		t.Fatalf("first-hop control/application vector omitted required fields: %+v", first)
+	}
+}
+
 func TestTrustMetadataRealCryptoBundleIsDeterministicAndVerifiable(t *testing.T) {
 	first, err := GenerateTrustMetadataRealCryptoBundle()
 	if err != nil {

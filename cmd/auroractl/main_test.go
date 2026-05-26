@@ -78,7 +78,7 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "ML-DSA verification") {
 		t.Fatalf("capabilities output missing ML-DSA verification:\n%s", text)
 	}
-	if !strings.Contains(text, "first-hop, split-2 route-prelude, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors") {
+	if !strings.Contains(text, "first-hop prelude, first-hop control/application packets, split-2 route-prelude, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors") {
 		t.Fatalf("capabilities output missing real-crypto vector coverage:\n%s", text)
 	}
 	if !strings.Contains(text, "signed directory, relay descriptor, and cover-template real-crypto vectors") {
@@ -140,6 +140,20 @@ func TestVectorsCommandPrintsFirstHopRealCryptoVectors(t *testing.T) {
 		"first_hop_prelude_transcript_hash: ",
 		"first_hop_mlkem_shared_secret: ",
 		"first_hop_server_prelude_signature_pq: ",
+		"first_hop_handshake_binding_context: ",
+		"first_hop_cover_capsule1_plaintext: ",
+		"first_hop_cover_capsule1_ciphertext: ",
+		"first_hop_client_finished: ",
+		"first_hop_cover_capsule2_plaintext: ",
+		"first_hop_cover_capsule2_ciphertext: ",
+		"first_hop_server_finished: ",
+		"first_hop_application_transcript_hash: ",
+		"first_hop_client_app_secret0: ",
+		"first_hop_client_app_key0: ",
+		"first_hop_client_app_iv0: ",
+		"first_hop_first_application_packet_frame_block: ",
+		"first_hop_first_application_packet: ",
+		"first_hop_first_application_packet_auth_tag: ",
 		"split2_route_prelude_envelope: ",
 		"split2_route_prelude0_plaintext: ",
 		"split2_route_prelude1: ",

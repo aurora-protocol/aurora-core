@@ -55,21 +55,76 @@ func SafeField(key string, value any, labEnabled bool) Field {
 func SanitizeMessage(msg string) string {
 	for _, token := range []string{
 		"AdmissionProof",
+		"admission_proof",
+		"admission-proof",
+		"admission proof",
 		"ReplayProof",
+		"replay_proof",
+		"replay-proof",
+		"replay proof",
 		"token_authenticator",
+		"token-authenticator",
+		"token authenticator",
 		"hint_secret",
+		"hint-secret",
+		"hint secret",
 		"bridge_locator",
+		"bridge-locator",
+		"bridge locator",
 		"private_relay_ip",
+		"private-relay-ip",
+		"private relay ip",
 		"cover_origin",
+		"cover-origin",
+		"cover origin",
 		"admission_key",
+		"admission-key",
+		"admission key",
 		"bucket_user_mapping",
+		"bucket-user-mapping",
+		"bucket user mapping",
 		"CoverCapsule plaintext",
+		"cover-capsule plaintext",
+		"cover_capsule_plaintext",
+		"cover-capsule-plaintext",
 		"raw capsule plaintext",
+		"raw_capsule_plaintext",
+		"raw-capsule-plaintext",
 		"route-wrap plaintext",
+		"route_wrap_plaintext",
+		"route wrap plaintext",
+		"route_prelude_plaintext",
+		"route-prelude-plaintext",
+		"route prelude plaintext",
 	} {
-		msg = strings.ReplaceAll(msg, token, "[redacted-field]")
+		msg = replaceCaseInsensitive(msg, token, "[redacted-field]")
 	}
 	return msg
+}
+
+func replaceCaseInsensitive(msg, token, replacement string) string {
+	if token == "" || msg == "" {
+		return msg
+	}
+	lowerMsg := strings.ToLower(msg)
+	lowerToken := strings.ToLower(token)
+	start := 0
+	var out strings.Builder
+	for {
+		idx := strings.Index(lowerMsg[start:], lowerToken)
+		if idx < 0 {
+			break
+		}
+		idx += start
+		out.WriteString(msg[start:idx])
+		out.WriteString(replacement)
+		start = idx + len(token)
+	}
+	if start == 0 {
+		return msg
+	}
+	out.WriteString(msg[start:])
+	return out.String()
 }
 
 func isSensitiveFieldKey(key string) bool {

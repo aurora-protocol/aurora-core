@@ -21,6 +21,20 @@ func TestSanitizeMessageRemovesSensitiveFieldNames(t *testing.T) {
 	}
 }
 
+func TestSanitizeMessageRemovesSensitiveFieldAliasesCaseInsensitively(t *testing.T) {
+	got := SanitizeMessage("admission_proof Replay Proof TOKEN AUTHENTICATOR hint-secret")
+	for _, token := range []string{
+		"admission_proof",
+		"Replay Proof",
+		"TOKEN AUTHENTICATOR",
+		"hint-secret",
+	} {
+		if strings.Contains(strings.ToLower(got), strings.ToLower(token)) {
+			t.Fatalf("message still contained %q after sanitization: %s", token, got)
+		}
+	}
+}
+
 func TestSanitizeMessageRemovesRawCapsulePlaintext(t *testing.T) {
 	got := SanitizeMessage("decoder rejected raw capsule plaintext before route-wrap plaintext")
 	for _, token := range []string{"raw capsule plaintext", "route-wrap plaintext"} {

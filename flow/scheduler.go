@@ -10,6 +10,7 @@ type StreamChunk struct {
 	FlowID        uint64
 	PriorityClass uint8
 	Data          []byte
+	Flags         uint64
 }
 
 type Scheduler struct {
@@ -35,6 +36,7 @@ func (s *Scheduler) Enqueue(chunk StreamChunk) error {
 		FlowID:        chunk.FlowID,
 		PriorityClass: chunk.PriorityClass,
 		Data:          append([]byte(nil), chunk.Data...),
+		Flags:         chunk.Flags,
 	}
 	switch chunk.PriorityClass {
 	case PriorityRealtime:

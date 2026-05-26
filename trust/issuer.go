@@ -38,8 +38,8 @@ func IssuerMetadataSignatureInput(m protocol.IssuerMetadata) ([]byte, error) {
 }
 
 func VerifyIssuerMetadataSignature(m protocol.IssuerMetadata, keys []protocol.AuthorityKeyRecord, now uint64) error {
-	if now < m.ValidFromUnix || now >= m.ValidUntilUnix {
-		return fmt.Errorf("trust: issuer metadata outside validity interval")
+	if err := m.ValidateStructural(now, false); err != nil {
+		return err
 	}
 	if err := ValidateIssuerServiceAuthKeySeparation(m, keys, now); err != nil {
 		return err

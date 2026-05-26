@@ -3,6 +3,7 @@ package trust
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"testing"
@@ -137,6 +138,103 @@ func TestVerifyIssuerMetadataSignatureAcceptsAuthorizedAuthority(t *testing.T) {
 	keys[0].UsageFlags = registry.UsageMaySignDirectoryConsensus
 	if err := VerifyIssuerMetadataSignature(m, keys, 200); err == nil {
 		t.Fatalf("issuer metadata signing key without issuer usage accepted")
+	}
+}
+
+func TestVerifyIssuerMetadataSignatureRejectsStructurallyInvalidMetadata(t *testing.T) {
+	for name, mutate := range map[string]func(*protocol.IssuerMetadata){
+		"unsupported version": func(m *protocol.IssuerMetadata) {
+			m.MetadataVersion = 0
+		},
+		"unknown critical extension": func(m *protocol.IssuerMetadata) {
+			m.Extensions = []protocol.Extension{{
+				ExtensionType: 0x7001,
+				Critical:      true,
+				Body:          []byte("required"),
+			}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := protocol.IssuerMetadata{
+				MetadataVersion:      registry.Version20,
+				IssuerID:             rb(0x20, 16),
+				ValidFromUnix:        100,
+				ValidUntilUnix:       300,
+				IssuerName:           []byte("issuer.example"),
+				SupportedProofTypes:  []uint64{registry.ProofBlindRSA2048},
+				MetadataSigningKeyID: rb(0x21, 16),
+				SignatureScheme:      registry.SigECDSAP256SHA384DER,
+				KeyEncoding:          registry.KeyP256SEC1Uncompressed,
+			}
+			mutate(&m)
+			input, err := IssuerMetadataSignatureInput(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.MetadataSignature, err = ecdsa.SignASN1(rand.Reader, priv, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			keys := []protocol.AuthorityKeyRecord{{
+				AuthorityID:    rb(0x22, 16),
+				AuthorityKeyID: m.MetadataSigningKeyID,
+				PublicKey: protocol.PublicKeyRecord{
+					SignatureScheme: m.SignatureScheme,
+					KeyEncoding:     m.KeyEncoding,
+					PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+				},
+				ValidFromUnix:  90,
+				ValidUntilUnix: 400,
+				KeyStatus:      registry.AuthorityActive,
+				UsageFlags:     registry.UsageMaySignIssuerMetadata,
+			}}
+			if err := VerifyIssuerMetadataSignature(m, keys, 200); err == nil {
+				t.Fatalf("structurally invalid issuer metadata accepted")
+			}
+		})
+	}
+}
+
+func TestVerifyIssuerMetadataSignatureRejectsLabSigningScheme(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := protocol.IssuerMetadata{
+		MetadataVersion:      registry.Version20,
+		IssuerID:             rb(0x20, 16),
+		ValidFromUnix:        100,
+		ValidUntilUnix:       300,
+		IssuerName:           []byte("issuer.example"),
+		SupportedProofTypes:  []uint64{registry.ProofBlindRSA2048},
+		MetadataSigningKeyID: rb(0x21, 16),
+		SignatureScheme:      registry.SigEd25519Lab,
+		KeyEncoding:          registry.KeyEd25519RawPublic,
+	}
+	input, err := IssuerMetadataSignatureInput(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.MetadataSignature = ed25519.Sign(privateKey, input)
+	keys := []protocol.AuthorityKeyRecord{{
+		AuthorityID:    rb(0x22, 16),
+		AuthorityKeyID: m.MetadataSigningKeyID,
+		PublicKey: protocol.PublicKeyRecord{
+			SignatureScheme: m.SignatureScheme,
+			KeyEncoding:     m.KeyEncoding,
+			PublicKey:       publicKey,
+		},
+		ValidFromUnix:  90,
+		ValidUntilUnix: 400,
+		KeyStatus:      registry.AuthorityActive,
+		UsageFlags:     registry.UsageMaySignIssuerMetadata,
+	}}
+	if err := VerifyIssuerMetadataSignature(m, keys, 200); err == nil {
+		t.Fatalf("lab-only issuer metadata signing scheme accepted")
 	}
 }
 

@@ -80,6 +80,47 @@ func (r IssuerTokenKeyRecord) Validate(now uint64) error {
 	return nil
 }
 
+func (r IssuerTokenKeyRecord) validateStructural(allowLab bool) error {
+	if len(r.TokenKeyID) != 32 {
+		return fmt.Errorf("protocol: issuer token key id must be 32 bytes")
+	}
+	if r.ValidUntilUnix <= r.ValidFromUnix {
+		return fmt.Errorf("protocol: issuer token key validity interval is empty")
+	}
+	if err := validateIssuerStatusKnown(r.KeyStatus, "issuer token key"); err != nil {
+		return err
+	}
+	switch r.ProofType {
+	case registry.ProofVOPRFP384SHA384:
+		if r.TokenVerificationKey.TokenVerificationKeyScheme != registry.TokenKeyVOPRFP384SHA384 {
+			return fmt.Errorf("protocol: VOPRF proof requires VOPRF token key scheme")
+		}
+		return r.validateProductionTokenKeyID()
+	case registry.ProofBlindRSA2048:
+		if r.TokenVerificationKey.TokenVerificationKeyScheme != registry.TokenKeyBlindRSA2048 {
+			return fmt.Errorf("protocol: Blind RSA proof requires Blind RSA token key scheme")
+		}
+		return r.validateProductionTokenKeyID()
+	case registry.ProofOpaqueIssuer:
+		if r.TokenVerificationKey.TokenVerificationKeyScheme < 0x7000 || r.TokenVerificationKey.TokenVerificationKeyScheme > 0x7eff {
+			return fmt.Errorf("protocol: opaque issuer proof requires private token key scheme")
+		}
+	case registry.ProofLabStaticToken:
+		if !allowLab {
+			return fmt.Errorf("protocol: lab issuer token key disabled")
+		}
+		if r.TokenVerificationKey.TokenVerificationKeyScheme != registry.TokenKeyLabStaticNoKey {
+			return fmt.Errorf("protocol: lab static proof requires lab token key scheme")
+		}
+		if len(r.TokenVerificationKey.TokenVerificationKey) != 0 {
+			return fmt.Errorf("protocol: lab static token key must be empty")
+		}
+	default:
+		return fmt.Errorf("protocol: unknown issuer proof type 0x%x", r.ProofType)
+	}
+	return nil
+}
+
 func (r IssuerTokenKeyRecord) validateProductionTokenKeyID() error {
 	sum := sha256.Sum256(r.TokenVerificationKey.TokenVerificationKey)
 	if !bytes.Equal(r.TokenKeyID, sum[:]) {
@@ -348,6 +389,117 @@ func DecodeIssuerMetadata(r *wire.Reader) IssuerMetadata {
 	out.MetadataSignature = r.ReadOpaque16()
 	out.Extensions = DecodeExtensions(r)
 	return out
+}
+
+func (m IssuerMetadata) ValidateStructural(now uint64, allowLab bool) error {
+	if m.MetadataVersion != registry.Version20 {
+		return fmt.Errorf("protocol: unsupported issuer metadata version 0x%x", m.MetadataVersion)
+	}
+	if len(m.IssuerID) != 16 {
+		return fmt.Errorf("protocol: issuer id must be 16 bytes")
+	}
+	if now < m.ValidFromUnix || now >= m.ValidUntilUnix {
+		return fmt.Errorf("protocol: issuer metadata outside validity interval")
+	}
+	if len(m.MetadataSigningKeyID) != 16 {
+		return fmt.Errorf("protocol: metadata signing key id must be 16 bytes")
+	}
+	if err := validateIssuerPublicKeyCompatibility(PublicKeyRecord{SignatureScheme: m.SignatureScheme, KeyEncoding: m.KeyEncoding}, allowLab); err != nil {
+		return err
+	}
+	for _, proofType := range m.SupportedProofTypes {
+		if err := validateIssuerProofTypeKnown(proofType, allowLab); err != nil {
+			return err
+		}
+	}
+	for _, key := range m.TokenKeyMappings {
+		if err := key.validateStructural(allowLab); err != nil {
+			return err
+		}
+	}
+	for _, policy := range m.OriginInfoPolicies {
+		if policy.ValidUntilUnix <= policy.ValidFromUnix {
+			return fmt.Errorf("protocol: origin info policy validity interval is empty")
+		}
+	}
+	for _, scope := range m.RelayBucketScopes {
+		if len(scope.RelayBucketID) != 16 || len(scope.TokenScopeID) != 16 {
+			return fmt.Errorf("protocol: relay bucket scope ids must be 16 bytes")
+		}
+		if scope.ValidUntilUnix <= scope.ValidFromUnix {
+			return fmt.Errorf("protocol: relay bucket scope validity interval is empty")
+		}
+	}
+	for _, policy := range m.AuxiliaryBindingPolicies {
+		if err := validateIssuerProofTypeKnown(policy.ProofType, allowLab); err != nil {
+			return err
+		}
+	}
+	for _, service := range m.VerifierServices {
+		if err := service.validateStructural(allowLab); err != nil {
+			return err
+		}
+	}
+	if err := ValidateExtensions(m.Extensions, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateIssuerProofTypeKnown(proofType uint64, allowLab bool) error {
+	switch proofType {
+	case registry.ProofVOPRFP384SHA384, registry.ProofBlindRSA2048, registry.ProofOpaqueIssuer:
+		return nil
+	case registry.ProofLabStaticToken:
+		if allowLab {
+			return nil
+		}
+		return fmt.Errorf("protocol: lab proof type disabled")
+	default:
+		return fmt.Errorf("protocol: unknown issuer proof type 0x%x", proofType)
+	}
+}
+
+func (s IssuerVerifierServiceRecord) validateStructural(allowLab bool) error {
+	if len(s.ServiceID) != 16 {
+		return fmt.Errorf("protocol: verifier service id must be 16 bytes")
+	}
+	if s.ValidUntilUnix <= s.ValidFromUnix {
+		return fmt.Errorf("protocol: verifier service validity interval is empty")
+	}
+	if err := validateIssuerStatusKnown(s.ServiceStatus, "verifier service"); err != nil {
+		return err
+	}
+	if err := validateIssuerPublicKeyCompatibility(s.ServiceAuthKey, allowLab); err != nil {
+		return err
+	}
+	for _, proofType := range s.AllowedProofTypes {
+		if err := validateIssuerProofTypeKnown(proofType, allowLab); err != nil {
+			return err
+		}
+	}
+	for _, relayBucketID := range s.AllowedRelayBucketIDs {
+		if len(relayBucketID) != 16 {
+			return fmt.Errorf("protocol: verifier service relay bucket id must be 16 bytes")
+		}
+	}
+	return nil
+}
+
+func validateIssuerStatusKnown(status uint8, label string) error {
+	switch status {
+	case registry.IssuerStatusActive, registry.IssuerStatusRetiring, registry.IssuerStatusRevoked:
+		return nil
+	default:
+		return fmt.Errorf("protocol: %s status is reserved", label)
+	}
+}
+
+func validateIssuerPublicKeyCompatibility(key PublicKeyRecord, allowLab bool) error {
+	if !allowLab && key.SignatureScheme == registry.SigEd25519Lab {
+		return fmt.Errorf("protocol: lab signature scheme disabled")
+	}
+	return key.ValidateCompatibility()
 }
 
 func (m IssuerMetadata) Unsigned() IssuerMetadata {

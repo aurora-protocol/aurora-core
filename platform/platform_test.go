@@ -215,7 +215,22 @@ func TestAdapterBlueprintVerificationRejectsMissingProxyFallback(t *testing.T) {
 	if report.Passed {
 		t.Fatalf("platform adapter conformance accepted missing proxy fallback: %+v", report)
 	}
-	if len(report.Failures) != 1 || report.Failures[0].Field != "local_proxy_fallback" {
+	if !hasAdapterFailure(report, KindLinux, "local_proxy_fallback") {
+		t.Fatalf("unexpected platform adapter failure report: %+v", report.Failures)
+	}
+}
+
+func TestAdapterBlueprintVerificationRequiresDNSForwarderForPacketModeTargets(t *testing.T) {
+	blueprints := AdapterBlueprints()
+	blueprints[0].LocalModes = removeString(blueprints[0].LocalModes, LocalDNSForwarder)
+	report, err := VerifyAdapterBlueprints(blueprints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatalf("platform adapter conformance accepted packet-mode target without DNS forwarder: %+v", report)
+	}
+	if !hasAdapterFailure(report, KindLinux, "dns_forwarder") {
 		t.Fatalf("unexpected platform adapter failure report: %+v", report.Failures)
 	}
 }
@@ -248,6 +263,15 @@ func TestAdapterBlueprintVerificationRequiresSocketEventBoundary(t *testing.T) {
 	if len(report.Failures) != 1 || report.Failures[0].Field != "core_boundary" {
 		t.Fatalf("unexpected platform adapter failure report: %+v", report.Failures)
 	}
+}
+
+func hasAdapterFailure(report AdapterConformanceReport, kind Kind, field string) bool {
+	for _, failure := range report.Failures {
+		if failure.Kind == kind && failure.Field == field {
+			return true
+		}
+	}
+	return false
 }
 
 func removeString(values []string, drop string) []string {

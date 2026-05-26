@@ -79,6 +79,9 @@ func VerifyAdapterBlueprints(blueprints []AdapterBlueprint) (AdapterConformanceR
 		if !platformReport.LocalProxyFallback {
 			reportFailure(&report, &platformReport, "local_proxy_fallback")
 		}
+		if !hasDNSForwarderForPacketMode(blueprint) {
+			reportFailure(&report, &platformReport, "dns_forwarder")
+		}
 		if !platformReport.NoCryptoState {
 			reportFailure(&report, &platformReport, "no_crypto_state")
 		}
@@ -110,6 +113,18 @@ func hasLocalProxyFallback(modes []string) bool {
 		hasHTTPConnect = hasHTTPConnect || mode == LocalHTTPConnect
 	}
 	return hasSOCKS && hasHTTPConnect
+}
+
+func hasDNSForwarderForPacketMode(blueprint AdapterBlueprint) bool {
+	if ProfileFor(blueprint.Kind).PacketMode == PacketNone {
+		return true
+	}
+	for _, mode := range blueprint.LocalModes {
+		if mode == LocalDNSForwarder {
+			return true
+		}
+	}
+	return false
 }
 
 func packetModeMatchesProfile(blueprint AdapterBlueprint) bool {

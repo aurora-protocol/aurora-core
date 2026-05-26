@@ -349,6 +349,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "HTTP cover-origin gateway handler") {
 		t.Fatalf("capabilities output missing HTTP cover-origin gateway handler:\n%s", text)
 	}
+	if !strings.Contains(text, "HTTP CONNECT/SOCKS5 local interface handlers") {
+		t.Fatalf("capabilities output missing concrete local interface handlers:\n%s", text)
+	}
 	if !strings.Contains(text, "DPI/classifier baseline harness") {
 		t.Fatalf("capabilities output missing classifier baseline harness:\n%s", text)
 	}

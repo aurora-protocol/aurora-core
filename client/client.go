@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/aurora-protocol/aurora-core/flow"
@@ -77,16 +78,16 @@ func (p *LocalProxy) OpenTCP(flowID uint64, host string, port uint16) error {
 }
 
 func (p *LocalProxy) OpenTCPWithPriority(flowID uint64, host string, port uint16, priority uint8) error {
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
-	if host == "" {
-		return fmt.Errorf("client: empty TCP host")
+	targetKind, targetHost, err := localTarget(host)
+	if err != nil {
+		return err
 	}
 	return p.flows.Open(protocol.FlowOpen{
 		FlowOpenVersion:  registry.Version20,
 		FlowID:           flowID,
 		FlowKind:         flow.FlowKindTCPStream,
-		TargetKind:       flow.TargetKindDomainName,
-		TargetHost:       []byte(host),
+		TargetKind:       targetKind,
+		TargetHost:       targetHost,
 		TargetPort:       port,
 		UDPFQDNMode:      flow.UDPFQDNNoneIPAuthoritative,
 		NameBindingID:    make([]byte, 16),
@@ -94,6 +95,53 @@ func (p *LocalProxy) OpenTCPWithPriority(flowID uint64, host string, port uint16
 		LocalBindingMode: flow.LocalBindingExplicitProxyAPI,
 		PriorityClass:    priority,
 	})
+}
+
+func (p *LocalProxy) OpenUDPExplicit(flowID uint64, host string, port uint16, now uint64) error {
+	targetKind, targetHost, err := localTarget(host)
+	if err != nil {
+		return err
+	}
+	udpFQDNMode := uint8(flow.UDPFQDNNoneIPAuthoritative)
+	var originalDomainHint []byte
+	if targetKind == flow.TargetKindDomainName {
+		udpFQDNMode = flow.UDPFQDNRelayResolvedFlowBound
+		originalDomainHint = append([]byte(nil), targetHost...)
+	}
+	return p.flows.OpenWithOptions(protocol.FlowOpen{
+		FlowOpenVersion:    registry.Version20,
+		FlowID:             flowID,
+		FlowKind:           flow.FlowKindUDPAssociation,
+		TargetKind:         targetKind,
+		TargetHost:         targetHost,
+		TargetPort:         port,
+		UDPFQDNMode:        udpFQDNMode,
+		NameBindingID:      make([]byte, 16),
+		DNSAnswerSetHash:   make([]byte, 48),
+		LocalBindingMode:   flow.LocalBindingExplicitProxyAPI,
+		PriorityClass:      flow.PriorityRealtime,
+		OriginalDomainHint: originalDomainHint,
+	}, flow.FlowOptions{NowUnix: now, TTLSeconds: 300, IdleTimeoutSeconds: 30})
+}
+
+func localTarget(host string) (uint8, []byte, error) {
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return 0, nil, fmt.Errorf("client: empty target host")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			return flow.TargetKindIPv4, append([]byte(nil), v4...), nil
+		}
+		if v16 := ip.To16(); v16 != nil {
+			return flow.TargetKindIPv6, append([]byte(nil), v16...), nil
+		}
+	}
+	domain := strings.TrimSuffix(strings.ToLower(host), ".")
+	if domain == "" || strings.ContainsAny(domain, "/\x00") {
+		return 0, nil, fmt.Errorf("client: invalid domain target")
+	}
+	return flow.TargetKindDomainName, []byte(domain), nil
 }
 
 func (p *LocalProxy) HasFlow(flowID uint64) bool {

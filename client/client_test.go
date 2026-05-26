@@ -51,6 +51,134 @@ func TestLocalProxyFlowTracksOpenAndClose(t *testing.T) {
 	}
 }
 
+func TestLocalProxyHTTPConnectOpensExplicitTCPFlow(t *testing.T) {
+	p := NewLocalProxy()
+	response, err := p.OpenHTTPConnectRequest(50, []byte("CONNECT Example.COM:443 HTTP/1.1\r\nHost: Example.COM:443\r\n\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(response, []byte("HTTP/1.1 200 Connection Established\r\n\r\n")) {
+		t.Fatalf("unexpected HTTP CONNECT response: %q", response)
+	}
+	state, ok := p.FlowState(50)
+	if !ok {
+		t.Fatalf("HTTP CONNECT did not open a flow")
+	}
+	if state.Kind != flow.FlowKindTCPStream || state.TargetKind != flow.TargetKindDomainName || string(state.TargetHost) != "example.com" || state.TargetPort != 443 {
+		t.Fatalf("unexpected HTTP CONNECT flow: %+v", state)
+	}
+	if state.LocalBindingMode != flow.LocalBindingExplicitProxyAPI || state.PriorityClass != flow.PriorityInteractive {
+		t.Fatalf("HTTP CONNECT flow used wrong local binding: %+v", state)
+	}
+}
+
+func TestLocalProxyHTTPConnectRejectsNonConnect(t *testing.T) {
+	p := NewLocalProxy()
+	if _, err := p.OpenHTTPConnectRequest(51, []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")); err == nil {
+		t.Fatalf("non-CONNECT request opened a local TCP flow")
+	}
+	if p.HasFlow(51) {
+		t.Fatalf("rejected HTTP request left a flow behind")
+	}
+}
+
+func TestLocalProxyHTTPConnectUsesRequestTargetOverHostHeader(t *testing.T) {
+	p := NewLocalProxy()
+	if _, err := p.OpenHTTPConnectRequest(55, []byte("CONNECT Good.EXAMPLE:443 HTTP/1.1\r\nHost: bad.example:443\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	state, ok := p.FlowState(55)
+	if !ok {
+		t.Fatalf("HTTP CONNECT did not open a flow")
+	}
+	if string(state.TargetHost) != "good.example" || state.TargetPort != 443 {
+		t.Fatalf("HTTP CONNECT trusted mismatched Host header: %+v", state)
+	}
+}
+
+func TestSOCKS5GreetingSelectsNoAuth(t *testing.T) {
+	response, err := HandleSOCKS5Greeting([]byte{0x05, 0x02, 0x02, 0x00})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(response, []byte{0x05, 0x00}) {
+		t.Fatalf("unexpected SOCKS5 greeting response: %x", response)
+	}
+}
+
+func TestSOCKS5GreetingRejectsAuthOnly(t *testing.T) {
+	if _, err := HandleSOCKS5Greeting([]byte{0x05, 0x01, 0x02}); err == nil {
+		t.Fatalf("auth-only SOCKS5 greeting was accepted")
+	}
+}
+
+func TestLocalProxySOCKS5ConnectOpensDomainTCPFlow(t *testing.T) {
+	p := NewLocalProxy()
+	request := append([]byte{0x05, 0x01, 0x00, 0x03, 0x0b}, []byte("Example.COM")...)
+	request = append(request, 0x01, 0xbb)
+	response, err := p.OpenSOCKS5ConnectRequest(52, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(response, []byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) {
+		t.Fatalf("unexpected SOCKS5 CONNECT response: %x", response)
+	}
+	state, ok := p.FlowState(52)
+	if !ok {
+		t.Fatalf("SOCKS5 CONNECT did not open a flow")
+	}
+	if state.Kind != flow.FlowKindTCPStream || state.TargetKind != flow.TargetKindDomainName || string(state.TargetHost) != "example.com" || state.TargetPort != 443 {
+		t.Fatalf("unexpected SOCKS5 CONNECT flow: %+v", state)
+	}
+}
+
+func TestSOCKS5UDPAssociateReturnsBindEndpoint(t *testing.T) {
+	response, err := HandleSOCKS5UDPAssociateRequest([]byte{0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0}, "127.0.0.1", 1081)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x04, 0x39}
+	if !bytes.Equal(response, want) {
+		t.Fatalf("unexpected SOCKS5 UDP ASSOCIATE response: %x", response)
+	}
+}
+
+func TestLocalProxySOCKS5UDPDatagramOpensRelayResolvedFlow(t *testing.T) {
+	p := NewLocalProxy()
+	packet := append([]byte{0x00, 0x00, 0x00, 0x03, 0x0b}, []byte("Example.COM")...)
+	packet = append(packet, 0x01, 0xbb)
+	packet = append(packet, []byte("payload")...)
+	frame, err := p.HandleSOCKS5UDPDatagram(53, packet, 100, transport.UDPOverStreamFallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.FrameType != registry.FrameStreamData || frame.FlowID != 53 || !bytes.Equal(frame.Payload, []byte("payload")) {
+		t.Fatalf("unexpected SOCKS5 UDP frame: %+v", frame)
+	}
+	state, ok := p.FlowState(53)
+	if !ok {
+		t.Fatalf("SOCKS5 UDP datagram did not open a flow")
+	}
+	if state.Kind != flow.FlowKindUDPAssociation || state.TargetKind != flow.TargetKindDomainName || string(state.TargetHost) != "example.com" || state.TargetPort != 443 {
+		t.Fatalf("unexpected SOCKS5 UDP flow: %+v", state)
+	}
+	if state.UDPFQDNMode != flow.UDPFQDNRelayResolvedFlowBound || state.LocalBindingMode != flow.LocalBindingExplicitProxyAPI || state.PriorityClass != flow.PriorityRealtime {
+		t.Fatalf("SOCKS5 UDP flow used wrong binding semantics: %+v", state)
+	}
+}
+
+func TestLocalProxySOCKS5UDPDatagramRejectsFragments(t *testing.T) {
+	p := NewLocalProxy()
+	packet := append([]byte{0x00, 0x00, 0x01, 0x03, 0x0b}, []byte("example.com")...)
+	packet = append(packet, 0x01, 0xbb, 'x')
+	if _, err := p.HandleSOCKS5UDPDatagram(54, packet, 100, transport.UDPNativeDatagram); err == nil {
+		t.Fatalf("fragmented SOCKS5 UDP datagram was accepted")
+	}
+	if p.HasFlow(54) {
+		t.Fatalf("rejected SOCKS5 UDP datagram left a flow behind")
+	}
+}
+
 func TestLocalProxyOpensUDPWithFakeDNSWithoutDomainLeak(t *testing.T) {
 	p := NewLocalProxy()
 	answer, err := p.OpenUDPWithFakeDNS(2, "Example.COM.", []string{"93.184.216.34"}, 443, 100)

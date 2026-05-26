@@ -95,6 +95,9 @@ type DirectionState struct {
 	Material        KeyMaterial
 	DrainUntil      time.Time
 
+	previousKeyPhase uint8
+	previousMaterial KeyMaterial
+
 	lastReceivedUpdate       []byte
 	lastReceivedUpdateResult KeyUpdateResult
 }
@@ -114,11 +117,32 @@ func (s *DirectionState) InitiateUpdate(suite uint64, updateNonce []byte, ackReq
 	if err != nil {
 		return protocol.KeyUpdate{}, err
 	}
+	s.previousKeyPhase = s.KeyPhase
+	s.previousMaterial = cloneKeyMaterial(s.Material)
 	s.KeyPhase = frame.NewKeyPhase
 	s.Material = next
 	s.DrainUntil = time.Now().Add(MaxDrainWindow)
 	s.clearLastReceivedUpdate()
 	return frame, nil
+}
+
+func (s *DirectionState) MaterialForPacket(pkt AuroraPacket, now time.Time) (KeyMaterial, error) {
+	if pkt.RouteInstanceID != s.RouteInstanceID {
+		return KeyMaterial{}, fmt.Errorf("packet: packet route instance mismatch")
+	}
+	if pkt.HopLayer != s.HopLayer {
+		return KeyMaterial{}, fmt.Errorf("packet: packet hop layer mismatch")
+	}
+	if pkt.Direction != s.Direction {
+		return KeyMaterial{}, fmt.Errorf("packet: packet direction mismatch")
+	}
+	if pkt.KeyPhase == s.KeyPhase {
+		return cloneKeyMaterial(s.Material), nil
+	}
+	if pkt.KeyPhase == s.previousKeyPhase && !s.DrainUntil.IsZero() && !now.After(s.DrainUntil) {
+		return cloneKeyMaterial(s.previousMaterial), nil
+	}
+	return KeyMaterial{}, fmt.Errorf("packet: key phase %d is not active", pkt.KeyPhase)
 }
 
 func (s *DirectionState) ApplyReceivedUpdate(suite uint64, frame protocol.KeyUpdate, ackNonce []byte) (KeyUpdateResult, error) {
@@ -145,6 +169,8 @@ func (s *DirectionState) ApplyReceivedUpdate(suite uint64, frame protocol.KeyUpd
 	if err != nil {
 		return KeyUpdateResult{}, err
 	}
+	s.previousKeyPhase = s.KeyPhase
+	s.previousMaterial = cloneKeyMaterial(s.Material)
 	s.KeyPhase = frame.NewKeyPhase
 	s.Material = res.Next
 	s.DrainUntil = time.Now().Add(MaxDrainWindow)
@@ -170,11 +196,7 @@ func (s *DirectionState) clearLastReceivedUpdate() {
 
 func cloneKeyUpdateResult(in KeyUpdateResult) KeyUpdateResult {
 	out := KeyUpdateResult{
-		Next: KeyMaterial{
-			AppSecret: append([]byte(nil), in.Next.AppSecret...),
-			Key:       append([]byte(nil), in.Next.Key...),
-			IV:        append([]byte(nil), in.Next.IV...),
-		},
+		Next: cloneKeyMaterial(in.Next),
 	}
 	if in.ACK != nil {
 		ack := *in.ACK
@@ -182,4 +204,12 @@ func cloneKeyUpdateResult(in KeyUpdateResult) KeyUpdateResult {
 		out.ACK = &ack
 	}
 	return out
+}
+
+func cloneKeyMaterial(in KeyMaterial) KeyMaterial {
+	return KeyMaterial{
+		AppSecret: append([]byte(nil), in.AppSecret...),
+		Key:       append([]byte(nil), in.Key...),
+		IV:        append([]byte(nil), in.IV...),
+	}
 }

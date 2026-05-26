@@ -656,6 +656,66 @@ func TestDirectionStateDuplicateKeyUpdateIsIdempotentOnlyWhileDraining(t *testin
 	}
 }
 
+func TestDirectionStateKeepsOldReadMaterialOnlyUntilDrainExpiry(t *testing.T) {
+	original := KeyMaterial{
+		AppSecret: bytesOf(0x71, 48),
+		Key:       bytesOf(0x72, 32),
+		IV:        bytesOf(0x73, 12),
+	}
+	state := DirectionState{
+		RouteInstanceID: 0x44,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        0,
+		Material:        original,
+	}
+	update := protocol.KeyUpdate{
+		RouteInstanceID: 0x44,
+		HopLayer:        1,
+		Direction:       0,
+		OldKeyPhase:     0,
+		NewKeyPhase:     1,
+		UpdateNonce:     bytesOf(0xa4, 16),
+		UpdateReason:    1,
+	}
+	if _, err := state.ApplyReceivedUpdate(registry.SuiteHybrid768AESGCM, update, nil); err != nil {
+		t.Fatal(err)
+	}
+	newMaterial, err := state.MaterialForPacket(AuroraPacket{
+		RouteInstanceID: 0x44,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        1,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("current key phase material rejected: %v", err)
+	}
+	if bytes.Equal(newMaterial.AppSecret, original.AppSecret) {
+		t.Fatalf("current key phase returned old material")
+	}
+	oldMaterial, err := state.MaterialForPacket(AuroraPacket{
+		RouteInstanceID: 0x44,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        0,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("old key phase was rejected during drain window: %v", err)
+	}
+	if !bytes.Equal(oldMaterial.Key, original.Key) || !bytes.Equal(oldMaterial.IV, original.IV) {
+		t.Fatalf("old key phase did not return previous material")
+	}
+	state.DrainUntil = time.Now().Add(-time.Second)
+	if _, err := state.MaterialForPacket(AuroraPacket{
+		RouteInstanceID: 0x44,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        0,
+	}, time.Now()); err == nil {
+		t.Fatalf("old key phase packet material was accepted after drain expiry")
+	}
+}
+
 func TestAuroraPacketEncodeDecode(t *testing.T) {
 	pkt := AuroraPacket{
 		RouteInstanceID: 9,

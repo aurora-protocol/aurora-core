@@ -9,6 +9,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/aurora-protocol/aurora-core/trust"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
@@ -261,6 +262,132 @@ func OpenAndVerifyPrivatePrelude(cache *admission.MemoryReplayCache, env Envelop
 	return private, binding, nil
 }
 
+type RoutePreludeVerificationInput struct {
+	Suite           uint64
+	RouteHopBinding []byte
+	Prelude0        PrivatePrelude
+	Prelude1        protocol.RoutePrelude1
+	Descriptor      protocol.RelayDescriptor
+	RequirePQ       bool
+}
+
+func HopPreludeTranscriptHash(suite uint64, routeHopBinding []byte, p0 PrivatePrelude, p1 protocol.RoutePrelude1) ([]byte, error) {
+	encoded0, err := protocol.Encode(p0)
+	if err != nil {
+		return nil, err
+	}
+	encoded1, err := protocol.Encode(p1.Unsigned())
+	if err != nil {
+		return nil, err
+	}
+	return auroracrypto.SuiteHash(suite,
+		[]byte("aurora v2.0 hop prelude transcript"),
+		routeHopBinding,
+		encoded0,
+		encoded1,
+	)
+}
+
+func VerifyRoutePrelude1Signatures(in RoutePreludeVerificationInput) ([]byte, error) {
+	if err := ValidatePrivatePreludeHeader(in.Prelude0); err != nil {
+		return nil, err
+	}
+	if in.Prelude1.MsgType != registry.MsgRoutePrelude1 {
+		return nil, fmt.Errorf("route: malformed route prelude response message type 0x%x", in.Prelude1.MsgType)
+	}
+	if in.Prelude1.Version != registry.Version20 {
+		return nil, fmt.Errorf("route: unsupported route prelude response version 0x%x", in.Prelude1.Version)
+	}
+	if in.Prelude1.SelectedSuite != in.Suite {
+		return nil, fmt.Errorf("route: selected suite mismatch")
+	}
+	if !containsUint64(in.Prelude0.OfferedSuites, in.Suite) {
+		return nil, fmt.Errorf("route: selected suite was not offered")
+	}
+	if !containsUint64(in.Descriptor.SupportedSuiteIDs, in.Suite) {
+		return nil, fmt.Errorf("route: selected suite is not supported by descriptor")
+	}
+	if err := validateRoutePreludeMetadata(in.Prelude0, in.Prelude1); err != nil {
+		return nil, err
+	}
+	if err := ValidateRoutePreludeHybridShares(in.Suite, in.Prelude0, in.Prelude1); err != nil {
+		return nil, err
+	}
+	expectedBinding, err := RouteHopBinding(HopBindingInput{
+		RouteInstanceID:                in.Prelude0.RouteInstanceID,
+		HopIndex:                       in.Prelude0.HopIndex,
+		PreviousHopFullTranscriptHash:  in.Prelude0.PreviousHopFullTranscriptHash,
+		PreviousHopRelayDescriptorHash: in.Prelude0.PreviousHopRelayDescriptorHash,
+		NextRelayDescriptorHash:        in.Prelude0.NextRelayDescriptorHash,
+		RoutePreludeWrapContext:        in.Prelude0.RoutePreludeWrapContext,
+		ClientNonceForThisHop:          in.Prelude0.ClientNonceForThisHop,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(in.RouteHopBinding, expectedBinding) {
+		return nil, fmt.Errorf("route: route_hop_binding mismatch")
+	}
+	if in.Prelude1.NextRelayEpochID != in.Descriptor.EpochID {
+		return nil, fmt.Errorf("route: next relay epoch mismatch")
+	}
+	descriptorHash, err := trust.RelayDescriptorHash(in.Descriptor)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(in.Prelude0.NextRelayDescriptorHash, descriptorHash) || !bytes.Equal(in.Prelude1.NextRelayDescriptorHash, descriptorHash) {
+		return nil, fmt.Errorf("route: next relay descriptor hash mismatch")
+	}
+	transcript, err := HopPreludeTranscriptHash(in.Suite, expectedBinding, in.Prelude0, in.Prelude1)
+	if err != nil {
+		return nil, err
+	}
+	if len(in.Prelude1.ServerPreludeSignatureClassical) == 0 {
+		return nil, fmt.Errorf("route: missing classical route prelude signature")
+	}
+	if err := auroracrypto.VerifySignature(in.Descriptor.EpochAuthClassicalKey.SignatureScheme, in.Descriptor.EpochAuthClassicalKey.KeyEncoding, in.Descriptor.EpochAuthClassicalKey.PublicKey, transcript, in.Prelude1.ServerPreludeSignatureClassical); err != nil {
+		return nil, err
+	}
+	if in.RequirePQ || len(in.Prelude1.ServerPreludeSignaturePQ) > 0 {
+		if len(in.Prelude1.ServerPreludeSignaturePQ) == 0 {
+			return nil, fmt.Errorf("route: missing PQ route prelude signature")
+		}
+		if err := auroracrypto.VerifySignature(in.Descriptor.EpochAuthPQKey.SignatureScheme, in.Descriptor.EpochAuthPQKey.KeyEncoding, in.Descriptor.EpochAuthPQKey.PublicKey, transcript, in.Prelude1.ServerPreludeSignaturePQ); err != nil {
+			return nil, err
+		}
+	}
+	return transcript, nil
+}
+
+func validateRoutePreludeMetadata(p0 PrivatePrelude, p1 protocol.RoutePrelude1) error {
+	if p1.RouteInstanceID != p0.RouteInstanceID ||
+		p1.HopIndex != p0.HopIndex ||
+		!bytes.Equal(p1.PreviousHopRelayDescriptorHash, p0.PreviousHopRelayDescriptorHash) ||
+		!bytes.Equal(p1.NextRelayDescriptorHash, p0.NextRelayDescriptorHash) {
+		return fmt.Errorf("route: route prelude response does not match request")
+	}
+	if len(p1.ServerNonce) != 32 {
+		return fmt.Errorf("route: server nonce length %d, want 32", len(p1.ServerNonce))
+	}
+	return nil
+}
+
+func ValidateRoutePreludeHybridShares(suite uint64, p0 PrivatePrelude, p1 protocol.RoutePrelude1) error {
+	if _, err := auroracrypto.NewECDHPublicKeyForSuite(suite, p0.ClientClassicalEphPub); err != nil {
+		return failure.NewError(failure.MalformedHybridShare, "route: malformed client classical share")
+	}
+	if _, err := auroracrypto.NewECDHPublicKeyForSuite(suite, p1.ServerClassicalEphPub); err != nil {
+		return failure.NewError(failure.MalformedHybridShare, "route: malformed server classical share")
+	}
+	if err := auroracrypto.ValidateMLKEMEncapsulationKeyForSuite(suite, p0.ClientMLKEMEncapsulationKey); err != nil {
+		return failure.NewError(failure.MalformedHybridShare, "route: malformed client ML-KEM share")
+	}
+	if err := auroracrypto.ValidateMLKEMCiphertextForSuite(suite, p1.ServerMLKEMCiphertextToClient); err != nil {
+		return failure.NewError(failure.MalformedHybridShare, "route: malformed server ML-KEM share")
+	}
+	return nil
+}
+
 func ValidatePrivatePreludeHeader(private PrivatePrelude) error {
 	if private.MsgType != registry.MsgRoutePrelude0 {
 		return fmt.Errorf("route: malformed private prelude message type 0x%x", private.MsgType)
@@ -269,6 +396,15 @@ func ValidatePrivatePreludeHeader(private PrivatePrelude) error {
 		return fmt.Errorf("route: unsupported private prelude version 0x%x", private.Version)
 	}
 	return nil
+}
+
+func containsUint64(values []uint64, needle uint64) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func ValidatePrivatePreludeHybridShares(private PrivatePrelude) error {

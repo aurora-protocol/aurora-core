@@ -60,6 +60,32 @@ func TestCoverBootstrapMessagesRoundTrip(t *testing.T) {
 		t.Fatalf("CoverPrelude1 round trip mismatch:\n got=%+v\nwant=%+v", got, p1)
 	}
 
+	rp1 := RoutePrelude1{
+		MsgType:                         registry.MsgRoutePrelude1,
+		Version:                         registry.Version20,
+		RouteInstanceID:                 77,
+		HopIndex:                        1,
+		PreviousHopRelayDescriptorHash:  fill(0x20, 48),
+		NextRelayDescriptorHash:         fill(0x21, 48),
+		NextRelayEpochID:                33,
+		SelectedSuite:                   registry.SuiteHybrid768AESGCM,
+		ServerNonce:                     fill(0x22, 32),
+		ServerClassicalEphPub:           []byte("route-server-ecdh"),
+		ServerMLKEMCiphertextToClient:   []byte("route-server-kem"),
+		SelectedShapeID:                 registry.ShapeNormal,
+		ServerPreludeSignatureClassical: []byte("route-sig-classical"),
+		ServerPreludeSignaturePQ:        []byte("route-sig-pq"),
+		Padding:                         []byte("route-prelude-pad"),
+		Extensions:                      []Extension{{ExtensionType: 0x700c, Body: []byte("rp1")}},
+	}
+	encodedRP1, err := Encode(rp1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DecodeRoutePrelude1(bytesReader(encodedRP1)); !reflect.DeepEqual(got, rp1) {
+		t.Fatalf("RoutePrelude1 round trip mismatch:\n got=%+v\nwant=%+v", got, rp1)
+	}
+
 	c1 := CoverCapsule1Plain{
 		MsgType:              registry.MsgCoverCapsule1,
 		RouteInstanceID:      33,

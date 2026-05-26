@@ -272,3 +272,68 @@ func DecodeRouteCapsule2Plain(r *wire.Reader) RouteCapsule2Plain {
 		Extensions:      DecodeExtensions(r),
 	}
 }
+
+type RoutePrelude1 struct {
+	MsgType                         uint64
+	Version                         uint64
+	RouteInstanceID                 uint64
+	HopIndex                        uint8
+	PreviousHopRelayDescriptorHash  []byte
+	NextRelayDescriptorHash         []byte
+	NextRelayEpochID                uint64
+	SelectedSuite                   uint64
+	ServerNonce                     []byte
+	ServerClassicalEphPub           []byte
+	ServerMLKEMCiphertextToClient   []byte
+	SelectedShapeID                 uint64
+	ServerPreludeSignatureClassical []byte
+	ServerPreludeSignaturePQ        []byte
+	Padding                         []byte
+	Extensions                      []Extension
+}
+
+func (p RoutePrelude1) EncodeTo(e *wire.Encoder) {
+	e.WriteVarint(p.MsgType)
+	e.WriteVarint(p.Version)
+	e.WriteVarint(p.RouteInstanceID)
+	e.WriteUint8(p.HopIndex)
+	e.WritePreHash(p.PreviousHopRelayDescriptorHash)
+	e.WritePreHash(p.NextRelayDescriptorHash)
+	e.WriteUint64(p.NextRelayEpochID)
+	e.WriteVarint(p.SelectedSuite)
+	e.WriteOpaqueFixed(p.ServerNonce, 32)
+	e.WriteOpaque16(p.ServerClassicalEphPub)
+	e.WriteOpaque16(p.ServerMLKEMCiphertextToClient)
+	e.WriteVarint(p.SelectedShapeID)
+	e.WriteOpaque16(p.ServerPreludeSignatureClassical)
+	e.WriteOpaque16(p.ServerPreludeSignaturePQ)
+	e.WriteOpaque16(p.Padding)
+	EncodeExtensions(e, p.Extensions)
+}
+
+func DecodeRoutePrelude1(r *wire.Reader) RoutePrelude1 {
+	return RoutePrelude1{
+		MsgType:                         r.ReadVarint(),
+		Version:                         r.ReadVarint(),
+		RouteInstanceID:                 r.ReadVarint(),
+		HopIndex:                        r.ReadUint8(),
+		PreviousHopRelayDescriptorHash:  r.ReadPreHash(),
+		NextRelayDescriptorHash:         r.ReadPreHash(),
+		NextRelayEpochID:                r.ReadUint64(),
+		SelectedSuite:                   r.ReadVarint(),
+		ServerNonce:                     r.ReadOpaqueFixed(32),
+		ServerClassicalEphPub:           r.ReadOpaque16(),
+		ServerMLKEMCiphertextToClient:   r.ReadOpaque16(),
+		SelectedShapeID:                 r.ReadVarint(),
+		ServerPreludeSignatureClassical: r.ReadOpaque16(),
+		ServerPreludeSignaturePQ:        r.ReadOpaque16(),
+		Padding:                         r.ReadOpaque16(),
+		Extensions:                      DecodeExtensions(r),
+	}
+}
+
+func (p RoutePrelude1) Unsigned() RoutePrelude1 {
+	p.ServerPreludeSignatureClassical = nil
+	p.ServerPreludeSignaturePQ = nil
+	return p
+}

@@ -2,6 +2,9 @@ package route
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
 	"testing"
 
@@ -10,6 +13,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/aurora-protocol/aurora-core/trust"
 )
 
 func rb(b byte, n int) []byte {
@@ -241,6 +245,24 @@ func TestOpenAndVerifyPrivatePreludeSpendsAccessHintWithRouteHopBinding(t *testi
 	}
 }
 
+func TestVerifyRoutePrelude1SignaturesRejectsTampering(t *testing.T) {
+	in := signedRoutePreludeVerificationInput(t)
+	if _, err := VerifyRoutePrelude1Signatures(in); err != nil {
+		t.Fatalf("valid ROUTE_PRELUDE1 rejected: %v", err)
+	}
+	in.Prelude1.SelectedShapeID = registry.ShapeStrict
+	if _, err := VerifyRoutePrelude1Signatures(in); err == nil {
+		t.Fatalf("tampered ROUTE_PRELUDE1 signature accepted")
+	}
+}
+
+func TestVerifyRoutePrelude1RequiresCanonicalRouteHopBinding(t *testing.T) {
+	in := signedRoutePreludeVerificationInputWithBinding(t, rb(0xee, 48))
+	if _, err := VerifyRoutePrelude1Signatures(in); err == nil {
+		t.Fatalf("ROUTE_PRELUDE1 signed over non-canonical route_hop_binding was accepted")
+	}
+}
+
 func routeTestEnvelope() EnvelopeInput {
 	return EnvelopeInput{
 		RouteInstanceID:                1,
@@ -254,6 +276,117 @@ func routeTestEnvelope() EnvelopeInput {
 		WrapSuiteID:                    registry.WrapSuiteRouteV1,
 		WrapNonce:                      rb(0x32, 16),
 		HintSecret:                     rb(0x33, 32),
+	}
+}
+
+func signedRoutePreludeVerificationInput(t *testing.T) RoutePreludeVerificationInput {
+	return signedRoutePreludeVerificationInputWithBinding(t, nil)
+}
+
+func signedRoutePreludeVerificationInputWithBinding(t *testing.T, bindingOverride []byte) RoutePreludeVerificationInput {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	classicalKey := protocol.PublicKeyRecord{
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+		PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+	}
+	descriptor := protocol.RelayDescriptor{
+		DescriptorVersion:            registry.Version20,
+		RelayID:                      rb(0x91, 32),
+		ValidFromUnix:                100,
+		ValidUntilUnix:               300,
+		RelayLongtermClassicalKey:    classicalKey,
+		RelayLongtermPQKey:           classicalKey,
+		EpochID:                      7,
+		EpochAuthClassicalKey:        classicalKey,
+		EpochAuthPQKey:               classicalKey,
+		EpochValidFromUnix:           100,
+		EpochValidUntilUnix:          300,
+		ReplayEpochID:                8,
+		ReplayEpochValidUntilUnix:    260,
+		ReplayWindowID:               rb(0x92, 16),
+		SupportedSuiteIDs:            []uint64{registry.SuiteHybrid768AESGCM},
+		SupportedMethodIDs:           []uint64{registry.MethodWebH2Stream},
+		SupportedPolicyIDsCommitment: rb(0x93, 48),
+		SupportedShapeIDsCommitment:  rb(0x94, 48),
+		ExitPolicyCommitment:         rb(0x95, 48),
+		AbusePolicyCommitment:        rb(0x96, 48),
+	}
+	descriptorHash, err := trust.RelayDescriptorHash(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := routeTestEnvelope()
+	env.NextRelayDescriptorHash = descriptorHash
+	private := routeTestPrivatePrelude(t, env)
+	clientKEM, err := auroracrypto.GenerateMLKEM768()
+	if err != nil {
+		t.Fatal(err)
+	}
+	private.MsgType = registry.MsgRoutePrelude0
+	private.Version = registry.Version20
+	private.ClientMLKEMEncapsulationKey = clientKEM.EncapsulationKeyBytes()
+	context, err := auroracrypto.RoutePreludeWrapContext(env.routeWrapInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	private.RoutePreludeWrapContext = context
+	binding, err := RouteHopBinding(HopBindingInput{
+		RouteInstanceID:                private.RouteInstanceID,
+		HopIndex:                       private.HopIndex,
+		PreviousHopFullTranscriptHash:  private.PreviousHopFullTranscriptHash,
+		PreviousHopRelayDescriptorHash: private.PreviousHopRelayDescriptorHash,
+		NextRelayDescriptorHash:        private.NextRelayDescriptorHash,
+		RoutePreludeWrapContext:        private.RoutePreludeWrapContext,
+		ClientNonceForThisHop:          private.ClientNonceForThisHop,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signingBinding := binding
+	if bindingOverride != nil {
+		signingBinding = append([]byte(nil), bindingOverride...)
+	}
+	serverECDH, err := auroracrypto.GenerateECDHForSuite(registry.SuiteHybrid768AESGCM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, serverKEMCiphertext, err := auroracrypto.EncapsulateMLKEM768(clientKEM.EncapsulationKeyBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1 := protocol.RoutePrelude1{
+		MsgType:                        registry.MsgRoutePrelude1,
+		Version:                        registry.Version20,
+		RouteInstanceID:                env.RouteInstanceID,
+		HopIndex:                       env.HopIndex,
+		PreviousHopRelayDescriptorHash: env.PreviousHopRelayDescriptorHash,
+		NextRelayDescriptorHash:        descriptorHash,
+		NextRelayEpochID:               descriptor.EpochID,
+		SelectedSuite:                  registry.SuiteHybrid768AESGCM,
+		ServerNonce:                    rb(0xa1, 32),
+		ServerClassicalEphPub:          serverECDH.PublicKeyBytes(),
+		ServerMLKEMCiphertextToClient:  serverKEMCiphertext,
+		SelectedShapeID:                registry.ShapeNormal,
+	}
+	transcript, err := HopPreludeTranscriptHash(registry.SuiteHybrid768AESGCM, signingBinding, private, p1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1.ServerPreludeSignatureClassical, err = ecdsa.SignASN1(rand.Reader, priv, transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return RoutePreludeVerificationInput{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteHopBinding: signingBinding,
+		Prelude0:        private,
+		Prelude1:        p1,
+		Descriptor:      descriptor,
 	}
 }
 

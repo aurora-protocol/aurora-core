@@ -2,9 +2,11 @@ package protocol
 
 import (
 	"bytes"
+	"encoding/hex"
 	"testing"
 
 	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/aurora-protocol/aurora-core/wire"
 )
 
 func TestDataFrameConstructorsCopyPayloads(t *testing.T) {
@@ -46,5 +48,57 @@ func TestValidateFrameBlockRejectsMalformedDataFrames(t *testing.T) {
 		if err := ValidateFrameBlock(FrameBlock{Frames: []AuroraFrame{frame}}); err == nil {
 			t.Fatalf("malformed data frame accepted: %+v", frame)
 		}
+	}
+}
+
+func TestFlowCloseEncodesOptionalFinalSequenceAndReason(t *testing.T) {
+	close := FlowClose{
+		FlowID:                   7,
+		CloseCode:                CloseNormal,
+		FinalSequenceHintPresent: true,
+		FinalSequenceHint:        42,
+		Reason:                   []byte("done"),
+	}
+	encoded, err := Encode(close)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertProtocolHex(t, encoded, "070001000000000000002a0004646f6e6500")
+	got := DecodeFlowClose(bytesReader(encoded))
+	if got.FlowID != 7 || got.CloseCode != CloseNormal || !got.FinalSequenceHintPresent || got.FinalSequenceHint != 42 || !bytes.Equal(got.Reason, []byte("done")) {
+		t.Fatalf("decoded FlowClose mismatch: %+v", got)
+	}
+}
+
+func TestValidateFrameBlockRejectsReservedFlowCloseCode(t *testing.T) {
+	payload, err := Encode(FlowClose{
+		FlowID:    8,
+		CloseCode: 0x07,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ValidateFrameBlock(FrameBlock{Frames: []AuroraFrame{{
+		FrameType: registry.FrameFlowClose,
+		FlowID:    8,
+		Payload:   payload,
+	}}})
+	if err == nil {
+		t.Fatalf("reserved FlowClose close code accepted")
+	}
+}
+
+func bytesReader(encoded []byte) *wire.Reader {
+	return wire.NewReader(encoded)
+}
+
+func assertProtocolHex(t *testing.T, got []byte, wantHex string) {
+	t.Helper()
+	want, err := hex.DecodeString(wantHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("encoded bytes = %x, want %x", got, want)
 	}
 }

@@ -288,32 +288,54 @@ func DecodeUDPTargetConfirm(r *wire.Reader) UDPTargetConfirm {
 }
 
 type FlowClose struct {
-	FlowID     uint64
-	Reason     uint64
-	ErrorCode  uint64
-	Extensions []Extension
+	FlowID                   uint64
+	CloseCode                uint64
+	FinalSequenceHintPresent bool
+	FinalSequenceHint        uint64
+	Reason                   []byte
+	Extensions               []Extension
 }
 
 func (c FlowClose) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(c.FlowID)
-	e.WriteVarint(c.Reason)
-	e.WriteVarint(c.ErrorCode)
+	e.WriteVarint(c.CloseCode)
+	e.WriteBool(c.FinalSequenceHintPresent)
+	if c.FinalSequenceHintPresent {
+		e.WriteUint64(c.FinalSequenceHint)
+	}
+	e.WriteOpaque16(c.Reason)
 	EncodeExtensions(e, c.Extensions)
 }
 
 func DecodeFlowClose(r *wire.Reader) FlowClose {
-	return FlowClose{
-		FlowID:     r.ReadVarint(),
-		Reason:     r.ReadVarint(),
-		ErrorCode:  r.ReadVarint(),
-		Extensions: DecodeExtensions(r),
+	out := FlowClose{
+		FlowID:                   r.ReadVarint(),
+		CloseCode:                r.ReadVarint(),
+		FinalSequenceHintPresent: r.ReadBool(),
 	}
+	if out.FinalSequenceHintPresent {
+		out.FinalSequenceHint = r.ReadUint64()
+	}
+	out.Reason = r.ReadOpaque16()
+	out.Extensions = DecodeExtensions(r)
+	return out
 }
+
+const (
+	CloseNormal            uint64 = 0x00
+	CloseIdleTimeout       uint64 = 0x01
+	ClosePolicyDenied      uint64 = 0x02
+	CloseTargetUnreachable uint64 = 0x03
+	CloseResetByPeer       uint64 = 0x04
+	CloseMalformedFlow     uint64 = 0x05
+	CloseResourceLimit     uint64 = 0x06
+)
 
 func ValidateFlowManagementFrame(frame AuroraFrame) error {
 	r := wire.NewReader(frame.Payload)
 	var payloadFlowID uint64
 	var extensions []Extension
+	var closePayload FlowClose
 	switch frame.FrameType {
 	case registry.FrameFlowOpen:
 		payload := DecodeFlowOpen(r)
@@ -327,11 +349,17 @@ func ValidateFlowManagementFrame(frame AuroraFrame) error {
 		payload := DecodeFlowClose(r)
 		payloadFlowID = payload.FlowID
 		extensions = payload.Extensions
+		closePayload = payload
 	default:
 		return nil
 	}
 	if r.Err() != nil {
 		return r.Err()
+	}
+	if frame.FrameType == registry.FrameFlowClose {
+		if err := ValidateFlowClose(closePayload); err != nil {
+			return err
+		}
 	}
 	if err := ValidateExtensions(extensions, nil); err != nil {
 		return err
@@ -340,6 +368,19 @@ func ValidateFlowManagementFrame(frame AuroraFrame) error {
 		return fmt.Errorf("protocol: frame flow_id %d does not match payload flow_id %d", frame.FlowID, payloadFlowID)
 	}
 	return nil
+}
+
+func ValidateFlowClose(close FlowClose) error {
+	switch {
+	case close.CloseCode <= CloseResourceLimit:
+		return nil
+	case close.CloseCode >= 0x7000 && close.CloseCode <= 0x7eff:
+		return nil
+	case close.CloseCode >= 0x7f00 && close.CloseCode <= 0x7fff:
+		return nil
+	default:
+		return fmt.Errorf("protocol: reserved flow close code 0x%x", close.CloseCode)
+	}
 }
 
 type RouteForwardFrame struct {

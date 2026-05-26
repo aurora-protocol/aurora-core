@@ -132,6 +132,24 @@ func TestPackagingCheckCommandPrintsEntitlementConformance(t *testing.T) {
 	}
 }
 
+func TestReleaseCheckCommandPrintsReleaseReadiness(t *testing.T) {
+	var out bytes.Buffer
+	if err := releaseCheck(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"release_check passed=true artifacts=6 update_roles=4 signatures=true provenance=true reproducible=true signed_update=true provisioning=true incident_response=true findings=0\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("release-check output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "passed=false") {
+		t.Fatalf("release-check output contains failing result:\n%s", text)
+	}
+}
+
 func TestProofCheckCommandPrintsProductionProofReport(t *testing.T) {
 	var out bytes.Buffer
 	if err := proofCheck(&out); err != nil {
@@ -270,6 +288,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "issuer service readiness harness") {
 		t.Fatalf("capabilities output missing issuer service readiness harness:\n%s", text)
 	}
+	if !strings.Contains(text, "release readiness evidence verifier") {
+		t.Fatalf("capabilities output missing release readiness verifier:\n%s", text)
+	}
 	if strings.Contains(text, "not production-complete:\n- ML-DSA") {
 		t.Fatalf("capabilities output still reports ML-DSA work as the first missing item:\n%s", text)
 	}
@@ -285,7 +306,7 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if strings.Contains(text, "production platform packaging/device entitlements") {
 		t.Fatalf("capabilities output still lists local platform packaging conformance as unimplemented:\n%s", text)
 	}
-	if !strings.Contains(text, "live issuer deployment, signed platform release artifacts/device provisioning, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation") {
+	if !strings.Contains(text, "live issuer deployment, real signed platform release execution/device provisioning, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation") {
 		t.Fatalf("capabilities output stopped tracking remaining production work:\n%s", text)
 	}
 }
@@ -466,6 +487,7 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go run ./cmd/auroractl classifier-check",
 		"go run ./cmd/auroractl evaluation-check",
 		"go run ./cmd/auroractl platform-check",
+		"go run ./cmd/auroractl release-check",
 		"go run ./cmd/auroractl proof-check",
 		"go run ./cmd/auroractl issuer-check",
 		"go run ./cmd/auroractl issuerd-check",

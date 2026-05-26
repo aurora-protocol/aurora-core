@@ -21,6 +21,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/relay"
+	aurorarelease "github.com/aurora-protocol/aurora-core/release"
 	"github.com/aurora-protocol/aurora-core/transport"
 	corevectors "github.com/aurora-protocol/aurora-core/vectors"
 	"github.com/aurora-protocol/aurora-core/wire"
@@ -47,6 +48,8 @@ func main() {
 		err = platformCheck(os.Stdout)
 	case "packaging-check":
 		err = packagingCheck(os.Stdout)
+	case "release-check":
+		err = releaseCheck(os.Stdout)
 	case "proof-check":
 		err = proofCheck(os.Stdout)
 	case "issuer-check":
@@ -75,7 +78,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|evaluation-check|platform-check|packaging-check|proof-check|issuer-check|issuerd-check|cover-check|crypto-check|wire-check|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|evaluation-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|cover-check|crypto-check|wire-check|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -340,9 +343,9 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- signed directory, relay descriptor, and cover-template real-crypto vectors")
 	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, exit-layer packet, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
-	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, external evaluation evidence verifier, platform adapter conformance profiles, platform packaging and entitlement conformance matrix, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, issuer service readiness harness, cover-origin deployment conformance harness")
+	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, external evaluation evidence verifier, platform adapter conformance profiles, platform packaging and entitlement conformance matrix, release readiness evidence verifier, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, issuer service readiness harness, cover-origin deployment conformance harness")
 	fmt.Fprintln(w, "not production-complete:")
-	fmt.Fprintln(w, "- live issuer deployment, signed platform release artifacts/device provisioning, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation")
+	fmt.Fprintln(w, "- live issuer deployment, real signed platform release execution/device provisioning, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation")
 }
 
 func cryptoCheck(w io.Writer) error {
@@ -533,6 +536,34 @@ func packagingCheck(w io.Writer) error {
 	}
 	if !report.Passed {
 		return fmt.Errorf("packaging-check failed platform packaging conformance")
+	}
+	return nil
+}
+
+func releaseCheck(w io.Writer) error {
+	report, err := aurorarelease.RunReleaseReadinessHarness(200)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(
+		w,
+		"release_check passed=%t artifacts=%d update_roles=%d signatures=%t provenance=%t reproducible=%t signed_update=%t provisioning=%t incident_response=%t findings=%d\n",
+		report.Passed,
+		report.ReleaseArtifacts,
+		report.UpdateRoles,
+		report.ArtifactSignatures,
+		report.Provenance,
+		report.ReproducibleBuilds,
+		report.SignedUpdatePipeline,
+		report.DeviceProvisioning,
+		report.IncidentResponsePlan,
+		len(report.Findings),
+	)
+	for _, finding := range report.Findings {
+		fmt.Fprintf(w, "release_finding %s\n", finding)
+	}
+	if !report.Passed {
+		return fmt.Errorf("release-check failed release readiness")
 	}
 	return nil
 }

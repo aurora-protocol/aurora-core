@@ -13,7 +13,6 @@ import (
 
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/protocol"
-	"github.com/aurora-protocol/aurora-core/registry"
 )
 
 const (
@@ -93,9 +92,6 @@ func (m *Manager) Open(open protocol.FlowOpen) error {
 }
 
 func (m *Manager) OpenWithOptions(open protocol.FlowOpen, opts FlowOptions) error {
-	if open.FlowOpenVersion != registry.Version20 {
-		return fmt.Errorf("flow: unsupported flow_open_version 0x%x", open.FlowOpenVersion)
-	}
 	if err := validateOpen(open); err != nil {
 		return err
 	}
@@ -249,6 +245,9 @@ func (m *Manager) PurgeClosed(now uint64) {
 }
 
 func validateOpen(open protocol.FlowOpen) error {
+	if err := protocol.ValidateFlowOpen(open); err != nil {
+		return err
+	}
 	switch open.FlowKind {
 	case FlowKindTCPStream, FlowKindUDPAssociation, FlowKindDNSExchange:
 	default:

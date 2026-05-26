@@ -16,6 +16,54 @@ func fb(b byte, n int) []byte {
 	return out
 }
 
+func TestManagerRejectsMalformedFlowOpenBeforeStateMutation(t *testing.T) {
+	base := protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           20,
+		FlowKind:         FlowKindTCPStream,
+		TargetKind:       TargetKindDomainName,
+		TargetHost:       []byte("example.com"),
+		TargetPort:       443,
+		NameBindingID:    fb(0xaa, 16),
+		DNSAnswerSetHash: fb(0xbb, 48),
+		LocalBindingMode: LocalBindingExplicitProxyAPI,
+		PriorityClass:    PriorityInteractive,
+	}
+	cases := map[string]protocol.FlowOpen{
+		"zero flow": func() protocol.FlowOpen {
+			open := base
+			open.FlowID = 0
+			return open
+		}(),
+		"udp fqdn mode": func() protocol.FlowOpen {
+			open := base
+			open.UDPFQDNMode = 0xff
+			return open
+		}(),
+		"local binding mode": func() protocol.FlowOpen {
+			open := base
+			open.LocalBindingMode = 0xff
+			return open
+		}(),
+		"priority class": func() protocol.FlowOpen {
+			open := base
+			open.PriorityClass = 0xff
+			return open
+		}(),
+	}
+	for name, open := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := NewManager()
+			if err := m.Open(open); err == nil {
+				t.Fatalf("malformed flow open was accepted: %+v", open)
+			}
+			if _, ok := m.DemuxInbound(open.FlowID); ok {
+				t.Fatalf("malformed flow open mutated manager state: %+v", open)
+			}
+		})
+	}
+}
+
 func TestUDPFlowDemuxIsFlowIDAuthoritative(t *testing.T) {
 	m := NewManager()
 	open := protocol.FlowOpen{

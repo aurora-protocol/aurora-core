@@ -401,6 +401,14 @@ func TestClientCheckCommandReportsLiveServerClientInterop(t *testing.T) {
 		"https_health=true",
 		"packet_exchange=true",
 		"https_packet_exchange=true",
+		"issuer_metadata=true",
+		"https_issuer_metadata=true",
+		"token_issue=true",
+		"https_token_issue=true",
+		"token_spend=true",
+		"https_token_spend=true",
+		"duplicate_spend_rejected=true",
+		"https_duplicate_spend_rejected=true",
 		"cover_neutral_invalid_packet=true",
 	} {
 		if !strings.Contains(text, want) {

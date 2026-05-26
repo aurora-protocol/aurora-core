@@ -383,12 +383,20 @@ func TestRunClientInteropHarnessExercisesLiveHTTPAndHTTPSBoundary(t *testing.T) 
 	if !report.HealthEndpoint || !report.PacketExchangeEndpoint || !report.CoverNeutralInvalidPacket {
 		t.Fatalf("client interop report missing live HTTP coverage: %+v", report)
 	}
-	if !report.HTTPSHealthEndpoint {
+	if !report.IssuerMetadataEndpoint || !report.TokenIssueEndpoint || !report.TokenSpendEndpoint || !report.DuplicateSpendRejected {
+		t.Fatalf("client interop report missing live issuer coverage: %+v", report)
+	}
+	if !report.HTTPSHealthEndpoint || !report.HTTPSIssuerMetadataEndpoint || !report.HTTPSTokenIssueEndpoint ||
+		!report.HTTPSTokenSpendEndpoint || !report.HTTPSDuplicateSpendRejected {
 		t.Fatalf("client interop report missing live HTTPS coverage: %+v", report)
 	}
 	formatted := FormatClientInteropReport(report)
 	if !strings.Contains(formatted, "https_packet_exchange=true") {
 		t.Fatalf("client interop report missing live HTTPS packet coverage:\n%s", formatted)
+	}
+	if !strings.Contains(formatted, "token_spend=true") || !strings.Contains(formatted, "https_token_spend=true") ||
+		!strings.Contains(formatted, "duplicate_spend_rejected=true") || !strings.Contains(formatted, "https_duplicate_spend_rejected=true") {
+		t.Fatalf("client interop report missing token spend coverage:\n%s", formatted)
 	}
 }
 

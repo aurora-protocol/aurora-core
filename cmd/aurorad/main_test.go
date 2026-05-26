@@ -133,6 +133,34 @@ func TestRunTLSModeServesHTTPSForAppleClients(t *testing.T) {
 	}
 }
 
+func TestREADMEPublicLinuxCommandUsesRequiredRuntimeGates(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var command string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "go run ./cmd/aurorad --listen 0.0.0.0:9443") {
+			command = line
+			break
+		}
+	}
+	if command == "" {
+		t.Fatal("README is missing the public Linux aurorad command")
+	}
+	for _, want := range []string{
+		"--tls-cert",
+		"--tls-key",
+		"--cover-origin-url",
+		"--spent-token-cache",
+		"--packet-mode tun",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("README public Linux aurorad command missing %q: %s", want, command)
+		}
+	}
+}
+
 func TestRunRejectsNonLoopbackTLSWithoutPersistentSpentTokenCache(t *testing.T) {
 	restoreListen := setListenAndServeTLSForTest(func(addr string, handler http.Handler, certFile, keyFile string) error {
 		return http.ErrServerClosed

@@ -132,6 +132,25 @@ func TestCoverBootstrapMessagesRoundTrip(t *testing.T) {
 	}
 }
 
+func TestVirtualAddressAssignmentWireGrammar(t *testing.T) {
+	assignment := VirtualAddressAssignment{
+		LeaseID:         fill(0xa0, 16),
+		AddressFamily:   1,
+		ClientAddress:   []byte{10, 0, 0, 2},
+		PrefixLength:    24,
+		DNSServerHint:   []byte{9, 9, 9, 9},
+		LeaseExpiryUnix: 1700000600,
+	}
+	encoded, err := Encode(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertProtocolHex(t, encoded, "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a001040a00000218010409090909000000006553f358")
+	if got := DecodeVirtualAddressAssignment(bytesReader(encoded)); !reflect.DeepEqual(got, assignment) {
+		t.Fatalf("VirtualAddressAssignment round trip mismatch:\n got=%+v\nwant=%+v", got, assignment)
+	}
+}
+
 func sampleAdmissionProof() AdmissionProof {
 	return AdmissionProof{
 		ProofVersion:          registry.Version20,

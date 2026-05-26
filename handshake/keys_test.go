@@ -228,9 +228,11 @@ func TestComputeServerFinishedRejectsPolicyAcceptVirtualAddressMismatch(t *testi
 		SelectedShape:             registry.ShapeNormal,
 		SelectedTunnelPersonality: registry.PersonalityProxyFlow,
 		VirtualAddressAssignment: &protocol.VirtualAddressAssignment{
-			AddressFamily: 1,
-			Address:       []byte{10, 0, 0, 2},
-			PrefixLength:  24,
+			LeaseID:         hx(0xaa, 16),
+			AddressFamily:   1,
+			ClientAddress:   []byte{10, 0, 0, 2},
+			PrefixLength:    24,
+			LeaseExpiryUnix: 2000000600,
 		},
 	}
 	if _, _, _, err := ComputeServerFinished(registry.SuiteHybrid768AESGCM, hx(0x33, 48), hx(0x44, 48), capsule1, accept); err == nil {
@@ -304,9 +306,11 @@ func TestComputeServerFinishedRejectsPolicyAcceptOutsideOffer(t *testing.T) {
 		"personality": func(accept *protocol.PolicyAccept) {
 			accept.SelectedTunnelPersonality = registry.PersonalityIPLite
 			accept.VirtualAddressAssignment = &protocol.VirtualAddressAssignment{
-				AddressFamily: 1,
-				Address:       []byte{10, 0, 0, 2},
-				PrefixLength:  24,
+				LeaseID:         hx(0xab, 16),
+				AddressFamily:   1,
+				ClientAddress:   []byte{10, 0, 0, 2},
+				PrefixLength:    24,
+				LeaseExpiryUnix: 2000000600,
 			}
 		},
 	}

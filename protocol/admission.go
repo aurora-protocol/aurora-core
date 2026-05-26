@@ -312,33 +312,39 @@ func DecodePolicyOffer(r *wire.Reader) PolicyOffer {
 }
 
 type VirtualAddressAssignment struct {
-	AddressFamily uint8
-	Address       []byte
-	PrefixLength  uint8
-	DNSResolvers  [][]byte
+	LeaseID         []byte
+	AddressFamily   uint64
+	ClientAddress   []byte
+	PrefixLength    uint8
+	DNSServerHint   []byte
+	LeaseExpiryUnix uint64
 }
 
 func (v VirtualAddressAssignment) EncodeTo(e *wire.Encoder) {
-	e.WriteUint8(v.AddressFamily)
-	e.WriteOpaque16(v.Address)
+	e.WriteOpaqueFixed(v.LeaseID, 16)
+	e.WriteVarint(v.AddressFamily)
+	e.WriteOpaque8(v.ClientAddress)
 	e.WriteUint8(v.PrefixLength)
-	e.WriteVarint(uint64(len(v.DNSResolvers)))
-	for _, resolver := range v.DNSResolvers {
-		e.WriteOpaque16(resolver)
+	if v.DNSServerHint == nil {
+		e.WriteBool(false)
+	} else {
+		e.WriteBool(true)
+		e.WriteOpaque8(v.DNSServerHint)
 	}
+	e.WriteUint64(v.LeaseExpiryUnix)
 }
 
 func DecodeVirtualAddressAssignment(r *wire.Reader) VirtualAddressAssignment {
 	out := VirtualAddressAssignment{
-		AddressFamily: r.ReadUint8(),
-		Address:       r.ReadOpaque16(),
+		LeaseID:       r.ReadOpaqueFixed(16),
+		AddressFamily: r.ReadVarint(),
+		ClientAddress: r.ReadOpaque8(),
 		PrefixLength:  r.ReadUint8(),
 	}
-	count := r.ReadVarint()
-	out.DNSResolvers = make([][]byte, 0, count)
-	for i := uint64(0); i < count; i++ {
-		out.DNSResolvers = append(out.DNSResolvers, r.ReadOpaque16())
+	if r.ReadBool() {
+		out.DNSServerHint = r.ReadOpaque8()
 	}
+	out.LeaseExpiryUnix = r.ReadUint64()
 	return out
 }
 

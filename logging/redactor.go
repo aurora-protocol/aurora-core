@@ -64,6 +64,7 @@ func SanitizeMessage(msg string) string {
 		"admission_key",
 		"bucket_user_mapping",
 		"CoverCapsule plaintext",
+		"raw capsule plaintext",
 		"route-wrap plaintext",
 	} {
 		msg = strings.ReplaceAll(msg, token, "[redacted-field]")
@@ -72,7 +73,7 @@ func SanitizeMessage(msg string) string {
 }
 
 func isSensitiveFieldKey(key string) bool {
-	normalized := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+	normalized := strings.ToLower(strings.NewReplacer("-", "_", " ", "_").Replace(key))
 	switch normalized {
 	case "admission_proof",
 		"replay_proof",
@@ -83,6 +84,7 @@ func isSensitiveFieldKey(key string) bool {
 		"cover_origin",
 		"admission_key",
 		"bucket_user_mapping",
+		"raw_capsule_plaintext",
 		"cover_capsule_plaintext",
 		"capsule_plaintext",
 		"route_wrap_plaintext",

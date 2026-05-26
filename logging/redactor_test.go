@@ -21,6 +21,15 @@ func TestSanitizeMessageRemovesSensitiveFieldNames(t *testing.T) {
 	}
 }
 
+func TestSanitizeMessageRemovesRawCapsulePlaintext(t *testing.T) {
+	got := SanitizeMessage("decoder rejected raw capsule plaintext before route-wrap plaintext")
+	for _, token := range []string{"raw capsule plaintext", "route-wrap plaintext"} {
+		if strings.Contains(got, token) {
+			t.Fatalf("message still contained %q after sanitization: %s", token, got)
+		}
+	}
+}
+
 func TestSanitizeMessageRemovesOperationalSensitiveFieldNames(t *testing.T) {
 	got := SanitizeMessage("bridge_locator private_relay_ip cover_origin admission_key bucket_user_mapping")
 	for _, token := range []string{
@@ -73,6 +82,20 @@ func TestSafeFieldRedactsPublicLogSensitiveOperationalFields(t *testing.T) {
 			field := SafeField(key, "sensitive-value", false)
 			if field.Value != "[redacted-field]" {
 				t.Fatalf("public-log-sensitive field was not redacted: %+v", field)
+			}
+		})
+	}
+}
+
+func TestSafeFieldRedactsRawCapsulePlaintextAliases(t *testing.T) {
+	for _, key := range []string{
+		"raw_capsule_plaintext",
+		"raw-capsule-plaintext",
+	} {
+		t.Run(key, func(t *testing.T) {
+			field := SafeField(key, "capsule-body", false)
+			if field.Value != "[redacted-field]" {
+				t.Fatalf("raw capsule plaintext field was not redacted: %+v", field)
 			}
 		})
 	}

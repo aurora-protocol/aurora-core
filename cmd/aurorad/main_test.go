@@ -111,6 +111,17 @@ func TestRunTLSModeServesHTTPSForAppleClients(t *testing.T) {
 	}
 }
 
+func TestRunRejectsNonLoopbackPlainHTTP(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--listen", "0.0.0.0:9443"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("run accepted non-loopback HTTP stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "TLS") || !strings.Contains(stderr.String(), "non-loopback") {
+		t.Fatalf("stderr missing non-loopback TLS requirement: %s", stderr.String())
+	}
+}
+
 func TestRunCoverOriginURLServesReverseProxiedCover(t *testing.T) {
 	restoreCover := setNewCoverOriginForTest(func(raw string) (http.Handler, error) {
 		if raw != "https://cover.example" {

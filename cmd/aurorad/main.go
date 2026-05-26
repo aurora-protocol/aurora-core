@@ -4,9 +4,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 
 	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/platform"
@@ -61,6 +63,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if (*tlsCert == "") != (*tlsKey == "") {
 		fmt.Fprintln(stderr, "server: TLS certificate and key must be configured together")
+		return 2
+	}
+	if *tlsCert == "" && !isLoopbackListenAddress(*listen) {
+		fmt.Fprintln(stderr, "server: TLS is required for non-loopback listen addresses")
 		return 2
 	}
 	if *readinessCheck {
@@ -150,6 +156,19 @@ func newReverseProxyCoverOrigin(raw string) (http.Handler, error) {
 
 func isValidPacketMode(mode string) bool {
 	return mode == packetModeLoopback || mode == platform.PacketTUN
+}
+
+func isLoopbackListenAddress(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func newPacketExchanger(mode string, tunConfig platform.LinuxTUNConfig) (server.PacketExchanger, io.Closer, error) {

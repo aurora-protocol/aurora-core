@@ -37,6 +37,7 @@ type BuiltCarrierRequest struct {
 	RequestClassID   uint64
 	Request          *http.Request
 	ProtocolToken    string
+	InitialStreams   [][]byte
 	InitialMessages  [][]byte
 	InitialDatagrams [][]byte
 	StreamFallback   bool
@@ -67,6 +68,7 @@ func BuildCarrierRequest(in CarrierRequestInput) (BuiltCarrierRequest, error) {
 			MethodID:        method,
 			RequestClassID:  class.ClassID,
 			Request:         req,
+			InitialStreams:  initialPayloads(payload),
 			StreamFallback:  in.Plan.UDPMode == UDPOverStreamFallback,
 			NativeDatagrams: in.Plan.UDPMode == UDPNativeDatagram,
 		}, nil
@@ -79,6 +81,7 @@ func BuildCarrierRequest(in CarrierRequestInput) (BuiltCarrierRequest, error) {
 			MethodID:        method,
 			RequestClassID:  class.ClassID,
 			Request:         req,
+			InitialStreams:  initialPayloads(payload),
 			StreamFallback:  in.Plan.UDPMode == UDPOverStreamFallback,
 			NativeDatagrams: in.Plan.UDPMode == UDPNativeDatagram,
 		}, nil
@@ -100,7 +103,7 @@ func BuildCarrierRequest(in CarrierRequestInput) (BuiltCarrierRequest, error) {
 			MethodID:        method,
 			RequestClassID:  class.ClassID,
 			Request:         req,
-			InitialMessages: [][]byte{payload},
+			InitialMessages: initialPayloads(payload),
 			StreamFallback:  in.Plan.UDPMode == UDPOverStreamFallback,
 			NativeDatagrams: in.Plan.UDPMode == UDPNativeDatagram,
 		}, nil
@@ -113,6 +116,7 @@ func BuildCarrierRequest(in CarrierRequestInput) (BuiltCarrierRequest, error) {
 			MethodID:        method,
 			RequestClassID:  class.ClassID,
 			Request:         req,
+			InitialStreams:  initialPayloads(payload),
 			StreamFallback:  in.Plan.UDPMode == UDPOverStreamFallback,
 			NativeDatagrams: in.Plan.UDPMode == UDPNativeDatagram,
 		}, nil
@@ -129,7 +133,7 @@ func BuildCarrierRequest(in CarrierRequestInput) (BuiltCarrierRequest, error) {
 			RequestClassID:   class.ClassID,
 			Request:          req,
 			ProtocolToken:    "webtransport-h3",
-			InitialDatagrams: initialDatagrams(payload),
+			InitialDatagrams: initialPayloads(payload),
 			StreamFallback:   in.Plan.UDPMode == UDPOverStreamFallback,
 			NativeDatagrams:  in.Plan.UDPMode == UDPNativeDatagram,
 		}, nil
@@ -157,7 +161,7 @@ func buildMasqueRequest(in CarrierRequestInput, class protocol.RequestClass, tar
 		RequestClassID:   class.ClassID,
 		Request:          req,
 		ProtocolToken:    token,
-		InitialDatagrams: initialDatagrams(payload),
+		InitialDatagrams: initialPayloads(payload),
 		StreamFallback:   in.Plan.UDPMode == UDPOverStreamFallback,
 		NativeDatagrams:  in.Plan.UDPMode == UDPNativeDatagram,
 	}, nil
@@ -199,7 +203,7 @@ func validateH3ExtDatagram(in CarrierRequestInput) error {
 	return nil
 }
 
-func initialDatagrams(payload []byte) [][]byte {
+func initialPayloads(payload []byte) [][]byte {
 	if len(payload) == 0 {
 		return nil
 	}

@@ -149,6 +149,119 @@ func TestBuildH2StreamCarrierRequestUsesGatewayOwnedBody(t *testing.T) {
 	}
 }
 
+func TestCarrierSessionExposesInitialOpaquePayloads(t *testing.T) {
+	tpl := transportTemplate(registry.MethodWebH2Stream)
+	plan := CarrierPlan{
+		Carrier:              Carrier{MethodID: registry.MethodWebH2Stream, Name: "web.h2.stream"},
+		UDPMode:              UDPOverStreamFallback,
+		PerformanceDowngrade: true,
+	}
+	built, err := BuildCarrierRequest(CarrierRequestInput{
+		Plan:           plan,
+		Template:       tpl,
+		RequestClassID: 1,
+		NeedCapsule:    true,
+		Scheme:         "https",
+		Authority:      "cover.example",
+		Path:           "/assets/app.bin",
+		Payload:        []byte{0x01, 0x02, 0x03},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := NewCarrierSession(built)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloads := session.InitialPayloads()
+	if len(payloads) != 1 || payloads[0].Kind != CarrierPayloadStream || !bytes.Equal(payloads[0].Data, []byte{0x01, 0x02, 0x03}) {
+		t.Fatalf("H2 initial payload was not exposed as opaque stream data: %+v", payloads)
+	}
+	payloads[0].Data[0] = 0xff
+	again := session.InitialPayloads()
+	if !bytes.Equal(again[0].Data, []byte{0x01, 0x02, 0x03}) {
+		t.Fatalf("carrier session leaked mutable payload storage: %+v", again)
+	}
+}
+
+func TestCarrierSessionMapsCoreDatagramsThroughCarrierRules(t *testing.T) {
+	h2Session, err := NewCarrierSession(BuiltCarrierRequest{
+		MethodID:       registry.MethodWebH2Stream,
+		StreamFallback: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2Payload, err := h2Session.SendDatagram([]byte{0xaa})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h2Payload.Kind != CarrierPayloadStream || !bytes.Equal(h2Payload.Data, []byte{0xaa}) {
+		t.Fatalf("H2 datagram fallback used wrong carrier payload: %+v", h2Payload)
+	}
+
+	wsSession, err := NewCarrierSession(BuiltCarrierRequest{
+		MethodID:       registry.MethodWebH1WS,
+		StreamFallback: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsPayload, err := wsSession.SendDatagram([]byte{0xbb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wsPayload.Kind != CarrierPayloadMessage || !bytes.Equal(wsPayload.Data, []byte{0xbb}) {
+		t.Fatalf("WebSocket datagram fallback used wrong carrier payload: %+v", wsPayload)
+	}
+
+	h3Session, err := NewCarrierSession(BuiltCarrierRequest{
+		MethodID:        registry.MethodWebH3ExtDgram,
+		NativeDatagrams: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h3Payload, err := h3Session.SendDatagram([]byte{0xcc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h3Payload.Kind != CarrierPayloadDatagram || !bytes.Equal(h3Payload.Data, []byte{0xcc}) {
+		t.Fatalf("H3 native datagram used wrong carrier payload: %+v", h3Payload)
+	}
+}
+
+func TestCarrierSessionRejectsAmbiguousDatagramMode(t *testing.T) {
+	if _, err := NewCarrierSession(BuiltCarrierRequest{
+		MethodID:        registry.MethodWebH3ExtDgram,
+		StreamFallback:  true,
+		NativeDatagrams: true,
+	}); err == nil {
+		t.Fatalf("carrier session accepted both stream fallback and native datagrams")
+	}
+}
+
+func TestCarrierSessionRejectsMethodDatagramModeMismatch(t *testing.T) {
+	if _, err := NewCarrierSession(BuiltCarrierRequest{
+		MethodID:        registry.MethodWebH2Stream,
+		NativeDatagrams: true,
+	}); err == nil {
+		t.Fatalf("H2 carrier session accepted native datagram mode")
+	}
+	if _, err := NewCarrierSession(BuiltCarrierRequest{
+		MethodID:       registry.MethodWebH3ExtDgram,
+		StreamFallback: true,
+	}); err == nil {
+		t.Fatalf("H3 ext-dgram carrier session accepted stream fallback mode")
+	}
+	if _, err := NewCarrierSession(BuiltCarrierRequest{
+		MethodID:       0xdead,
+		StreamFallback: true,
+	}); err == nil {
+		t.Fatalf("carrier session accepted unknown method")
+	}
+}
+
 func TestBuildH3StreamCarrierRequestUsesRequestBodyStream(t *testing.T) {
 	tpl := transportTemplate(registry.MethodWebH3Stream)
 	plan := CarrierPlan{

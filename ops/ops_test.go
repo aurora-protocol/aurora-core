@@ -6,8 +6,17 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
+	"io"
+	"math/big"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/failure"
@@ -499,6 +508,170 @@ type outageVerifierTransport struct{}
 
 func (outageVerifierTransport) ExchangeIssuerVerifier(protocol.IssuerVerifierServiceRecord, protocol.IssuerVerifierRequest) (protocol.IssuerVerifierResponse, error) {
 	return protocol.IssuerVerifierResponse{}, errors.New("operator verifier unavailable")
+}
+
+func TestMTLSIssuerVerifierTransportExchangesSignedResponse(t *testing.T) {
+	service := verifierServiceRecord()
+	serviceSigner := attachVerifierServiceSigningKey(t, &service)
+	server, client := startVerifierServiceTLSServer(t, &service, serviceSigner, serviceSigner)
+	defer server.Close()
+
+	err := VerifyIssuerVerifierService(IssuerVerifierServiceVerificationInput{
+		Request:   verifierServiceVerificationRequest(t, service),
+		Transport: MTLSIssuerVerifierTransport{Client: client},
+	})
+	if err != nil {
+		t.Fatalf("mTLS verifier service exchange failed: %v", err)
+	}
+}
+
+func TestMTLSIssuerVerifierTransportRejectsServiceAuthKeyMismatch(t *testing.T) {
+	service := verifierServiceRecord()
+	serviceSigner := attachVerifierServiceSigningKey(t, &service)
+	mismatchedTLSKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := startVerifierServiceTLSServer(t, &service, mismatchedTLSKey, serviceSigner)
+	defer server.Close()
+
+	err = VerifyIssuerVerifierService(IssuerVerifierServiceVerificationInput{
+		Request:   verifierServiceVerificationRequest(t, service),
+		Transport: MTLSIssuerVerifierTransport{Client: client},
+	})
+	var failureErr *failure.Error
+	if !errors.As(err, &failureErr) || failureErr.Kind != failure.VerifierUnavailable {
+		t.Fatalf("service auth key mismatch error = %T %[1]v, want %v", err, failure.VerifierUnavailable)
+	}
+}
+
+func verifierServiceVerificationRequest(t *testing.T, service protocol.IssuerVerifierServiceRecord) IssuerVerifierRequestInput {
+	t.Helper()
+	proof, replay, admissionContextHash, handshakeBinding := verifierProofReplay(t)
+	return IssuerVerifierRequestInput{
+		Service:                   service,
+		AdmissionProof:            proof,
+		ReplayProof:               replay,
+		IssuerMetadataHash:        rb(0x30, 48),
+		RelayDescriptorHash:       rb(0x31, 48),
+		RouteInstanceID:           77,
+		HopIndex:                  1,
+		ReplayEpochValidUntilUnix: 800,
+		HandshakeBindingContext:   handshakeBinding,
+		AdmissionContextHash:      admissionContextHash,
+		ChallengeDigest:           rb(0x32, 32),
+		AuthenticatorInputHash:    rb(0x33, 48),
+		TokenSpentCache:           admission.NewMemoryReplayCache(),
+		BootstrapDedupCache:       admission.NewMemoryReplayCache(),
+		RequestNonce:              rb(0x34, 32),
+		RequestTimeUnix:           100,
+		NowUnix:                   100,
+		RequestAuthImplemented:    true,
+	}
+}
+
+func startVerifierServiceTLSServer(t *testing.T, service *protocol.IssuerVerifierServiceRecord, serverKey, responseKey *ecdsa.PrivateKey) (*httptest.Server, *http.Client) {
+	t.Helper()
+	serverCert := selfSignedTLSTestCertificate(t, serverKey)
+	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientCert := selfSignedTLSTestCertificate(t, clientKey)
+	roots := x509.NewCertPool()
+	roots.AddCert(serverCert.Leaf)
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil || r.TLS.Version != tls.VersionTLS13 || len(r.TLS.PeerCertificates) == 0 {
+			t.Errorf("request did not use TLS 1.3 mutual authentication")
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
+		reader := wire.NewReader(body)
+		req := protocol.DecodeIssuerVerifierRequest(reader)
+		if reader.Err() != nil || !reader.EOF() {
+			t.Errorf("decode verifier request failed: err=%v eof=%v", reader.Err(), reader.EOF())
+			return
+		}
+		requestHash, err := IssuerVerifierRequestHash(req)
+		if err != nil {
+			t.Errorf("request hash failed: %v", err)
+			return
+		}
+		resp := protocol.IssuerVerifierResponse{
+			ResponseVersion: registry.Version20,
+			ServiceID:       append([]byte(nil), service.ServiceID...),
+			RequestHash:     requestHash,
+			Decision:        registry.VerifierDecisionAccept,
+			TokenSpentKey:   append([]byte(nil), req.TokenSpentKey...),
+			ValidUntilUnix:  req.RequestTimeUnix + 100,
+			ResponseNonce:   rb(0x40, 32),
+		}
+		signVerifierResponse(t, responseKey, &resp)
+		encoded, err := protocol.Encode(resp)
+		if err != nil {
+			t.Errorf("encode verifier response failed: %v", err)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(encoded)
+	}))
+	server.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequireAnyClientCert,
+	}
+	server.StartTLS()
+	service.ServiceLocator = protocol.RoutingRecord{
+		RoutingRecordID:   rb(0x70, 16),
+		TransportFamilyID: registry.IssuerVerifierVOPRFMTLS13,
+		LocatorType:       registry.LocatorAuthority,
+		LocatorBody:       []byte(server.Listener.Addr().String()),
+		Priority:          1,
+		NotBeforeUnix:     10,
+		NotAfterUnix:      900,
+	}
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			MinVersion:   tls.VersionTLS13,
+			RootCAs:      roots,
+			Certificates: []tls.Certificate{clientCert},
+		}},
+	}
+	return server, client
+}
+
+func selfSignedTLSTestCertificate(t *testing.T, priv *ecdsa.PrivateKey) tls.Certificate {
+	t.Helper()
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+		DNSNames:     []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  priv,
+		Leaf:        leaf,
+	}
 }
 
 func verifierServiceRecord() protocol.IssuerVerifierServiceRecord {

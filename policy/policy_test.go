@@ -68,6 +68,16 @@ func TestAdversarialSelectionRequiresLowLatencyOverrideForFast1(t *testing.T) {
 	}
 }
 
+func TestSmartProfileDoesNotSilentlyEscalateToEmergencyWeb(t *testing.T) {
+	got := SmartProfile("severe")
+	if got.ID == registry.PolicyEmergencyWeb {
+		t.Fatalf("smart profile silently escalated to emergency-web")
+	}
+	if got.ID != registry.PolicyAdversarialStrict {
+		t.Fatalf("severe smart profile = 0x%x, want adversarial strict", got.ID)
+	}
+}
+
 func TestVisibleProxyMethodsStayProfileAllowlistedWithoutStealthGate(t *testing.T) {
 	custom := Profile{Name: "custom-nonstealth"}
 	if safeCandidate(registry.RouteFast1, registry.MethodMasqueConnectIP, 1).PassesStealthGate(custom) {

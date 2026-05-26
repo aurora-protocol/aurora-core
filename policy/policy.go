@@ -61,7 +61,7 @@ func SmartProfile(pathClass string) Profile {
 		p, _ := ProfileByID(registry.PolicyAdversarialStrict)
 		return p
 	case "severe":
-		p, _ := ProfileByID(registry.PolicyEmergencyWeb)
+		p, _ := ProfileByID(registry.PolicyAdversarialStrict)
 		return p
 	default:
 		p, _ := ProfileByID(registry.PolicyAdversarialDPI)

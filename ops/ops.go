@@ -98,8 +98,8 @@ type IssuerVerifierRequestInput struct {
 	AdmissionContextHash      []byte
 	ChallengeDigest           []byte
 	AuthenticatorInputHash    []byte
-	TokenSpentCache           *admission.MemoryReplayCache
-	BootstrapDedupCache       *admission.MemoryReplayCache
+	TokenSpentCache           admission.ReplayCache
+	BootstrapDedupCache       admission.ReplayCache
 	RequestNonce              []byte
 	RequestTimeUnix           uint64
 	NowUnix                   uint64

@@ -341,7 +341,11 @@ func (s *Service) SpendToken(proof protocol.AdmissionProof) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !s.spentTokens.InsertIfAbsent(spentKey) {
+	inserted, err := s.spentTokens.InsertIfAbsent(spentKey)
+	if err != nil {
+		return nil, fmt.Errorf("issuerd: spent-token store failed: %w", err)
+	}
+	if !inserted {
 		return nil, fmt.Errorf("issuerd: token already spent")
 	}
 	return spentKey, nil
@@ -385,7 +389,11 @@ func (s *Service) VerifyIssuerVerifierRequest(req protocol.IssuerVerifierRequest
 		return protocol.IssuerVerifierResponse{}, err
 	}
 	decision := registry.VerifierDecisionAccept
-	if !s.spentTokens.InsertIfAbsent(req.TokenSpentKey) {
+	inserted, err := s.spentTokens.InsertIfAbsent(req.TokenSpentKey)
+	if err != nil {
+		return protocol.IssuerVerifierResponse{}, fmt.Errorf("issuerd: spent-token store failed: %w", err)
+	}
+	if !inserted {
 		decision = registry.VerifierDecisionRejectReplayOrSpent
 	}
 	nonce := make([]byte, 32)

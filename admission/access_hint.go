@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
-	"sync"
 
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/wire"
@@ -76,11 +75,11 @@ func ComputeSpentHintKey(cred AccessHintCredential) ([]byte, error) {
 	return auroracrypto.PreHash(preimage), nil
 }
 
-func VerifyAndSpendAccessHint(cache *MemoryReplayCache, cred AccessHintCredential, bindingContext, clientNonce, receivedHint []byte) error {
+func VerifyAndSpendAccessHint(cache ReplayCache, cred AccessHintCredential, bindingContext, clientNonce, receivedHint []byte) error {
 	return VerifyAndSpendAccessHintAt(cache, cred, bindingContext, clientNonce, receivedHint, 0)
 }
 
-func VerifyAndSpendAccessHintAt(cache *MemoryReplayCache, cred AccessHintCredential, bindingContext, clientNonce, receivedHint []byte, nowUnix uint64) error {
+func VerifyAndSpendAccessHintAt(cache ReplayCache, cred AccessHintCredential, bindingContext, clientNonce, receivedHint []byte, nowUnix uint64) error {
 	if cache == nil {
 		return fmt.Errorf("admission: missing access hint replay cache")
 	}
@@ -98,7 +97,11 @@ func VerifyAndSpendAccessHintAt(cache *MemoryReplayCache, cred AccessHintCredent
 	if err != nil {
 		return err
 	}
-	if !cache.InsertIfAbsent(spentKey) {
+	inserted, err := cache.InsertIfAbsent(spentKey)
+	if err != nil {
+		return fmt.Errorf("admission: access hint replay cache failed: %w", err)
+	}
+	if !inserted {
 		return fmt.Errorf("admission: access hint already spent")
 	}
 	return nil
@@ -115,31 +118,4 @@ func (c AccessHintCredential) validate() error {
 		return fmt.Errorf("admission: AccessHint max_uses must be 1")
 	}
 	return nil
-}
-
-type MemoryReplayCache struct {
-	mu   sync.Mutex
-	seen map[string]struct{}
-}
-
-func NewMemoryReplayCache() *MemoryReplayCache {
-	return &MemoryReplayCache{seen: make(map[string]struct{})}
-}
-
-func (c *MemoryReplayCache) InsertIfAbsent(key []byte) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	k := string(key)
-	if _, ok := c.seen[k]; ok {
-		return false
-	}
-	c.seen[k] = struct{}{}
-	return true
-}
-
-func (c *MemoryReplayCache) Has(key []byte) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	_, ok := c.seen[string(key)]
-	return ok
 }

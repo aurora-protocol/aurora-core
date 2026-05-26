@@ -240,7 +240,7 @@ func OpenPrivatePrelude(env EnvelopeInput, envelope protocol.RoutePreludeEnvelop
 	return private, nil
 }
 
-func OpenAndVerifyPrivatePrelude(cache *admission.MemoryReplayCache, env EnvelopeInput, envelope protocol.RoutePreludeEnvelope, cred admission.AccessHintCredential, nowUnix uint64) (PrivatePrelude, []byte, error) {
+func OpenAndVerifyPrivatePrelude(cache admission.ReplayCache, env EnvelopeInput, envelope protocol.RoutePreludeEnvelope, cred admission.AccessHintCredential, nowUnix uint64) (PrivatePrelude, []byte, error) {
 	private, err := OpenPrivatePrelude(env, envelope)
 	if err != nil {
 		return PrivatePrelude{}, nil, err
@@ -263,7 +263,7 @@ func OpenAndVerifyPrivatePrelude(cache *admission.MemoryReplayCache, env Envelop
 	return private, binding, nil
 }
 
-func OpenAndVerifyPrivatePreludeWithWrapNonceCache(accessHintCache *admission.MemoryReplayCache, wrapNonceCache *WrapNonceReplayCache, env EnvelopeInput, envelope protocol.RoutePreludeEnvelope, cred admission.AccessHintCredential, nowUnix uint64) (PrivatePrelude, []byte, error) {
+func OpenAndVerifyPrivatePreludeWithWrapNonceCache(accessHintCache admission.ReplayCache, wrapNonceCache *WrapNonceReplayCache, env EnvelopeInput, envelope protocol.RoutePreludeEnvelope, cred admission.AccessHintCredential, nowUnix uint64) (PrivatePrelude, []byte, error) {
 	private, err := OpenPrivatePrelude(env, envelope)
 	if err != nil {
 		return PrivatePrelude{}, nil, err

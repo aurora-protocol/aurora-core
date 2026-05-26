@@ -139,8 +139,8 @@ type ReplayVerificationInput struct {
 	HopIndex                uint8
 	HandshakeBindingContext []byte
 	AdmissionContextHash    []byte
-	TokenSpentCache         *MemoryReplayCache
-	BootstrapDedupCache     *MemoryReplayCache
+	TokenSpentCache         ReplayCache
+	BootstrapDedupCache     ReplayCache
 	NowUnix                 uint64
 	AllowLabProofs          bool
 }
@@ -151,6 +151,12 @@ func VerifyAndSpendReplay(in ReplayVerificationInput) (tokenSpentKey, bootstrapD
 	}
 	if err := in.ReplayProof.ValidateStructural(); err != nil {
 		return nil, nil, err
+	}
+	if in.TokenSpentCache == nil {
+		return nil, nil, fmt.Errorf("admission: missing token spent replay cache")
+	}
+	if in.BootstrapDedupCache == nil {
+		return nil, nil, fmt.Errorf("admission: missing bootstrap replay cache")
 	}
 	tokenRedemptionHash, err := TokenRedemptionHash(in.AdmissionProof)
 	if err != nil {
@@ -174,10 +180,18 @@ func VerifyAndSpendReplay(in ReplayVerificationInput) (tokenSpentKey, bootstrapD
 	if err != nil {
 		return nil, nil, err
 	}
-	if in.TokenSpentCache != nil && !in.TokenSpentCache.InsertIfAbsent(tokenSpentKey) {
+	inserted, err := in.TokenSpentCache.InsertIfAbsent(tokenSpentKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("admission: token spent replay cache failed: %w", err)
+	}
+	if !inserted {
 		return nil, nil, fmt.Errorf("admission: token already spent")
 	}
-	if in.BootstrapDedupCache != nil && !in.BootstrapDedupCache.InsertIfAbsent(bootstrapDedupKey) {
+	inserted, err = in.BootstrapDedupCache.InsertIfAbsent(bootstrapDedupKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("admission: bootstrap replay cache failed: %w", err)
+	}
+	if !inserted {
 		return nil, nil, fmt.Errorf("admission: bootstrap attempt already seen")
 	}
 	return tokenSpentKey, bootstrapDedupKey, nil

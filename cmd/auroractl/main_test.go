@@ -397,6 +397,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "Privacy Pass Blind RSA production proof harness") {
 		t.Fatalf("capabilities output missing production proof harness:\n%s", text)
 	}
+	if !strings.Contains(text, "append-only file replay cache") {
+		t.Fatalf("capabilities output missing persistent replay cache support:\n%s", text)
+	}
 	if !strings.Contains(text, "issuer operations conformance harness") {
 		t.Fatalf("capabilities output missing issuer operations harness:\n%s", text)
 	}

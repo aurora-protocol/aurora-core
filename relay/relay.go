@@ -722,8 +722,8 @@ type VerifierServiceAdmissionInput struct {
 	AuthenticatorInputHash    []byte
 	RequestNonce              []byte
 	RequestTimeUnix           uint64
-	TokenSpentCache           *admission.MemoryReplayCache
-	BootstrapDedupCache       *admission.MemoryReplayCache
+	TokenSpentCache           admission.ReplayCache
+	BootstrapDedupCache       admission.ReplayCache
 }
 
 func (p AdmissionPolicy) AllowsProof(proof protocol.AdmissionProof) error {

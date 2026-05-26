@@ -386,7 +386,6 @@ func verifierProofReplay(t *testing.T) (protocol.AdmissionProof, protocol.Replay
 		ExpiryUnix:            500,
 		TokenNonce:            rb(0x13, 32),
 		RedemptionContextHash: admissionContextHash,
-		TokenPublicMetadata:   []byte("metadata"),
 		TokenAuthenticator:    []byte("authenticator"),
 	}
 	proof.TokenPublicMetadata, _, _ = verifierTokenMetadataForTest(t, proof, rb(0x30, 48), []byte("issuer.example"), []byte("origin.example"))

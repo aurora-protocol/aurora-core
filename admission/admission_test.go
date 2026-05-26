@@ -238,6 +238,7 @@ func TestVerifyAndSpendReplayRejectsStructurallyInvalidReplayProof(t *testing.T)
 				RedemptionContextHash: admissionContext,
 				TokenAuthenticator:    []byte("token"),
 			}
+			proof.TokenPublicMetadata = productionTokenMetadataForTest(t, proof)
 			redemption, err := TokenRedemptionHash(proof)
 			if err != nil {
 				t.Fatal(err)
@@ -289,6 +290,9 @@ func TestVerifyAndSpendReplayRejectsStructurallyInvalidAdmissionProof(t *testing
 		"blind rsa binding proof without profile": func(proof *protocol.AdmissionProof) {
 			proof.BindingProof = []byte("binding")
 		},
+		"production token metadata malformed": func(proof *protocol.AdmissionProof) {
+			proof.TokenPublicMetadata = []byte("metadata")
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			admissionContext := rep(0x50, 48)
@@ -305,6 +309,7 @@ func TestVerifyAndSpendReplayRejectsStructurallyInvalidAdmissionProof(t *testing
 				RedemptionContextHash: admissionContext,
 				TokenAuthenticator:    []byte("token"),
 			}
+			proof.TokenPublicMetadata = productionTokenMetadataForTest(t, proof)
 			mutate(&proof)
 			redemption, err := TokenRedemptionHash(proof)
 			if err != nil {
@@ -335,4 +340,21 @@ func TestVerifyAndSpendReplayRejectsStructurallyInvalidAdmissionProof(t *testing
 			}
 		})
 	}
+}
+
+func productionTokenMetadataForTest(t *testing.T, proof protocol.AdmissionProof) []byte {
+	t.Helper()
+	metadata := protocol.AuroraTokenMetadata{
+		RFC9577TokenType:       uint16(proof.ProofType),
+		RFC9577ChallengeDigest: rep(0x90, 32),
+		RFC9577TokenKeyID:      append([]byte(nil), proof.TokenKeyID...),
+		IssuerName:             []byte("issuer.example"),
+		OriginInfo:             []byte("origin.example"),
+		IssuerMetadataHash:     rep(0x91, 48),
+	}
+	encoded, err := protocol.Encode(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }

@@ -152,7 +152,7 @@ func TestVirtualAddressAssignmentWireGrammar(t *testing.T) {
 }
 
 func sampleAdmissionProof() AdmissionProof {
-	return AdmissionProof{
+	proof := AdmissionProof{
 		ProofVersion:          registry.Version20,
 		ProofType:             registry.ProofBlindRSA2048,
 		IssuerID:              fill(0x10, 16),
@@ -162,11 +162,28 @@ func sampleAdmissionProof() AdmissionProof {
 		ExpiryUnix:            1700000600,
 		TokenNonce:            fill(0x14, 32),
 		RedemptionContextHash: fill(0x15, 48),
-		TokenPublicMetadata:   []byte("metadata"),
 		TokenAuthenticator:    []byte("authenticator"),
 		BindingProof:          []byte{},
 		Extensions:            []Extension{{ExtensionType: 0x7005, Body: []byte("admission")}},
 	}
+	proof.TokenPublicMetadata = sampleTokenMetadata(proof)
+	return proof
+}
+
+func sampleTokenMetadata(proof AdmissionProof) []byte {
+	metadata := AuroraTokenMetadata{
+		RFC9577TokenType:       uint16(proof.ProofType),
+		RFC9577ChallengeDigest: fill(0x90, 32),
+		RFC9577TokenKeyID:      append([]byte(nil), proof.TokenKeyID...),
+		IssuerName:             []byte("issuer.example"),
+		OriginInfo:             []byte("origin.example"),
+		IssuerMetadataHash:     fill(0x91, 48),
+	}
+	encoded, err := Encode(metadata)
+	if err != nil {
+		panic(err)
+	}
+	return encoded
 }
 
 func sampleReplayProof() ReplayProof {

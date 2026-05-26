@@ -343,7 +343,7 @@ func flowOpenFrame(t *testing.T, open protocol.FlowOpen) protocol.AuroraFrame {
 }
 
 func relayAdmissionProof(proofType uint64) protocol.AdmissionProof {
-	return protocol.AdmissionProof{
+	proof := protocol.AdmissionProof{
 		ProofVersion:          registry.Version20,
 		ProofType:             proofType,
 		IssuerID:              bytesOf(0x10, 16),
@@ -353,9 +353,29 @@ func relayAdmissionProof(proofType uint64) protocol.AdmissionProof {
 		ExpiryUnix:            200,
 		TokenNonce:            bytesOf(0x13, 32),
 		RedemptionContextHash: bytesOf(0x14, 48),
-		TokenPublicMetadata:   []byte("metadata"),
 		TokenAuthenticator:    []byte("authenticator"),
 	}
+	switch proofType {
+	case registry.ProofVOPRFP384SHA384, registry.ProofBlindRSA2048:
+		proof.TokenPublicMetadata = relayTokenMetadataForProof(proof)
+	}
+	return proof
+}
+
+func relayTokenMetadataForProof(proof protocol.AdmissionProof) []byte {
+	metadata := protocol.AuroraTokenMetadata{
+		RFC9577TokenType:       uint16(proof.ProofType),
+		RFC9577ChallengeDigest: bytesOf(0x90, 32),
+		RFC9577TokenKeyID:      append([]byte(nil), proof.TokenKeyID...),
+		IssuerName:             []byte("issuer.example"),
+		OriginInfo:             []byte("origin.example"),
+		IssuerMetadataHash:     bytesOf(0x91, 48),
+	}
+	encoded, err := protocol.Encode(metadata)
+	if err != nil {
+		panic(err)
+	}
+	return encoded
 }
 
 func bytesOf(b byte, n int) []byte {

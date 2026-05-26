@@ -98,6 +98,16 @@ func (p AdmissionProof) ValidateStructural(now uint64, allowLab bool) error {
 			return fmt.Errorf("protocol: proof type 0x%x requires zero-length binding proof without issuer profile", p.ProofType)
 		}
 	}
+	switch p.ProofType {
+	case registry.ProofVOPRFP384SHA384, registry.ProofBlindRSA2048:
+		metadata, err := DecodeAuroraTokenMetadataBytes(p.TokenPublicMetadata)
+		if err != nil {
+			return fmt.Errorf("protocol: invalid production token metadata: %w", err)
+		}
+		if err := metadata.ValidateForProof(p, metadata.IssuerMetadataHash); err != nil {
+			return err
+		}
+	}
 	if p.ProofType == registry.ProofOpaqueIssuer && len(p.BindingProof) > 4096 {
 		return fmt.Errorf("protocol: opaque issuer binding proof length %d exceeds 4096", len(p.BindingProof))
 	}

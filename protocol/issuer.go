@@ -236,7 +236,6 @@ func (s IssuerVerifierServiceRecord) EncodeTo(e *wire.Encoder) {
 }
 
 func DecodeIssuerVerifierServiceRecord(r *wire.Reader) IssuerVerifierServiceRecord {
-	count := func() uint64 { return r.ReadVarint() }
 	out := IssuerVerifierServiceRecord{
 		ServiceID:         r.ReadOpaqueFixed(16),
 		ServiceKind:       r.ReadVarint(),
@@ -245,7 +244,7 @@ func DecodeIssuerVerifierServiceRecord(r *wire.Reader) IssuerVerifierServiceReco
 		ServiceAuthKey:    DecodePublicKeyRecord(r),
 		AllowedProofTypes: r.ReadVarintVector(),
 	}
-	n := count()
+	n := r.ReadVectorCount("allowed relay bucket")
 	for i := uint64(0); i < n; i++ {
 		out.AllowedRelayBucketIDs = append(out.AllowedRelayBucketIDs, r.ReadOpaqueFixed(16))
 	}
@@ -358,27 +357,27 @@ func DecodeIssuerMetadata(r *wire.Reader) IssuerMetadata {
 		IssuerName:          r.ReadOpaque16(),
 		SupportedProofTypes: r.ReadVarintVector(),
 	}
-	tokenKeys := r.ReadVarint()
+	tokenKeys := r.ReadVectorCount("issuer token key")
 	out.TokenKeyMappings = make([]IssuerTokenKeyRecord, 0, tokenKeys)
 	for i := uint64(0); i < tokenKeys; i++ {
 		out.TokenKeyMappings = append(out.TokenKeyMappings, DecodeIssuerTokenKeyRecord(r))
 	}
-	originPolicies := r.ReadVarint()
+	originPolicies := r.ReadVectorCount("origin policy")
 	out.OriginInfoPolicies = make([]OriginInfoPolicy, 0, originPolicies)
 	for i := uint64(0); i < originPolicies; i++ {
 		out.OriginInfoPolicies = append(out.OriginInfoPolicies, DecodeOriginInfoPolicy(r))
 	}
-	relayScopes := r.ReadVarint()
+	relayScopes := r.ReadVectorCount("relay bucket scope")
 	out.RelayBucketScopes = make([]RelayBucketScope, 0, relayScopes)
 	for i := uint64(0); i < relayScopes; i++ {
 		out.RelayBucketScopes = append(out.RelayBucketScopes, DecodeRelayBucketScope(r))
 	}
-	bindingPolicies := r.ReadVarint()
+	bindingPolicies := r.ReadVectorCount("auxiliary binding policy")
 	out.AuxiliaryBindingPolicies = make([]AuxiliaryBindingPolicy, 0, bindingPolicies)
 	for i := uint64(0); i < bindingPolicies; i++ {
 		out.AuxiliaryBindingPolicies = append(out.AuxiliaryBindingPolicies, DecodeAuxiliaryBindingPolicy(r))
 	}
-	services := r.ReadVarint()
+	services := r.ReadVectorCount("verifier service")
 	out.VerifierServices = make([]IssuerVerifierServiceRecord, 0, services)
 	for i := uint64(0); i < services; i++ {
 		out.VerifierServices = append(out.VerifierServices, DecodeIssuerVerifierServiceRecord(r))

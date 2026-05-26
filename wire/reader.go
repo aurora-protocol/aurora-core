@@ -16,6 +16,12 @@ func (r *Reader) Err() error {
 	return r.err
 }
 
+func (r *Reader) SetErr(err error) {
+	if r.err == nil && err != nil {
+		r.err = err
+	}
+}
+
 func (r *Reader) Remaining() int {
 	return len(r.b) - r.off
 }
@@ -133,12 +139,8 @@ func (r *Reader) ReadPreHash() []byte {
 }
 
 func (r *Reader) ReadVarintVector() []uint64 {
-	n := r.ReadVarint()
+	n := r.ReadVectorCount("varint vector")
 	if r.err != nil {
-		return nil
-	}
-	if n > uint64(r.Remaining()) {
-		r.err = fmt.Errorf("wire: vector length %d exceeds remaining bytes", n)
 		return nil
 	}
 	out := make([]uint64, 0, n)
@@ -146,4 +148,19 @@ func (r *Reader) ReadVarintVector() []uint64 {
 		out = append(out, r.ReadVarint())
 	}
 	return out
+}
+
+func (r *Reader) ReadVectorCount(label string) uint64 {
+	n := r.ReadVarint()
+	if r.err != nil {
+		return 0
+	}
+	if label == "" {
+		label = "vector"
+	}
+	if n > uint64(r.Remaining()) {
+		r.SetErr(fmt.Errorf("wire: %s count %d exceeds remaining bytes %d", label, n, r.Remaining()))
+		return 0
+	}
+	return n
 }

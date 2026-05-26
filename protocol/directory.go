@@ -75,7 +75,7 @@ func DecodeDirectoryConsensus(r *wire.Reader) DirectoryConsensus {
 		BridgeBucketCommitment:  r.ReadPreHash(),
 		IssuerMetadataRoot:      r.ReadPreHash(),
 	}
-	count := r.ReadVarint()
+	count := r.ReadVectorCount("authority signature")
 	out.AuthoritySignatures = make([]SignatureEntry, 0, count)
 	for i := uint64(0); i < count; i++ {
 		out.AuthoritySignatures = append(out.AuthoritySignatures, DecodeSignatureEntry(r))
@@ -204,12 +204,12 @@ func DecodeRelayDescriptor(r *wire.Reader) RelayDescriptor {
 		SupportedPolicyIDsCommitment: r.ReadPreHash(),
 		SupportedShapeIDsCommitment:  r.ReadPreHash(),
 	}
-	records := r.ReadVarint()
+	records := r.ReadVectorCount("routing record")
 	out.PublicRoutingRecords = make([]RoutingRecord, 0, records)
 	for i := uint64(0); i < records; i++ {
 		out.PublicRoutingRecords = append(out.PublicRoutingRecords, DecodeRoutingRecord(r))
 	}
-	hashes := r.ReadVarint()
+	hashes := r.ReadVectorCount("cover-template hash")
 	out.CoverTemplateInstanceHashes = make([][]byte, 0, hashes)
 	for i := uint64(0); i < hashes; i++ {
 		out.CoverTemplateInstanceHashes = append(out.CoverTemplateInstanceHashes, r.ReadPreHash())
@@ -579,17 +579,17 @@ func DecodeCoverTemplate(r *wire.Reader) CoverTemplate {
 		PublicNameHash:        r.ReadPreHash(),
 		CoverOriginCommitment: r.ReadPreHash(),
 	}
-	classes := r.ReadVarint()
+	classes := r.ReadVectorCount("request class")
 	out.RequestClasses = make([]RequestClass, 0, classes)
 	for i := uint64(0); i < classes; i++ {
 		out.RequestClasses = append(out.RequestClasses, DecodeRequestClass(r))
 	}
-	gatewayCommitments := r.ReadVarint()
+	gatewayCommitments := r.ReadVectorCount("gateway slot commitment")
 	out.GatewayOwnedSlotCommitments = make([][]byte, 0, gatewayCommitments)
 	for i := uint64(0); i < gatewayCommitments; i++ {
 		out.GatewayOwnedSlotCommitments = append(out.GatewayOwnedSlotCommitments, r.ReadPreHash())
 	}
-	passThroughCommitments := r.ReadVarint()
+	passThroughCommitments := r.ReadVectorCount("origin pass-through slot commitment")
 	out.OriginPassThroughSlotCommitments = make([][]byte, 0, passThroughCommitments)
 	for i := uint64(0); i < passThroughCommitments; i++ {
 		out.OriginPassThroughSlotCommitments = append(out.OriginPassThroughSlotCommitments, r.ReadPreHash())

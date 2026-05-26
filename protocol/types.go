@@ -38,7 +38,7 @@ func DecodeExtension(r *wire.Reader) Extension {
 }
 
 func DecodeExtensions(r *wire.Reader) []Extension {
-	n := r.ReadVarint()
+	n := r.ReadVectorCount("extension")
 	if r.Err() != nil {
 		return nil
 	}

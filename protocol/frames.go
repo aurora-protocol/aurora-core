@@ -43,7 +43,7 @@ func (b FrameBlock) EncodeTo(e *wire.Encoder) {
 
 func DecodeFrameBlock(encoded []byte) (FrameBlock, error) {
 	r := wire.NewReader(encoded)
-	count := r.ReadVarint()
+	count := r.ReadVectorCount("frame")
 	block := FrameBlock{Frames: make([]AuroraFrame, 0, count)}
 	for i := uint64(0); i < count; i++ {
 		block.Frames = append(block.Frames, DecodeAuroraFrame(r))

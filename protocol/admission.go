@@ -92,6 +92,9 @@ func (p AdmissionProof) ValidateStructural(now uint64, allowLab bool) error {
 	if len(p.RedemptionContextHash) != 48 {
 		return fmt.Errorf("protocol: redemption context hash must be 48 bytes")
 	}
+	if p.ProofType == registry.ProofOpaqueIssuer && len(p.BindingProof) > 4096 {
+		return fmt.Errorf("protocol: opaque issuer binding proof length %d exceeds 4096", len(p.BindingProof))
+	}
 	if err := ValidateExtensions(p.Extensions, nil); err != nil {
 		return err
 	}

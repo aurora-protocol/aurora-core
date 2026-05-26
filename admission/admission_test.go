@@ -283,6 +283,10 @@ func TestVerifyAndSpendReplayRejectsStructurallyInvalidAdmissionProof(t *testing
 				Body:          []byte("required"),
 			}}
 		},
+		"opaque issuer binding proof too long": func(proof *protocol.AdmissionProof) {
+			proof.ProofType = registry.ProofOpaqueIssuer
+			proof.BindingProof = rep(0x88, 4097)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			admissionContext := rep(0x50, 48)

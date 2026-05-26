@@ -88,7 +88,7 @@ func IsMethodAllowed(profile policy.Profile, method uint64, caps Capabilities) b
 		}
 		return caps.SupportsH3 && caps.SupportsH3Dgram && caps.WebTransportOK
 	case registry.MethodMasqueConnectIP, registry.MethodMasqueConnectUDP:
-		return !profile.StealthGate && caps.MASQUEAllowed
+		return caps.MASQUEAllowed && policy.AllowsMASQUE(profile)
 	case registry.MethodDirectQUICLab:
 		return profile.LabOnly
 	default:

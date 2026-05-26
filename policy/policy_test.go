@@ -68,6 +68,25 @@ func TestAdversarialSelectionRequiresLowLatencyOverrideForFast1(t *testing.T) {
 	}
 }
 
+func TestVisibleProxyMethodsStayProfileAllowlistedWithoutStealthGate(t *testing.T) {
+	custom := Profile{Name: "custom-nonstealth"}
+	if safeCandidate(registry.RouteFast1, registry.MethodMasqueConnectIP, 1).PassesStealthGate(custom) {
+		t.Fatalf("custom non-stealth profile should not pass MASQUE candidate")
+	}
+	if safeCandidate(registry.RouteFast1, registry.MethodDirectQUICLab, 1).PassesStealthGate(custom) {
+		t.Fatalf("custom non-stealth profile should not pass direct QUIC candidate")
+	}
+
+	fast, _ := ProfileByID(registry.PolicyFastWeb)
+	if !safeCandidate(registry.RouteFast1, registry.MethodMasqueConnectIP, 1).PassesStealthGate(fast) {
+		t.Fatalf("fast-web should pass explicitly enabled MASQUE candidates")
+	}
+	lab, _ := ProfileByID(registry.PolicyLab)
+	if !safeCandidate(registry.RouteFast1, registry.MethodDirectQUICLab, 1).PassesStealthGate(lab) {
+		t.Fatalf("lab should pass direct QUIC candidates")
+	}
+}
+
 func TestPACECongestionReducesPadding(t *testing.T) {
 	out := ComputePACE(PaceInput{QueueDelayMS: 100, GoodputMbps: 20, PolicyID: registry.PolicyAdversarialDPI})
 	if out.Mode != "pace.delay-web" || out.PaddingBudgetPercent >= 3 {

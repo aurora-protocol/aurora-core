@@ -55,6 +55,13 @@ func TestMasqueAllowedOnlyForNonStealthProfilesWithExplicitCapability(t *testing
 	}
 }
 
+func TestMasqueRejectedForUnlistedNonStealthProfile(t *testing.T) {
+	custom := policy.Profile{Name: "custom-nonstealth"}
+	if IsMethodAllowed(custom, registry.MethodMasqueConnectUDP, Capabilities{CoverTemplateOK: true, MASQUEAllowed: true}) {
+		t.Fatalf("MASQUE must stay limited to explicitly allowed profiles")
+	}
+}
+
 func TestH3ExtDgramRequiresValidation(t *testing.T) {
 	profile, _ := policy.ProfileByID(registry.PolicyAdversarialDPI)
 	if IsMethodAllowed(profile, registry.MethodWebH3ExtDgram, Capabilities{SupportsH3: true, SupportsH3Dgram: true, H3Validated: false, CoverTemplateOK: true}) {

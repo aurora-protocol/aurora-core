@@ -170,13 +170,19 @@ func (c Candidate) PassesSafetyGate() bool {
 }
 
 func (c Candidate) PassesStealthGate(profile Profile) bool {
+	if isMASQUEMethod(c.MethodID) && !AllowsMASQUE(profile) {
+		return false
+	}
+	if c.MethodID == registry.MethodDirectQUICLab && !allowsDirectQUICLab(profile) {
+		return false
+	}
 	if !profile.StealthGate {
 		return true
 	}
 	if c.RouteModeID == registry.RouteFast1 && profile.Fast1Forbidden {
 		return false
 	}
-	if c.MethodID == registry.MethodMasqueConnectIP || c.MethodID == registry.MethodMasqueConnectUDP || c.MethodID == registry.MethodDirectQUICLab {
+	if isMASQUEMethod(c.MethodID) || c.MethodID == registry.MethodDirectQUICLab {
 		return false
 	}
 	if profile.QUIC == QUICDisabled && (c.MethodID == registry.MethodWebH3ExtDgram || c.MethodID == registry.MethodWebH3Stream) {
@@ -192,6 +198,26 @@ func (c Candidate) PassesStealthGate(profile Profile) bool {
 		c.ProbeNeutralFailure &&
 		c.CoverProfilePlausible &&
 		!c.SuspiciousFallback
+}
+
+func AllowsMASQUE(profile Profile) bool {
+	if profile.StealthGate {
+		return false
+	}
+	switch profile.ID {
+	case registry.PolicyFastWeb, registry.PolicyLab:
+		return true
+	default:
+		return profile.Name == "enterprise"
+	}
+}
+
+func isMASQUEMethod(method uint64) bool {
+	return method == registry.MethodMasqueConnectIP || method == registry.MethodMasqueConnectUDP
+}
+
+func allowsDirectQUICLab(profile Profile) bool {
+	return profile.LabOnly || profile.ID == registry.PolicyLab
 }
 
 type PathScoreRecord struct {

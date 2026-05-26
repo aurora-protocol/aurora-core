@@ -70,6 +70,20 @@ type RoutePreludeRealCryptoBundle struct {
 	RouteServerPreludeSignaturePQ        string
 }
 
+type ExitLayerPacketRealCryptoBundle struct {
+	RouteCapsule1Plaintext         string
+	RouteCapsule2Plaintext         string
+	RouteClientFinished            string
+	RouteServerFinished            string
+	RouteApplicationTranscriptHash string
+	ClientAppKey0                  string
+	ClientAppIV0                   string
+	ExitLayerFrameBlock            string
+	ExitLayerAuroraPacket          string
+	ExitLayerPacketCiphertext      string
+	ExitLayerPacketAuthTag         string
+}
+
 type TrustMetadataRealCryptoBundle struct {
 	DirectoryAuthorityClassicalKey        string
 	DirectoryAuthorityPQKey               string
@@ -831,6 +845,140 @@ func GenerateRoutePreludeRealCryptoBundle() (RoutePreludeRealCryptoBundle, error
 		RouteServerPQPublicKey:               hex.EncodeToString(pqPublic.Bytes()),
 		RouteServerPreludeSignatureClassical: hex.EncodeToString(p1.ServerPreludeSignatureClassical),
 		RouteServerPreludeSignaturePQ:        hex.EncodeToString(p1.ServerPreludeSignaturePQ),
+	}, nil
+}
+
+func GenerateExitLayerPacketRealCryptoBundle() (ExitLayerPacketRealCryptoBundle, error) {
+	const suite = registry.SuiteHybrid768P256AESGCM
+
+	routePrelude, err := GenerateRoutePreludeRealCryptoBundle()
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	decode := func(name, value string) ([]byte, error) {
+		decoded, err := hex.DecodeString(value)
+		if err != nil {
+			return nil, fmt.Errorf("vectors: decode %s: %w", name, err)
+		}
+		return decoded, nil
+	}
+	routeHopBinding, err := decode("split2_route_hop_binding", routePrelude.RouteHopBinding)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	routeTranscript, err := decode("split2_route_prelude_transcript_hash", routePrelude.RoutePreludeTranscriptHash)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	routeClassicalShared, err := decode("split2_route_classical_shared_secret", routePrelude.RouteClassicalSharedSecret)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	routeMLKEMShared, err := decode("split2_route_mlkem_shared_secret", routePrelude.RouteMLKEMSharedSecret)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	secrets, err := handshake.DeriveHandshakeSecrets(suite, routeMLKEMShared, routeClassicalShared, routeHopBinding, routeTranscript)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	routeCapsule1 := protocol.RouteCapsule1Plain{
+		MsgType:         registry.MsgRouteCapsule1,
+		RouteInstanceID: 2,
+		HopIndex:        1,
+		AdmissionProof:  sampleFirstHopAdmissionProof(),
+		ReplayProof:     sampleFirstHopReplayProof(),
+		PolicyOffer:     sampleFirstHopPolicyOffer(),
+		Padding:         repeated(0xe3, 16),
+	}
+	if err := routeCapsule1.AdmissionProof.ValidateStructural(1700000100, true); err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	if err := routeCapsule1.ReplayProof.ValidateStructural(); err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	routeCapsule1.ClientFinished, err = handshake.ComputeRouteClientFinished(suite, secrets.ClientFinishedKey, routeTranscript, routeCapsule1)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	routeCapsule1Plaintext, err := wire.Encode(routeCapsule1)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+
+	accept := sampleFirstHopPolicyAccept()
+	routeServerFinished, routeCapsule1Hash, policyAcceptHash, err := handshake.ComputeRouteServerFinished(suite, secrets.ServerFinishedKey, routeTranscript, routeCapsule1, accept)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	routeCapsule2 := protocol.RouteCapsule2Plain{
+		MsgType:         registry.MsgRouteCapsule2,
+		RouteInstanceID: routeCapsule1.RouteInstanceID,
+		HopIndex:        routeCapsule1.HopIndex,
+		PolicyAccept:    accept,
+		ServerFinished:  routeServerFinished,
+		Padding:         repeated(0xe4, 16),
+	}
+	routeCapsule2Plaintext, err := wire.Encode(routeCapsule2)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	app, err := handshake.DeriveApplicationSecrets(suite, secrets.HandshakeSecret, routeTranscript, routeCapsule1Hash, policyAcceptHash, routeServerFinished)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	stream, err := protocol.NewStreamDataFrame(11, []byte("exit layer payload"), 0)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	exitLayerBlock := protocol.FrameBlock{Frames: []protocol.AuroraFrame{stream}}
+	if err := protocol.ValidateFrameBlockForDirection(exitLayerBlock, handshake.ControlDirectionClientToHop); err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	exitLayerFrameBlock, err := wire.Encode(exitLayerBlock)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	exitProtector := &packet.Protector{
+		Suite:           suite,
+		RouteInstanceID: routeCapsule1.RouteInstanceID,
+		HopLayer:        routeCapsule1.HopIndex,
+		Direction:       handshake.ControlDirectionClientToHop,
+		KeyPhase:        0,
+		Key:             app.ClientAppKey0,
+		StaticIV:        app.ClientAppIV0,
+	}
+	exitPacket, err := exitProtector.Seal(exitLayerBlock)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	openedExitBlock, err := exitProtector.Open(exitPacket)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	openedExitLayerFrameBlock, err := wire.Encode(openedExitBlock)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	if !bytes.Equal(exitLayerFrameBlock, openedExitLayerFrameBlock) {
+		return ExitLayerPacketRealCryptoBundle{}, fmt.Errorf("vectors: exit-layer packet open mismatch")
+	}
+	encodedExitPacket, err := wire.Encode(exitPacket)
+	if err != nil {
+		return ExitLayerPacketRealCryptoBundle{}, err
+	}
+	return ExitLayerPacketRealCryptoBundle{
+		RouteCapsule1Plaintext:         hex.EncodeToString(routeCapsule1Plaintext),
+		RouteCapsule2Plaintext:         hex.EncodeToString(routeCapsule2Plaintext),
+		RouteClientFinished:            hex.EncodeToString(routeCapsule1.ClientFinished),
+		RouteServerFinished:            hex.EncodeToString(routeServerFinished),
+		RouteApplicationTranscriptHash: hex.EncodeToString(app.ApplicationTranscriptHash),
+		ClientAppKey0:                  hex.EncodeToString(app.ClientAppKey0),
+		ClientAppIV0:                   hex.EncodeToString(app.ClientAppIV0),
+		ExitLayerFrameBlock:            hex.EncodeToString(exitLayerFrameBlock),
+		ExitLayerAuroraPacket:          hex.EncodeToString(encodedExitPacket),
+		ExitLayerPacketCiphertext:      hex.EncodeToString(exitPacket.Ciphertext),
+		ExitLayerPacketAuthTag:         hex.EncodeToString(exitPacket.AuthTag),
 	}, nil
 }
 

@@ -172,6 +172,39 @@ func TestRoutePreludeRealCryptoBundleIsDeterministicAndVerifiable(t *testing.T) 
 	}
 }
 
+func TestExitLayerPacketRealCryptoBundleIsDeterministicAndVerifiable(t *testing.T) {
+	first, err := GenerateExitLayerPacketRealCryptoBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := GenerateExitLayerPacketRealCryptoBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("exit-layer packet real crypto vector is not deterministic:\nfirst=%+v\nsecond=%+v", first, second)
+	}
+	assertHexLen := func(name, value string, wantBytes int) {
+		t.Helper()
+		decoded, err := hex.DecodeString(value)
+		if err != nil {
+			t.Fatalf("%s is not hex: %v", name, err)
+		}
+		if len(decoded) != wantBytes {
+			t.Fatalf("%s length = %d, want %d", name, len(decoded), wantBytes)
+		}
+	}
+	assertHexLen("exit_layer_route_client_finished", first.RouteClientFinished, 48)
+	assertHexLen("exit_layer_route_server_finished", first.RouteServerFinished, 48)
+	assertHexLen("exit_layer_application_transcript_hash", first.RouteApplicationTranscriptHash, 48)
+	assertHexLen("exit_layer_client_app_key0", first.ClientAppKey0, 32)
+	assertHexLen("exit_layer_client_app_iv0", first.ClientAppIV0, 12)
+	assertHexLen("exit_layer_packet_auth_tag", first.ExitLayerPacketAuthTag, 16)
+	if first.RouteCapsule1Plaintext == "" || first.RouteCapsule2Plaintext == "" || first.ExitLayerFrameBlock == "" || first.ExitLayerAuroraPacket == "" || first.ExitLayerPacketCiphertext == "" {
+		t.Fatalf("exit-layer packet vector omitted required fields: %+v", first)
+	}
+}
+
 func TestKeyUpdateRealCryptoBundleIsDeterministicAndVerifiable(t *testing.T) {
 	first, err := GenerateKeyUpdateRealCryptoBundle()
 	if err != nil {

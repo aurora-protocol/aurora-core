@@ -78,7 +78,7 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "ML-DSA verification") {
 		t.Fatalf("capabilities output missing ML-DSA verification:\n%s", text)
 	}
-	if !strings.Contains(text, "first-hop prelude, first-hop control/application packets, split-2 route-prelude, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors") {
+	if !strings.Contains(text, "first-hop prelude, first-hop control/application packets, split-2 route-prelude, exit-layer packet, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors") {
 		t.Fatalf("capabilities output missing real-crypto vector coverage:\n%s", text)
 	}
 	if !strings.Contains(text, "signed directory, relay descriptor, and cover-template real-crypto vectors") {
@@ -90,8 +90,11 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if strings.Contains(text, "not production-complete:\n- ML-DSA") {
 		t.Fatalf("capabilities output still reports ML-DSA work as the first missing item:\n%s", text)
 	}
-	if !strings.Contains(text, "full real-crypto vector package") {
-		t.Fatalf("capabilities output stopped tracking the remaining real-crypto vector package:\n%s", text)
+	if strings.Contains(text, "full real-crypto vector package") {
+		t.Fatalf("capabilities output still lists the real-crypto vector package as remaining:\n%s", text)
+	}
+	if !strings.Contains(text, "Privacy Pass production proof verification, cover-origin gateway, active-probe harness, platform adapters, DPI evaluation") {
+		t.Fatalf("capabilities output stopped tracking remaining production work:\n%s", text)
 	}
 }
 
@@ -159,6 +162,14 @@ func TestVectorsCommandPrintsFirstHopRealCryptoVectors(t *testing.T) {
 		"split2_route_prelude1: ",
 		"split2_route_prelude_transcript_hash: ",
 		"split2_route_server_prelude_signature_pq: ",
+		"exit_layer_route_capsule1_plaintext: ",
+		"exit_layer_route_client_finished: ",
+		"exit_layer_route_capsule2_plaintext: ",
+		"exit_layer_route_server_finished: ",
+		"exit_layer_application_transcript_hash: ",
+		"exit_layer_frame_block: ",
+		"exit_layer_aurora_packet: ",
+		"exit_layer_packet_auth_tag: ",
 		"key_update_frame: ",
 		"key_update_ack: ",
 		"key_update_next_app_secret: ",

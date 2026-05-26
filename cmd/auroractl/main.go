@@ -126,6 +126,10 @@ func writeRealCryptoVectors(w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	exitLayer, err := corevectors.GenerateExitLayerPacketRealCryptoBundle()
+	if err != nil {
+		return err
+	}
 	keyUpdate, err := corevectors.GenerateKeyUpdateRealCryptoBundle()
 	if err != nil {
 		return err
@@ -189,6 +193,17 @@ func writeRealCryptoVectors(w io.Writer) error {
 	fmt.Fprintln(w, "split2_route_server_pq_public_key:", routePrelude.RouteServerPQPublicKey)
 	fmt.Fprintln(w, "split2_route_server_prelude_signature_classical:", routePrelude.RouteServerPreludeSignatureClassical)
 	fmt.Fprintln(w, "split2_route_server_prelude_signature_pq:", routePrelude.RouteServerPreludeSignaturePQ)
+	fmt.Fprintln(w, "exit_layer_route_capsule1_plaintext:", exitLayer.RouteCapsule1Plaintext)
+	fmt.Fprintln(w, "exit_layer_route_client_finished:", exitLayer.RouteClientFinished)
+	fmt.Fprintln(w, "exit_layer_route_capsule2_plaintext:", exitLayer.RouteCapsule2Plaintext)
+	fmt.Fprintln(w, "exit_layer_route_server_finished:", exitLayer.RouteServerFinished)
+	fmt.Fprintln(w, "exit_layer_application_transcript_hash:", exitLayer.RouteApplicationTranscriptHash)
+	fmt.Fprintln(w, "exit_layer_client_app_key0:", exitLayer.ClientAppKey0)
+	fmt.Fprintln(w, "exit_layer_client_app_iv0:", exitLayer.ClientAppIV0)
+	fmt.Fprintln(w, "exit_layer_frame_block:", exitLayer.ExitLayerFrameBlock)
+	fmt.Fprintln(w, "exit_layer_aurora_packet:", exitLayer.ExitLayerAuroraPacket)
+	fmt.Fprintln(w, "exit_layer_packet_ciphertext:", exitLayer.ExitLayerPacketCiphertext)
+	fmt.Fprintln(w, "exit_layer_packet_auth_tag:", exitLayer.ExitLayerPacketAuthTag)
 	fmt.Fprintln(w, "key_update_frame:", keyUpdate.KeyUpdateFrame)
 	fmt.Fprintln(w, "key_update_frame_block:", keyUpdate.KeyUpdateFrameBlock)
 	fmt.Fprintln(w, "key_update_ack:", keyUpdate.KeyUpdateACK)
@@ -300,11 +315,11 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- AES-256-GCM, HKDF labels, SHA-384/SHA-512 suite hashes, ML-KEM wrappers, ML-KEM provider agreement, and ML-DSA verification")
 	fmt.Fprintln(w, "- first-hop prelude transcript hashing, sealed control capsules, Finished messages, application secret derivation, and first packet sealing")
 	fmt.Fprintln(w, "- signed directory, relay descriptor, and cover-template real-crypto vectors")
-	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
+	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, exit-layer packet, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
 	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing")
 	fmt.Fprintln(w, "not production-complete:")
-	fmt.Fprintln(w, "- full real-crypto vector package, Privacy Pass production proof verification, cover-origin gateway, active-probe harness, platform adapters, DPI evaluation")
+	fmt.Fprintln(w, "- Privacy Pass production proof verification, cover-origin gateway, active-probe harness, platform adapters, DPI evaluation")
 }
 
 func cryptoCheck(w io.Writer) error {

@@ -11,7 +11,7 @@ Implemented now:
 - Appendix B.4 and B.5 structural vectors;
 - SHA-384/SHA-512 suite hashes, TLS-style HKDF labels, AES-256-GCM, route-prelude wrapping, packet protection, standard-library ML-KEM wrappers with CIRCL agreement checks, and ML-DSA verification;
 - AccessHint computation, spent-hint cache, token redemption hash, token spent key, replay context hash, and bootstrap dedup key;
-- first-hop prelude transcript hashing, sealed control capsules, ClientFinished, ServerFinished, application traffic secret derivation, and first application packet vectors;
+- first-hop and split-route prelude transcript hashing, sealed control capsules, Finished messages, application traffic secret derivation, first application packet vectors, and exit-layer packet vectors;
 - signed real-crypto metadata vectors for directory consensus, relay descriptors, and cover templates;
 - policy profiles, PAL scoring, PACE reference behavior, local config parsing, threat-safe logging wrappers, `auroractl`, the local proxy client, cover-template-validated H2/H1/shadow-origin/H3 datagram and explicitly gated MASQUE carrier request builders, relay admission/exit gates, vector drift tests, and ops helpers.
 
@@ -27,7 +27,7 @@ Implemented now:
 
 Native app or driver repositories should be split out only when they need their own platform build systems.
 
-This is not a production VPN or circumvention client. The spec still requires independent cryptographic review, a full real-crypto vector package, production Privacy Pass verification, cover-origin gateway behavior, active-probe testing, platform adapters, and DPI/classifier evaluation before production use.
+This is not a production VPN or circumvention client. The spec still requires independent cryptographic review, production Privacy Pass verification, cover-origin gateway behavior, active-probe testing, platform adapters, and DPI/classifier evaluation before production use.
 
 ## Commands
 

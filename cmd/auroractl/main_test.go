@@ -79,7 +79,7 @@ func TestEvaluationCheckCommandPrintsExternalEvidenceReport(t *testing.T) {
 	}
 	text := out.String()
 	for _, want := range []string{
-		"evaluation_check passed=true classifier=true active_probe=true interoperability=true security_reviews=true release_gates=true findings=0\n",
+		"evaluation_check passed=true classifier=true active_probe=true interoperability=true security_reviews=true release_gates=true deployment_security=true findings=0\n",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("evaluation-check output missing %q:\n%s", want, text)
@@ -87,6 +87,24 @@ func TestEvaluationCheckCommandPrintsExternalEvidenceReport(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(text), "passed=false") {
 		t.Fatalf("evaluation-check output contains failing evidence:\n%s", text)
+	}
+}
+
+func TestDeploymentSecurityCheckCommandPrintsAssessmentReport(t *testing.T) {
+	var out bytes.Buffer
+	if err := deploymentSecurityCheck(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"deployment_security_check passed=true independent=true real_deployment=true issuer=true relays=true directory=true cover_origins=true client_update=true outage_drills=true redaction=true open_critical=0 open_high=0 findings=0\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("deployment-security-check output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "passed=false") {
+		t.Fatalf("deployment-security-check output contains failing assessment:\n%s", text)
 	}
 }
 
@@ -287,6 +305,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	}
 	if !strings.Contains(text, "external evaluation evidence verifier") {
 		t.Fatalf("capabilities output missing external evaluation evidence verifier:\n%s", text)
+	}
+	if !strings.Contains(text, "deployment security assessment evidence verifier") {
+		t.Fatalf("capabilities output missing deployment security verifier:\n%s", text)
 	}
 	if !strings.Contains(text, "platform adapter conformance profiles") {
 		t.Fatalf("capabilities output missing platform adapter conformance:\n%s", text)
@@ -507,6 +528,7 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go run ./cmd/auroractl active-probes",
 		"go run ./cmd/auroractl classifier-check",
 		"go run ./cmd/auroractl evaluation-check",
+		"go run ./cmd/auroractl deployment-security-check",
 		"go run ./cmd/auroractl platform-check",
 		"go run ./cmd/auroractl release-check",
 		"go run ./cmd/auroractl proof-check",

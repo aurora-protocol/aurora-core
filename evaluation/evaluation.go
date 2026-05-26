@@ -3,13 +3,14 @@ package evaluation
 import "fmt"
 
 type EvidenceBundle struct {
-	BundleID           string
-	VectorPackageHash  []byte
-	Interoperability   InteroperabilityEvidence
-	ClassifierReports  []ClassifierReport
-	ActiveProbeReports []ActiveProbeReport
-	SecurityReviews    []SecurityReview
-	ReleaseGates       ReleaseGateEvidence
+	BundleID                     string
+	VectorPackageHash            []byte
+	Interoperability             InteroperabilityEvidence
+	ClassifierReports            []ClassifierReport
+	ActiveProbeReports           []ActiveProbeReport
+	SecurityReviews              []SecurityReview
+	ReleaseGates                 ReleaseGateEvidence
+	DeploymentSecurityAssessment DeploymentSecurityAssessment
 }
 
 type InteroperabilityEvidence struct {
@@ -58,14 +59,35 @@ type ReleaseGateEvidence struct {
 	PlatformSecurityReview bool
 }
 
+type DeploymentSecurityAssessment struct {
+	AssessmentID                 string
+	DeploymentID                 string
+	IndependentAssessor          bool
+	RealDeployment               bool
+	IssuerScope                  bool
+	RelayScope                   bool
+	DirectoryScope               bool
+	CoverOriginScope             bool
+	ClientUpdateScope            bool
+	VerifierOutageDrill          bool
+	CoverOriginFailoverDrill     bool
+	ReplayAbuseDrill             bool
+	OperationalTelemetryRedacted bool
+	IncidentResponseLinked       bool
+	CriticalOpen                 int
+	HighOpen                     int
+	CompletedUnix                uint64
+}
+
 type EvidenceReport struct {
-	Passed                   bool
-	ClassifierEvidence       bool
-	ActiveProbeEvidence      bool
-	InteroperabilityEvidence bool
-	SecurityReviewEvidence   bool
-	ReleaseGateEvidence      bool
-	Findings                 []string
+	Passed                               bool
+	ClassifierEvidence                   bool
+	ActiveProbeEvidence                  bool
+	InteroperabilityEvidence             bool
+	SecurityReviewEvidence               bool
+	ReleaseGateEvidence                  bool
+	DeploymentSecurityAssessmentEvidence bool
+	Findings                             []string
 }
 
 func VerifyExternalEvaluationEvidence(bundle EvidenceBundle) (EvidenceReport, error) {
@@ -81,11 +103,13 @@ func VerifyExternalEvaluationEvidence(bundle EvidenceBundle) (EvidenceReport, er
 	report.ActiveProbeEvidence = verifyActiveProbeEvidence(bundle.ActiveProbeReports, &report)
 	report.SecurityReviewEvidence = verifySecurityReviewEvidence(bundle.SecurityReviews, &report)
 	report.ReleaseGateEvidence = verifyReleaseGateEvidence(bundle.ReleaseGates, &report)
+	report.DeploymentSecurityAssessmentEvidence = verifyDeploymentSecurityAssessment(bundle.DeploymentSecurityAssessment, &report)
 	report.Passed = report.InteroperabilityEvidence &&
 		report.ClassifierEvidence &&
 		report.ActiveProbeEvidence &&
 		report.SecurityReviewEvidence &&
-		report.ReleaseGateEvidence
+		report.ReleaseGateEvidence &&
+		report.DeploymentSecurityAssessmentEvidence
 	return report, nil
 }
 
@@ -141,6 +165,23 @@ func ExternalEvaluationHarnessBundle() EvidenceBundle {
 			IncidentResponsePlan:   true,
 			OperationalAbuseReview: true,
 			PlatformSecurityReview: true,
+		},
+		DeploymentSecurityAssessment: DeploymentSecurityAssessment{
+			AssessmentID:                 "deployment-security-assessment",
+			DeploymentID:                 "production-candidate-deployment",
+			IndependentAssessor:          true,
+			RealDeployment:               true,
+			IssuerScope:                  true,
+			RelayScope:                   true,
+			DirectoryScope:               true,
+			CoverOriginScope:             true,
+			ClientUpdateScope:            true,
+			VerifierOutageDrill:          true,
+			CoverOriginFailoverDrill:     true,
+			ReplayAbuseDrill:             true,
+			OperationalTelemetryRedacted: true,
+			IncidentResponseLinked:       true,
+			CompletedUnix:                1,
 		},
 	}
 }
@@ -301,6 +342,71 @@ func verifyReleaseGateEvidence(gates ReleaseGateEvidence, report *EvidenceReport
 	}
 	if !gates.PlatformSecurityReview {
 		report.addFinding("platform security review gate is missing")
+		passed = false
+	}
+	return passed
+}
+
+func verifyDeploymentSecurityAssessment(assessment DeploymentSecurityAssessment, report *EvidenceReport) bool {
+	passed := true
+	if assessment.AssessmentID == "" {
+		report.addFinding("deployment security assessment id is missing")
+		passed = false
+	}
+	if assessment.DeploymentID == "" {
+		report.addFinding("deployment security assessment deployment id is missing")
+		passed = false
+	}
+	if !assessment.IndependentAssessor {
+		report.addFinding("deployment security assessment is not independent")
+		passed = false
+	}
+	if !assessment.RealDeployment {
+		report.addFinding("deployment security assessment must cover a real deployment")
+		passed = false
+	}
+	if !assessment.IssuerScope {
+		report.addFinding("deployment security assessment missing issuer scope")
+		passed = false
+	}
+	if !assessment.RelayScope {
+		report.addFinding("deployment security assessment missing relay scope")
+		passed = false
+	}
+	if !assessment.DirectoryScope {
+		report.addFinding("deployment security assessment missing directory scope")
+		passed = false
+	}
+	if !assessment.CoverOriginScope {
+		report.addFinding("deployment security assessment missing cover-origin scope")
+		passed = false
+	}
+	if !assessment.ClientUpdateScope {
+		report.addFinding("deployment security assessment missing client update scope")
+		passed = false
+	}
+	if !assessment.VerifierOutageDrill || !assessment.CoverOriginFailoverDrill || !assessment.ReplayAbuseDrill {
+		report.addFinding("deployment security assessment missing outage or replay drills")
+		passed = false
+	}
+	if !assessment.OperationalTelemetryRedacted {
+		report.addFinding("deployment security assessment missing telemetry redaction review")
+		passed = false
+	}
+	if !assessment.IncidentResponseLinked {
+		report.addFinding("deployment security assessment missing incident-response linkage")
+		passed = false
+	}
+	if assessment.CriticalOpen != 0 {
+		report.addFinding("deployment security assessment has open critical findings")
+		passed = false
+	}
+	if assessment.HighOpen != 0 {
+		report.addFinding("deployment security assessment has open high-severity findings")
+		passed = false
+	}
+	if assessment.CompletedUnix == 0 {
+		report.addFinding("deployment security assessment completion timestamp is missing")
 		passed = false
 	}
 	return passed

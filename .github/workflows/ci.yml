@@ -32,6 +32,8 @@ jobs:
         run: go run ./cmd/auroractl classifier-check
       - name: Check external evaluation evidence verifier
         run: go run ./cmd/auroractl evaluation-check
+      - name: Check deployment security assessment evidence
+        run: go run ./cmd/auroractl deployment-security-check
       - name: Check platform adapter conformance
         run: go run ./cmd/auroractl platform-check
       - name: Check platform packaging conformance

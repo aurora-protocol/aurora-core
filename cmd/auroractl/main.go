@@ -44,6 +44,8 @@ func main() {
 		err = classifierCheck(os.Stdout)
 	case "evaluation-check":
 		err = evaluationCheck(os.Stdout)
+	case "deployment-security-check":
+		err = deploymentSecurityCheck(os.Stdout)
 	case "platform-check":
 		err = platformCheck(os.Stdout)
 	case "packaging-check":
@@ -80,7 +82,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|evaluation-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|cover-check|crypto-check|wire-check|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|cover-check|crypto-check|wire-check|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -345,7 +347,7 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- signed directory, relay descriptor, and cover-template real-crypto vectors")
 	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, exit-layer packet, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
-	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, external evaluation evidence verifier, platform adapter conformance profiles, platform packaging and entitlement conformance matrix, release readiness evidence verifier, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, issuer service readiness harness, issuer HTTP daemon readiness harness, cover-origin deployment conformance harness")
+	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, external evaluation evidence verifier, deployment security assessment evidence verifier, platform adapter conformance profiles, platform packaging and entitlement conformance matrix, release readiness evidence verifier, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, issuer service readiness harness, issuer HTTP daemon readiness harness, cover-origin deployment conformance harness")
 	fmt.Fprintln(w, "not production-complete:")
 	fmt.Fprintln(w, "- external live issuer deployment, real signed platform release execution/device provisioning, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation")
 }
@@ -451,13 +453,14 @@ func evaluationCheck(w io.Writer) error {
 	}
 	fmt.Fprintf(
 		w,
-		"evaluation_check passed=%t classifier=%t active_probe=%t interoperability=%t security_reviews=%t release_gates=%t findings=%d\n",
+		"evaluation_check passed=%t classifier=%t active_probe=%t interoperability=%t security_reviews=%t release_gates=%t deployment_security=%t findings=%d\n",
 		report.Passed,
 		report.ClassifierEvidence,
 		report.ActiveProbeEvidence,
 		report.InteroperabilityEvidence,
 		report.SecurityReviewEvidence,
 		report.ReleaseGateEvidence,
+		report.DeploymentSecurityAssessmentEvidence,
 		len(report.Findings),
 	)
 	for _, finding := range report.Findings {
@@ -465,6 +468,39 @@ func evaluationCheck(w io.Writer) error {
 	}
 	if !report.Passed {
 		return fmt.Errorf("evaluation-check failed external evidence conformance")
+	}
+	return nil
+}
+
+func deploymentSecurityCheck(w io.Writer) error {
+	bundle := evaluation.ExternalEvaluationHarnessBundle()
+	report, err := evaluation.VerifyExternalEvaluationEvidence(bundle)
+	if err != nil {
+		return err
+	}
+	assessment := bundle.DeploymentSecurityAssessment
+	fmt.Fprintf(
+		w,
+		"deployment_security_check passed=%t independent=%t real_deployment=%t issuer=%t relays=%t directory=%t cover_origins=%t client_update=%t outage_drills=%t redaction=%t open_critical=%d open_high=%d findings=%d\n",
+		report.DeploymentSecurityAssessmentEvidence,
+		assessment.IndependentAssessor,
+		assessment.RealDeployment,
+		assessment.IssuerScope,
+		assessment.RelayScope,
+		assessment.DirectoryScope,
+		assessment.CoverOriginScope,
+		assessment.ClientUpdateScope,
+		assessment.VerifierOutageDrill && assessment.CoverOriginFailoverDrill && assessment.ReplayAbuseDrill,
+		assessment.OperationalTelemetryRedacted,
+		assessment.CriticalOpen,
+		assessment.HighOpen,
+		len(report.Findings),
+	)
+	for _, finding := range report.Findings {
+		fmt.Fprintf(w, "deployment_security_finding %s\n", finding)
+	}
+	if !report.DeploymentSecurityAssessmentEvidence {
+		return fmt.Errorf("deployment-security-check failed assessment evidence conformance")
 	}
 	return nil
 }

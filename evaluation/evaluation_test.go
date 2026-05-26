@@ -11,11 +11,12 @@ func TestVerifyExternalEvaluationEvidenceAcceptsCompleteBundle(t *testing.T) {
 		t.Fatalf("external evaluation evidence failed: %+v", report)
 	}
 	for name, passed := range map[string]bool{
-		"classifier":       report.ClassifierEvidence,
-		"active_probe":     report.ActiveProbeEvidence,
-		"interop":          report.InteroperabilityEvidence,
-		"security_reviews": report.SecurityReviewEvidence,
-		"release_gates":    report.ReleaseGateEvidence,
+		"classifier":          report.ClassifierEvidence,
+		"active_probe":        report.ActiveProbeEvidence,
+		"interop":             report.InteroperabilityEvidence,
+		"security_reviews":    report.SecurityReviewEvidence,
+		"release_gates":       report.ReleaseGateEvidence,
+		"deployment_security": report.DeploymentSecurityAssessmentEvidence,
 	} {
 		if !passed {
 			t.Fatalf("%s evidence was not covered: %+v", name, report)
@@ -90,6 +91,30 @@ func TestVerifyExternalEvaluationEvidenceRejectsMissingProductionReleaseGate(t *
 	}
 	if !evaluationReportHasFinding(report, "signed update pipeline evidence is missing") {
 		t.Fatalf("report missing release gate finding: %+v", report)
+	}
+}
+
+func TestVerifyExternalEvaluationEvidenceRejectsIncompleteDeploymentSecurityAssessment(t *testing.T) {
+	bundle := ExternalEvaluationHarnessBundle()
+	bundle.DeploymentSecurityAssessment.RealDeployment = false
+	bundle.DeploymentSecurityAssessment.HighOpen = 1
+	bundle.DeploymentSecurityAssessment.CoverOriginScope = false
+
+	report, err := VerifyExternalEvaluationEvidence(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatalf("incomplete deployment security assessment passed: %+v", report)
+	}
+	for _, want := range []string{
+		"deployment security assessment must cover a real deployment",
+		"deployment security assessment has open high-severity findings",
+		"deployment security assessment missing cover-origin scope",
+	} {
+		if !evaluationReportHasFinding(report, want) {
+			t.Fatalf("report missing %q: %+v", want, report)
+		}
 	}
 }
 

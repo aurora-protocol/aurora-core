@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/platform"
@@ -43,7 +44,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	coverOriginURL := flags.String("cover-origin-url", "", "ordinary cover-origin URL to reverse proxy")
 	tlsCert := flags.String("tls-cert", "", "TLS certificate file for HTTPS serving")
 	tlsKey := flags.String("tls-key", "", "TLS private key file for HTTPS serving")
-	now := flags.Uint64("harness-now", 200, "harness unix timestamp")
+	now := flags.Uint64("harness-now", uint64(time.Now().Unix()), "harness unix timestamp")
 	readinessCheck := flags.Bool("readiness-check", false, "run the server readiness harness and exit")
 	packetMode := flags.String("packet-mode", packetModeLoopback, "packet exchange mode: loopback or tun")
 	spentTokenCachePath := flags.String("spent-token-cache", "", "append-only spent-token replay cache path")

@@ -109,6 +109,33 @@ func TestServicePublishesIssuesVerifiesSpendsAndRedacts(t *testing.T) {
 	}
 }
 
+func TestHarnessServiceValidityFollowsWallClockNow(t *testing.T) {
+	nowUnix := uint64(1_800_000_000)
+	service, err := NewHarnessService(nowUnix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := service.PublishIssuerMetadata()
+	if metadata.ValidFromUnix > nowUnix || metadata.ValidUntilUnix <= nowUnix+300 {
+		t.Fatalf("metadata validity [%d,%d) does not cover wall-clock issue window at %d", metadata.ValidFromUnix, metadata.ValidUntilUnix, nowUnix)
+	}
+	if err := auroratrust.VerifyIssuerMetadataSignature(metadata, service.AuthorityKeys(), nowUnix); err != nil {
+		t.Fatalf("wall-clock metadata signature did not verify: %v", err)
+	}
+
+	proof, err := service.IssueBlindRSA2048(IssueBlindRSA2048Request{
+		TokenNonce:            fill(0x44, 32),
+		RedemptionContextHash: fill(0x45, 48),
+		ExpiryUnix:            nowUnix + 300,
+	})
+	if err != nil {
+		t.Fatalf("wall-clock issue request failed: %v", err)
+	}
+	if err := admission.VerifyBlindRSA2048WithIssuerMetadata(proof, metadata, nowUnix); err != nil {
+		t.Fatalf("wall-clock proof did not verify against metadata: %v", err)
+	}
+}
+
 func TestIssueBlindRSA2048RejectsIncompleteServiceWithoutPanic(t *testing.T) {
 	defer func() {
 		if recovered := recover(); recovered != nil {

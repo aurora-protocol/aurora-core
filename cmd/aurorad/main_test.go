@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aurora-protocol/aurora-core/platform"
 )
@@ -105,6 +107,19 @@ func TestRunTLSModeServesHTTPSForAppleClients(t *testing.T) {
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("TLS handler health response = %d", rec.Code)
+		}
+		issueBody := fmt.Sprintf(
+			`{"token_nonce":"%s","redemption_context_hash":"%s","expiry_unix":%d}`,
+			strings.Repeat("44", 32),
+			strings.Repeat("45", 48),
+			uint64(time.Now().Unix())+300,
+		)
+		req = httptest.NewRequest(http.MethodPost, "/issuer/blind-rsa/issue", strings.NewReader(issueBody))
+		req.Header.Set("Content-Type", "application/json")
+		rec = httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "admission_proof") {
+			t.Fatalf("TLS handler wall-clock issue response = %d %s", rec.Code, rec.Body.String())
 		}
 		return http.ErrServerClosed
 	})

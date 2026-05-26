@@ -93,12 +93,14 @@ func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service
 	blindRSAKeyID := sha256.Sum256(blindRSAKeyDER)
 	voprfKey := []byte("issuerd harness voprf verification key")
 	voprfKeyID := sha256.Sum256(voprfKey)
+	validFrom, validUntil := harnessValidityWindow(nowUnix, 100, 800)
+	authorityValidFrom, authorityValidUntil := harnessValidityWindow(nowUnix, 110, 900)
 
 	metadata := protocol.IssuerMetadata{
 		MetadataVersion:     registry.Version20,
 		IssuerID:            repeatedByte(0x80, 16),
-		ValidFromUnix:       100,
-		ValidUntilUnix:      1000,
+		ValidFromUnix:       validFrom,
+		ValidUntilUnix:      validUntil,
 		IssuerName:          []byte("issuer.example"),
 		SupportedProofTypes: []uint64{registry.ProofBlindRSA2048, registry.ProofVOPRFP384SHA384},
 		TokenKeyMappings: []protocol.IssuerTokenKeyRecord{{
@@ -108,8 +110,8 @@ func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service
 				TokenVerificationKeyScheme: registry.TokenKeyBlindRSA2048,
 				TokenVerificationKey:       blindRSAKeyDER,
 			},
-			ValidFromUnix:  100,
-			ValidUntilUnix: 1000,
+			ValidFromUnix:  validFrom,
+			ValidUntilUnix: validUntil,
 			KeyStatus:      registry.IssuerStatusActive,
 		}, {
 			ProofType:  registry.ProofVOPRFP384SHA384,
@@ -118,23 +120,23 @@ func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service
 				TokenVerificationKeyScheme: registry.TokenKeyVOPRFP384SHA384,
 				TokenVerificationKey:       voprfKey,
 			},
-			ValidFromUnix:  100,
-			ValidUntilUnix: 1000,
+			ValidFromUnix:  validFrom,
+			ValidUntilUnix: validUntil,
 			KeyStatus:      registry.IssuerStatusActive,
 		}},
 		OriginInfoPolicies: []protocol.OriginInfoPolicy{{
 			PolicyID:             7,
 			OriginInfo:           []byte("origin.example"),
 			AllowEmptyOriginInfo: false,
-			ValidFromUnix:        100,
-			ValidUntilUnix:       1000,
+			ValidFromUnix:        validFrom,
+			ValidUntilUnix:       validUntil,
 		}},
 		RelayBucketScopes: []protocol.RelayBucketScope{{
 			RelayBucketID:         repeatedByte(0x81, 16),
 			TokenScopeID:          repeatedByte(0x82, 16),
 			AllowedOriginPolicyID: []uint64{7},
-			ValidFromUnix:         100,
-			ValidUntilUnix:        1000,
+			ValidFromUnix:         validFrom,
+			ValidUntilUnix:        validUntil,
 		}},
 		VerifierServices: []protocol.IssuerVerifierServiceRecord{{
 			ServiceID:         repeatedByte(0x83, 16),
@@ -148,8 +150,8 @@ func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service
 			AllowedProofTypes:     []uint64{registry.ProofVOPRFP384SHA384},
 			AllowedRelayBucketIDs: [][]byte{repeatedByte(0x81, 16)},
 			RequestAuthPolicyID:   9,
-			ValidFromUnix:         100,
-			ValidUntilUnix:        1000,
+			ValidFromUnix:         validFrom,
+			ValidUntilUnix:        validUntil,
 			ServiceStatus:         registry.IssuerStatusActive,
 		}},
 		MetadataSigningKeyID: repeatedByte(0x84, 16),
@@ -172,8 +174,8 @@ func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service
 			KeyEncoding:     metadata.KeyEncoding,
 			PublicKey:       elliptic.Marshal(elliptic.P256(), authoritySigner.PublicKey.X, authoritySigner.PublicKey.Y),
 		},
-		ValidFromUnix:  90,
-		ValidUntilUnix: 1100,
+		ValidFromUnix:  authorityValidFrom,
+		ValidUntilUnix: authorityValidUntil,
 		KeyStatus:      registry.AuthorityActive,
 		UsageFlags:     registry.UsageMaySignIssuerMetadata,
 	}}
@@ -192,6 +194,18 @@ func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service
 		authorizedRelayKeys:    make(map[uint64][]protocol.PublicKeyRecord),
 		voprfVerifierAvailable: true,
 	}, nil
+}
+
+func harnessValidityWindow(nowUnix, backfill, lifetime uint64) (uint64, uint64) {
+	var validFrom uint64
+	if nowUnix > backfill {
+		validFrom = nowUnix - backfill
+	}
+	validUntil := ^uint64(0)
+	if nowUnix <= validUntil-lifetime {
+		validUntil = nowUnix + lifetime
+	}
+	return validFrom, validUntil
 }
 
 func RunServiceReadinessHarness(nowUnix uint64) (ServiceReadinessReport, error) {

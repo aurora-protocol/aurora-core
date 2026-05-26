@@ -111,6 +111,83 @@ func TestNewFlowCloseFrameWrapsPayloadAndCopiesReason(t *testing.T) {
 	}
 }
 
+func TestUDPTargetConfirmEncodesFullPayload(t *testing.T) {
+	hash := bytes.Repeat([]byte{0xaa}, 48)
+	confirm := UDPTargetConfirm{
+		FlowID:           7,
+		TargetKind:       0x01,
+		SelectedIP:       []byte{203, 0, 113, 9},
+		SelectedPort:     443,
+		DNSAnswerSetHash: hash,
+		TTLSeconds:       60,
+		ResolutionSource: UDPResolutionClientSuppliedIP,
+	}
+	encoded, err := Encode(confirm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertProtocolHex(t, encoded, "07010004cb00710901bbaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000003c0100")
+	got := DecodeUDPTargetConfirm(bytesReader(encoded))
+	if got.FlowID != 7 || got.TargetKind != 0x01 || got.SelectedPort != 443 || got.TTLSeconds != 60 || got.ResolutionSource != UDPResolutionClientSuppliedIP {
+		t.Fatalf("decoded UDP target confirm mismatch: %+v", got)
+	}
+	if !bytes.Equal(got.SelectedIP, []byte{203, 0, 113, 9}) || !bytes.Equal(got.DNSAnswerSetHash, hash) {
+		t.Fatalf("decoded UDP target confirm bytes mismatch: %+v", got)
+	}
+}
+
+func TestNewUDPTargetConfirmFrameValidatesAndCopiesPayload(t *testing.T) {
+	selectedIP := []byte{203, 0, 113, 10}
+	hash := bytes.Repeat([]byte{0xbb}, 48)
+	frame, err := NewUDPTargetConfirmFrame(UDPTargetConfirm{
+		FlowID:           10,
+		TargetKind:       0x01,
+		SelectedIP:       selectedIP,
+		SelectedPort:     443,
+		DNSAnswerSetHash: hash,
+		TTLSeconds:       300,
+		ResolutionSource: UDPResolutionRelayRecursiveDNS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectedIP[0] = 0
+	hash[0] = 0
+	if frame.FrameType != registry.FrameUDPTargetConfirm || frame.FlowID != 10 || frame.Flags != 0 {
+		t.Fatalf("unexpected UDP target confirm frame: %+v", frame)
+	}
+	got := DecodeUDPTargetConfirm(bytesReader(frame.Payload))
+	if !bytes.Equal(got.SelectedIP, []byte{203, 0, 113, 10}) || got.DNSAnswerSetHash[0] != 0xbb {
+		t.Fatalf("UDP target confirm payload was not copied: %+v", got)
+	}
+	if err := ValidateFrameBlock(FrameBlock{Frames: []AuroraFrame{frame}}); err != nil {
+		t.Fatalf("UDP target confirm frame did not validate: %v", err)
+	}
+}
+
+func TestValidateUDPTargetConfirmRejectsMalformedTarget(t *testing.T) {
+	base := UDPTargetConfirm{
+		FlowID:           10,
+		TargetKind:       0x01,
+		SelectedIP:       []byte{203, 0, 113, 10},
+		SelectedPort:     443,
+		DNSAnswerSetHash: bytes.Repeat([]byte{0xcc}, 48),
+		TTLSeconds:       300,
+		ResolutionSource: UDPResolutionRelayRecursiveDNS,
+	}
+	cases := []UDPTargetConfirm{
+		{FlowID: base.FlowID, TargetKind: 0x03, SelectedIP: []byte("example.com"), SelectedPort: base.SelectedPort, DNSAnswerSetHash: base.DNSAnswerSetHash, TTLSeconds: base.TTLSeconds, ResolutionSource: base.ResolutionSource},
+		{FlowID: base.FlowID, TargetKind: base.TargetKind, SelectedIP: []byte{203, 0, 113}, SelectedPort: base.SelectedPort, DNSAnswerSetHash: base.DNSAnswerSetHash, TTLSeconds: base.TTLSeconds, ResolutionSource: base.ResolutionSource},
+		{FlowID: base.FlowID, TargetKind: base.TargetKind, SelectedIP: base.SelectedIP, SelectedPort: base.SelectedPort, DNSAnswerSetHash: []byte{0xcc}, TTLSeconds: base.TTLSeconds, ResolutionSource: base.ResolutionSource},
+		{FlowID: base.FlowID, TargetKind: base.TargetKind, SelectedIP: base.SelectedIP, SelectedPort: base.SelectedPort, DNSAnswerSetHash: base.DNSAnswerSetHash, TTLSeconds: base.TTLSeconds, ResolutionSource: 0xff},
+	}
+	for _, confirm := range cases {
+		if err := ValidateUDPTargetConfirm(confirm); err == nil {
+			t.Fatalf("malformed UDP target confirm accepted: %+v", confirm)
+		}
+	}
+}
+
 func bytesReader(encoded []byte) *wire.Reader {
 	return wire.NewReader(encoded)
 }

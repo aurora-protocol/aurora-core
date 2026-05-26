@@ -38,22 +38,25 @@ const (
 )
 
 type FlowState struct {
-	FlowID           uint64
-	Kind             uint8
-	TargetKind       uint8
-	TargetHost       []byte
-	TargetPort       uint16
-	UDPFQDNMode      uint8
-	NameBindingID    []byte
-	DNSAnswerSetHash []byte
-	LocalBindingMode uint8
-	PriorityClass    uint8
-	CreatedAtUnix    uint64
-	LastActivityUnix uint64
-	TTLSeconds       uint64
-	IdleTimeoutSecs  uint64
-	ConfirmedHost    []byte
-	ConfirmedPort    uint16
+	FlowID                    uint64
+	Kind                      uint8
+	TargetKind                uint8
+	TargetHost                []byte
+	TargetPort                uint16
+	UDPFQDNMode               uint8
+	NameBindingID             []byte
+	DNSAnswerSetHash          []byte
+	LocalBindingMode          uint8
+	PriorityClass             uint8
+	CreatedAtUnix             uint64
+	LastActivityUnix          uint64
+	TTLSeconds                uint64
+	IdleTimeoutSecs           uint64
+	ConfirmedHost             []byte
+	ConfirmedPort             uint16
+	ConfirmedDNSAnswerSetHash []byte
+	ConfirmedTTLSeconds       uint32
+	ConfirmedResolutionSource uint8
 }
 
 type FlowOptions struct {
@@ -108,6 +111,9 @@ func (m *Manager) OpenWithOptions(open protocol.FlowOpen, opts FlowOptions) erro
 }
 
 func (m *Manager) ConfirmUDP(confirm protocol.UDPTargetConfirm) error {
+	if err := protocol.ValidateUDPTargetConfirm(confirm); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state, ok := m.flows[confirm.FlowID]
@@ -117,8 +123,11 @@ func (m *Manager) ConfirmUDP(confirm protocol.UDPTargetConfirm) error {
 	if state.Kind != FlowKindUDPAssociation {
 		return fmt.Errorf("flow: target confirmation on non-UDP flow")
 	}
-	state.ConfirmedHost = append([]byte(nil), confirm.SelectedHost...)
+	state.ConfirmedHost = append([]byte(nil), confirm.SelectedIP...)
 	state.ConfirmedPort = confirm.SelectedPort
+	state.ConfirmedDNSAnswerSetHash = append([]byte(nil), confirm.DNSAnswerSetHash...)
+	state.ConfirmedTTLSeconds = confirm.TTLSeconds
+	state.ConfirmedResolutionSource = confirm.ResolutionSource
 	m.flows[confirm.FlowID] = state
 	return nil
 }

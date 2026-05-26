@@ -262,30 +262,47 @@ func DecodeFlowOpen(r *wire.Reader) FlowOpen {
 }
 
 type UDPTargetConfirm struct {
-	FlowID       uint64
-	SelectedKind uint8
-	SelectedHost []byte
-	SelectedPort uint16
-	Extensions   []Extension
+	FlowID           uint64
+	TargetKind       uint8
+	SelectedIP       []byte
+	SelectedPort     uint16
+	DNSAnswerSetHash []byte
+	TTLSeconds       uint32
+	ResolutionSource uint8
+	Extensions       []Extension
 }
 
 func (u UDPTargetConfirm) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(u.FlowID)
-	e.WriteUint8(u.SelectedKind)
-	e.WriteOpaque16(u.SelectedHost)
+	e.WriteUint8(u.TargetKind)
+	e.WriteOpaque16(u.SelectedIP)
 	e.WriteUint16(u.SelectedPort)
+	e.WritePreHash(u.DNSAnswerSetHash)
+	e.WriteUint32(u.TTLSeconds)
+	e.WriteUint8(u.ResolutionSource)
 	EncodeExtensions(e, u.Extensions)
 }
 
 func DecodeUDPTargetConfirm(r *wire.Reader) UDPTargetConfirm {
 	return UDPTargetConfirm{
-		FlowID:       r.ReadVarint(),
-		SelectedKind: r.ReadUint8(),
-		SelectedHost: r.ReadOpaque16(),
-		SelectedPort: r.ReadUint16(),
-		Extensions:   DecodeExtensions(r),
+		FlowID:           r.ReadVarint(),
+		TargetKind:       r.ReadUint8(),
+		SelectedIP:       r.ReadOpaque16(),
+		SelectedPort:     r.ReadUint16(),
+		DNSAnswerSetHash: r.ReadPreHash(),
+		TTLSeconds:       r.ReadUint32(),
+		ResolutionSource: r.ReadUint8(),
+		Extensions:       DecodeExtensions(r),
 	}
 }
+
+const (
+	UDPResolutionNotResolvedByRelay uint8 = 0x00
+	UDPResolutionClientSuppliedIP   uint8 = 0x01
+	UDPResolutionRelayRecursiveDNS  uint8 = 0x02
+	UDPResolutionRelaySystemDNS     uint8 = 0x03
+	UDPResolutionEncryptedDNS       uint8 = 0x04
+)
 
 type FlowClose struct {
 	FlowID                   uint64
@@ -345,6 +362,9 @@ func ValidateFlowManagementFrame(frame AuroraFrame) error {
 		payload := DecodeUDPTargetConfirm(r)
 		payloadFlowID = payload.FlowID
 		extensions = payload.Extensions
+		if err := ValidateUDPTargetConfirm(payload); err != nil {
+			return err
+		}
 	case registry.FrameFlowClose:
 		payload := DecodeFlowClose(r)
 		payloadFlowID = payload.FlowID
@@ -370,6 +390,40 @@ func ValidateFlowManagementFrame(frame AuroraFrame) error {
 	return nil
 }
 
+func ValidateUDPTargetConfirm(confirm UDPTargetConfirm) error {
+	if confirm.FlowID == 0 {
+		return fmt.Errorf("protocol: UDP target confirm has zero flow_id")
+	}
+	switch confirm.TargetKind {
+	case 0x01:
+		if len(confirm.SelectedIP) != 4 {
+			return fmt.Errorf("protocol: UDP target confirm IPv4 target must be 4 bytes")
+		}
+	case 0x02:
+		if len(confirm.SelectedIP) != 16 {
+			return fmt.Errorf("protocol: UDP target confirm IPv6 target must be 16 bytes")
+		}
+	default:
+		return fmt.Errorf("protocol: UDP target confirm target_kind must be IP, got 0x%x", confirm.TargetKind)
+	}
+	if len(confirm.DNSAnswerSetHash) != 48 {
+		return fmt.Errorf("protocol: UDP target confirm DNS answer hash must be 48 bytes")
+	}
+	switch confirm.ResolutionSource {
+	case UDPResolutionNotResolvedByRelay,
+		UDPResolutionClientSuppliedIP,
+		UDPResolutionRelayRecursiveDNS,
+		UDPResolutionRelaySystemDNS,
+		UDPResolutionEncryptedDNS:
+	default:
+		return fmt.Errorf("protocol: reserved UDP resolution source 0x%x", confirm.ResolutionSource)
+	}
+	if err := ValidateExtensions(confirm.Extensions, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
 func ValidateFlowClose(close FlowClose) error {
 	switch {
 	case close.CloseCode <= CloseResourceLimit:
@@ -382,6 +436,27 @@ func ValidateFlowClose(close FlowClose) error {
 		return err
 	}
 	return nil
+}
+
+func NewUDPTargetConfirmFrame(confirm UDPTargetConfirm) (AuroraFrame, error) {
+	if err := ValidateUDPTargetConfirm(confirm); err != nil {
+		return AuroraFrame{}, err
+	}
+	confirm.SelectedIP = append([]byte(nil), confirm.SelectedIP...)
+	confirm.DNSAnswerSetHash = append([]byte(nil), confirm.DNSAnswerSetHash...)
+	payload, err := Encode(confirm)
+	if err != nil {
+		return AuroraFrame{}, err
+	}
+	frame := AuroraFrame{
+		FrameType: registry.FrameUDPTargetConfirm,
+		FlowID:    confirm.FlowID,
+		Payload:   payload,
+	}
+	if err := ValidateFlowManagementFrame(frame); err != nil {
+		return AuroraFrame{}, err
+	}
+	return frame, nil
 }
 
 func NewFlowCloseFrame(close FlowClose) (AuroraFrame, error) {

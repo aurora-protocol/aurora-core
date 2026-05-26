@@ -73,5 +73,8 @@ jobs:
       - name: Check runnable server harness
         if: matrix.os == 'ubuntu-latest'
         run: go run ./cmd/auroractl server-check
+      - name: Check live server-client interop
+        if: matrix.os == 'ubuntu-latest'
+        run: go run ./cmd/auroractl client-check
       - name: Check cover-origin deployment harness
         run: go run ./cmd/auroractl cover-check

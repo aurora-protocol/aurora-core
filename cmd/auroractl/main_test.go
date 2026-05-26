@@ -843,6 +843,8 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go run ./cmd/auroractl issuer-check",
 		"go run ./cmd/auroractl issuerd-check",
 		"go run ./cmd/auroractl issuerd-http-check",
+		"go run ./cmd/auroractl server-check",
+		"go run ./cmd/auroractl client-check",
 		"go run ./cmd/auroractl cover-check",
 		"go run ./cmd/auroractl packaging-check",
 	} {

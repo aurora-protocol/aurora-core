@@ -88,6 +88,24 @@ func TestValidateFrameBlockRejectsReservedFlowCloseCode(t *testing.T) {
 	}
 }
 
+func TestValidateFrameBlockRejectsZeroFlowCloseID(t *testing.T) {
+	payload, err := Encode(FlowClose{
+		FlowID:    0,
+		CloseCode: CloseNormal,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ValidateFrameBlock(FrameBlock{Frames: []AuroraFrame{{
+		FrameType: registry.FrameFlowClose,
+		FlowID:    0,
+		Payload:   payload,
+	}}})
+	if err == nil {
+		t.Fatalf("zero-flow FlowClose was accepted")
+	}
+}
+
 func TestNewFlowCloseFrameWrapsPayloadAndCopiesReason(t *testing.T) {
 	reason := []byte("done")
 	frame, err := NewFlowCloseFrame(FlowClose{

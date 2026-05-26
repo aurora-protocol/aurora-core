@@ -523,6 +523,9 @@ func ValidateUDPTargetConfirm(confirm UDPTargetConfirm) error {
 }
 
 func ValidateFlowClose(close FlowClose) error {
+	if close.FlowID == 0 {
+		return fmt.Errorf("protocol: FLOW_CLOSE has zero flow_id")
+	}
 	switch {
 	case close.CloseCode <= CloseResourceLimit:
 	case close.CloseCode >= 0x7000 && close.CloseCode <= 0x7eff:

@@ -416,6 +416,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "bootstrap critical extension rejection coverage") {
 		t.Fatalf("capabilities output missing bootstrap critical extension coverage:\n%s", text)
 	}
+	if !strings.Contains(text, "all-object canonical round-trip coverage") {
+		t.Fatalf("capabilities output missing all-object round-trip coverage:\n%s", text)
+	}
 	if !strings.Contains(text, "issuer operations conformance harness") {
 		t.Fatalf("capabilities output missing issuer operations harness:\n%s", text)
 	}

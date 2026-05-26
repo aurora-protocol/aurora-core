@@ -124,104 +124,123 @@ func frameBlockFuzzTarget(name string, sample FrameBlock) decodeFuzzTarget {
 	}
 }
 
-func decodeByName(name string, r *wire.Reader) {
+func decodeFuzzTargetValue(name string, data []byte) (wire.Encodable, error) {
+	if name == "FrameBlock" {
+		block, err := DecodeFrameBlock(data)
+		if err != nil {
+			return nil, err
+		}
+		return block, nil
+	}
+	r := wire.NewReader(data)
+	decoded := decodeByName(name, r)
+	if err := r.Err(); err != nil {
+		return nil, err
+	}
+	if !r.EOF() {
+		return nil, fmt.Errorf("protocol: trailing %s bytes", name)
+	}
+	return decoded, nil
+}
+
+func decodeByName(name string, r *wire.Reader) wire.Encodable {
 	switch name {
 	case "PublicKeyRecord":
-		_ = DecodePublicKeyRecord(r)
+		return DecodePublicKeyRecord(r)
 	case "AuthorityKeyRecord":
-		_ = DecodeAuthorityKeyRecord(r)
+		return DecodeAuthorityKeyRecord(r)
 	case "ObjectSignature":
-		_ = DecodeObjectSignature(r)
+		return DecodeObjectSignature(r)
 	case "TokenVerificationKeyRecord":
-		_ = DecodeTokenVerificationKeyRecord(r)
+		return DecodeTokenVerificationKeyRecord(r)
 	case "SignatureEntry":
-		_ = DecodeSignatureEntry(r)
+		return DecodeSignatureEntry(r)
 	case "DirectoryConsensus":
-		_ = DecodeDirectoryConsensus(r)
+		return DecodeDirectoryConsensus(r)
 	case "RoutingRecord":
-		_ = DecodeRoutingRecord(r)
+		return DecodeRoutingRecord(r)
 	case "RelayDescriptor":
-		_ = DecodeRelayDescriptor(r)
+		return DecodeRelayDescriptor(r)
 	case "RequestClass":
-		_ = DecodeRequestClass(r)
+		return DecodeRequestClass(r)
 	case "PreludeEnvelope":
-		_ = DecodePreludeEnvelope(r)
+		return DecodePreludeEnvelope(r)
 	case "CapsuleEnvelope":
-		_ = DecodeCapsuleEnvelope(r)
+		return DecodeCapsuleEnvelope(r)
 	case "H2CoverProfile":
-		_ = DecodeH2CoverProfile(r)
+		return DecodeH2CoverProfile(r)
 	case "H3CoverProfile":
-		_ = DecodeH3CoverProfile(r)
+		return DecodeH3CoverProfile(r)
 	case "WebSocketCoverProfile":
-		_ = DecodeWebSocketCoverProfile(r)
+		return DecodeWebSocketCoverProfile(r)
 	case "CacheCookiePolicy":
-		_ = DecodeCacheCookiePolicy(r)
+		return DecodeCacheCookiePolicy(r)
 	case "TimingEnvelope":
-		_ = DecodeTimingEnvelope(r)
+		return DecodeTimingEnvelope(r)
 	case "CoverTemplate":
-		_ = DecodeCoverTemplate(r)
+		return DecodeCoverTemplate(r)
 	case "IssuerTokenKeyRecord":
-		_ = DecodeIssuerTokenKeyRecord(r)
+		return DecodeIssuerTokenKeyRecord(r)
 	case "OriginInfoPolicy":
-		_ = DecodeOriginInfoPolicy(r)
+		return DecodeOriginInfoPolicy(r)
 	case "RelayBucketScope":
-		_ = DecodeRelayBucketScope(r)
+		return DecodeRelayBucketScope(r)
 	case "AuxiliaryBindingPolicy":
-		_ = DecodeAuxiliaryBindingPolicy(r)
+		return DecodeAuxiliaryBindingPolicy(r)
 	case "IssuerVerifierServiceRecord":
-		_ = DecodeIssuerVerifierServiceRecord(r)
+		return DecodeIssuerVerifierServiceRecord(r)
 	case "IssuerMetadata":
-		_ = DecodeIssuerMetadata(r)
+		return DecodeIssuerMetadata(r)
 	case "IssuerVerifierRequest":
-		_ = DecodeIssuerVerifierRequest(r)
+		return DecodeIssuerVerifierRequest(r)
 	case "IssuerVerifierResponse":
-		_ = DecodeIssuerVerifierResponse(r)
+		return DecodeIssuerVerifierResponse(r)
 	case "AdmissionProof":
-		_ = DecodeAdmissionProof(r)
+		return DecodeAdmissionProof(r)
 	case "AuroraTokenMetadata":
-		_ = DecodeAuroraTokenMetadata(r)
+		return DecodeAuroraTokenMetadata(r)
 	case "ReplayProof":
-		_ = DecodeReplayProof(r)
+		return DecodeReplayProof(r)
 	case "ClientTransportHints":
-		_ = DecodeClientTransportHints(r)
+		return DecodeClientTransportHints(r)
 	case "PolicyOffer":
-		_ = DecodePolicyOffer(r)
+		return DecodePolicyOffer(r)
 	case "VirtualAddressAssignment":
-		_ = DecodeVirtualAddressAssignment(r)
+		return DecodeVirtualAddressAssignment(r)
 	case "PolicyAccept":
-		_ = DecodePolicyAccept(r)
+		return DecodePolicyAccept(r)
 	case "CoverPrelude0":
-		_ = DecodeCoverPrelude0(r)
+		return DecodeCoverPrelude0(r)
 	case "CoverPrelude1":
-		_ = DecodeCoverPrelude1(r)
+		return DecodeCoverPrelude1(r)
 	case "CoverCapsule1Plain":
-		_ = DecodeCoverCapsule1Plain(r)
+		return DecodeCoverCapsule1Plain(r)
 	case "CoverCapsule2Plain":
-		_ = DecodeCoverCapsule2Plain(r)
+		return DecodeCoverCapsule2Plain(r)
 	case "RouteCapsule1Plain":
-		_ = DecodeRouteCapsule1Plain(r)
+		return DecodeRouteCapsule1Plain(r)
 	case "RouteCapsule2Plain":
-		_ = DecodeRouteCapsule2Plain(r)
+		return DecodeRouteCapsule2Plain(r)
 	case "RoutePrelude1":
-		_ = DecodeRoutePrelude1(r)
+		return DecodeRoutePrelude1(r)
 	case "AuroraFrame":
-		_ = DecodeAuroraFrame(r)
+		return DecodeAuroraFrame(r)
 	case "KeyUpdate":
-		_ = DecodeKeyUpdate(r)
+		return DecodeKeyUpdate(r)
 	case "KeyUpdateACK":
-		_ = DecodeKeyUpdateACK(r)
+		return DecodeKeyUpdateACK(r)
 	case "KeyUpdateRequest":
-		_ = DecodeKeyUpdateRequest(r)
+		return DecodeKeyUpdateRequest(r)
 	case "FlowOpen":
-		_ = DecodeFlowOpen(r)
+		return DecodeFlowOpen(r)
 	case "UDPTargetConfirm":
-		_ = DecodeUDPTargetConfirm(r)
+		return DecodeUDPTargetConfirm(r)
 	case "FlowClose":
-		_ = DecodeFlowClose(r)
+		return DecodeFlowClose(r)
 	case "RouteForwardFrame":
-		_ = DecodeRouteForwardFrame(r)
+		return DecodeRouteForwardFrame(r)
 	case "RoutePreludeEnvelope":
-		_ = DecodeRoutePreludeEnvelope(r)
+		return DecodeRoutePreludeEnvelope(r)
 	default:
 		panic("unregistered decode fuzz target " + name)
 	}

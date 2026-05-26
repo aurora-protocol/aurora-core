@@ -20,6 +20,18 @@ type HopBindingInput struct {
 	ClientNonceForThisHop          []byte
 }
 
+func PreviousHopFullTranscriptHash(previousHopSelectedSuite uint64, applicationTranscriptHash []byte) ([]byte, error) {
+	e := wire.NewEncoder()
+	e.WriteBytes([]byte("aurora v2.0 previous hop full transcript"))
+	e.WriteVarint(previousHopSelectedSuite)
+	e.WriteOpaque16(applicationTranscriptHash)
+	preimage, err := e.Bytes()
+	if err != nil {
+		return nil, err
+	}
+	return auroracrypto.PreHash(preimage), nil
+}
+
 func RouteHopBinding(in HopBindingInput) ([]byte, error) {
 	e := wire.NewEncoder()
 	e.WriteBytes([]byte("aurora v2.0 route hop binding"))

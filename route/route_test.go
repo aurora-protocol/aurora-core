@@ -40,6 +40,31 @@ func TestRouteHopBindingChangesWithPreviousTranscript(t *testing.T) {
 	}
 }
 
+func TestPreviousHopFullTranscriptHashBindsSuiteAndTranscript(t *testing.T) {
+	transcript := rb(0x20, 48)
+	got, err := PreviousHopFullTranscriptHash(registry.SuiteHybrid768AESGCM, transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 48 {
+		t.Fatalf("previous-hop full transcript hash length = %d", len(got))
+	}
+	changedSuite, err := PreviousHopFullTranscriptHash(registry.SuiteHybrid1024AESGCM, transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(got, changedSuite) {
+		t.Fatalf("previous-hop full transcript hash did not bind selected suite")
+	}
+	changedTranscript, err := PreviousHopFullTranscriptHash(registry.SuiteHybrid768AESGCM, rb(0x21, 48))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(got, changedTranscript) {
+		t.Fatalf("previous-hop full transcript hash did not bind application transcript")
+	}
+}
+
 func TestRoutePreludeWrapRoundTripRejectsMismatchedVisibleEnvelope(t *testing.T) {
 	env := EnvelopeInput{
 		RouteInstanceID:                1,

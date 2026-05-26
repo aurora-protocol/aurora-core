@@ -2,7 +2,11 @@ package issuerd
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -19,17 +23,18 @@ import (
 )
 
 type HTTPReadinessReport struct {
-	Passed                  bool
-	HealthEndpoint          bool
-	MetadataEndpoint        bool
-	BlindRSAIssueEndpoint   bool
-	VOPRFVerifyEndpoint     bool
-	VOPRFFailClosedEndpoint bool
-	SpendEndpoint           bool
-	DuplicateSpendRejected  bool
-	RedactedFailureBodies   bool
-	MethodRestrictions      bool
-	Findings                []string
+	Passed                     bool
+	HealthEndpoint             bool
+	MetadataEndpoint           bool
+	BlindRSAIssueEndpoint      bool
+	VOPRFVerifyEndpoint        bool
+	VOPRFFailClosedEndpoint    bool
+	BinaryVerifierMTLSEndpoint bool
+	SpendEndpoint              bool
+	DuplicateSpendRejected     bool
+	RedactedFailureBodies      bool
+	MethodRestrictions         bool
+	Findings                   []string
 }
 
 type MetadataResponse struct {
@@ -273,6 +278,12 @@ func RunHTTPReadinessHarness(nowUnix uint64) (HTTPReadinessReport, error) {
 		report.addFinding("issuer HTTP VOPRF verify endpoint failed")
 	}
 
+	if err := verifyBinaryVerifierMTLSEndpoint(service, nowUnix); err != nil {
+		report.addFinding("issuer binary verifier mTLS endpoint failed: " + err.Error())
+	} else {
+		report.BinaryVerifierMTLSEndpoint = true
+	}
+
 	if issued.AdmissionProof != "" {
 		spend := serveHarnessRequest(handler, http.MethodPost, "/token/spend", mustMarshalJSON(SpendRequest{AdmissionProof: issued.AdmissionProof}))
 		report.SpendEndpoint = spend.status == http.StatusOK && containsAll(spend.body, []string{`"spent":true`})
@@ -308,11 +319,92 @@ func RunHTTPReadinessHarness(nowUnix uint64) (HTTPReadinessReport, error) {
 		report.BlindRSAIssueEndpoint &&
 		report.VOPRFVerifyEndpoint &&
 		report.VOPRFFailClosedEndpoint &&
+		report.BinaryVerifierMTLSEndpoint &&
 		report.SpendEndpoint &&
 		report.DuplicateSpendRejected &&
 		report.RedactedFailureBodies &&
 		report.MethodRestrictions
 	return report, nil
+}
+
+func verifyBinaryVerifierMTLSEndpoint(service *Service, nowUnix uint64) error {
+	metadata := service.PublishIssuerMetadata()
+	if len(metadata.VerifierServices) == 0 {
+		return fmt.Errorf("missing verifier service metadata")
+	}
+	verifierService := metadata.VerifierServices[0]
+	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return err
+	}
+	service.AuthorizeRelayClientKey(verifierService.RequestAuthPolicyID, protocol.PublicKeyRecord{
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+		PublicKey:       elliptic.Marshal(elliptic.P256(), clientKey.PublicKey.X, clientKey.PublicKey.Y),
+	})
+	verifierRequest, err := harnessIssuerVerifierRequest(service, verifierService, nowUnix)
+	if err != nil {
+		return err
+	}
+	encodedRequest, err := protocol.Encode(verifierRequest)
+	if err != nil {
+		return err
+	}
+	request := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(encodedRequest))
+	request.TLS = &tls.ConnectionState{
+		Version:          tls.VersionTLS13,
+		PeerCertificates: []*x509.Certificate{{PublicKey: &clientKey.PublicKey}},
+	}
+	response := httptest.NewRecorder()
+	NewVerifierHTTPHandler(service).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		return fmt.Errorf("binary verifier status %d", response.Code)
+	}
+	reader := wire.NewReader(response.Body.Bytes())
+	verifierResponse := protocol.DecodeIssuerVerifierResponse(reader)
+	if reader.Err() != nil || !reader.EOF() {
+		return fmt.Errorf("binary verifier response decode failed")
+	}
+	return auroratrust.VerifyIssuerVerifierResponse(verifierRequest, verifierService, verifierResponse, nowUnix, 300)
+}
+
+func harnessIssuerVerifierRequest(service *Service, verifierService protocol.IssuerVerifierServiceRecord, nowUnix uint64) (protocol.IssuerVerifierRequest, error) {
+	metadata := service.PublishIssuerMetadata()
+	var tokenKeyID []byte
+	for _, mapping := range metadata.TokenKeyMappings {
+		if mapping.ProofType == registry.ProofVOPRFP384SHA384 {
+			tokenKeyID = append([]byte(nil), mapping.TokenKeyID...)
+			break
+		}
+	}
+	if tokenKeyID == nil {
+		return protocol.IssuerVerifierRequest{}, fmt.Errorf("missing VOPRF token key")
+	}
+	metadataHash, err := auroratrust.IssuerMetadataHash(metadata)
+	if err != nil {
+		return protocol.IssuerVerifierRequest{}, err
+	}
+	return protocol.IssuerVerifierRequest{
+		RequestVersion:            registry.Version20,
+		ServiceID:                 append([]byte(nil), verifierService.ServiceID...),
+		IssuerID:                  append([]byte(nil), metadata.IssuerID...),
+		IssuerMetadataHash:        metadataHash,
+		RelayDescriptorHash:       repeatedByte(0x91, 48),
+		RelayBucketID:             append([]byte(nil), metadata.RelayBucketScopes[0].RelayBucketID...),
+		RouteInstanceID:           77,
+		HopIndex:                  1,
+		ProofType:                 registry.ProofVOPRFP384SHA384,
+		TokenKeyID:                tokenKeyID,
+		TokenNonce:                repeatedByte(0x92, 32),
+		ChallengeDigest:           repeatedByte(0x93, 32),
+		AuthenticatorInputHash:    repeatedByte(0x94, 48),
+		TokenAuthenticator:        []byte("private-voprf-authenticator"),
+		TokenSpentKey:             repeatedByte(0x95, 48),
+		ReplayEpochID:             11,
+		ReplayEpochValidUntilUnix: nowUnix + 200,
+		RequestNonce:              repeatedByte(0x96, 32),
+		RequestTimeUnix:           nowUnix,
+	}, nil
 }
 
 func DecodeAdmissionProofBytes(raw []byte) (protocol.AdmissionProof, error) {

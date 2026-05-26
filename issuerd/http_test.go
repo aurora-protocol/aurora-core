@@ -39,6 +39,7 @@ func TestHTTPDaemonReadinessHarnessCoversLiveIssuerSurface(t *testing.T) {
 		"blind_rsa":           report.BlindRSAIssueEndpoint,
 		"voprf":               report.VOPRFVerifyEndpoint,
 		"voprf_fail_closed":   report.VOPRFFailClosedEndpoint,
+		"binary_mtls":         report.BinaryVerifierMTLSEndpoint,
 		"spend":               report.SpendEndpoint,
 		"duplicate_rejected":  report.DuplicateSpendRejected,
 		"redacted_failures":   report.RedactedFailureBodies,

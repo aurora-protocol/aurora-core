@@ -701,13 +701,14 @@ func issuerDHTTPCheck(w io.Writer) error {
 	}
 	fmt.Fprintf(
 		w,
-		"issuerd_http_check passed=%t health=%t metadata=%t blind_rsa=%t voprf=%t voprf_fail_closed=%t spend=%t duplicate_rejected=%t redacted_failures=%t method_restrictions=%t findings=%d\n",
+		"issuerd_http_check passed=%t health=%t metadata=%t blind_rsa=%t voprf=%t voprf_fail_closed=%t binary_mtls=%t spend=%t duplicate_rejected=%t redacted_failures=%t method_restrictions=%t findings=%d\n",
 		report.Passed,
 		report.HealthEndpoint,
 		report.MetadataEndpoint,
 		report.BlindRSAIssueEndpoint,
 		report.VOPRFVerifyEndpoint,
 		report.VOPRFFailClosedEndpoint,
+		report.BinaryVerifierMTLSEndpoint,
 		report.SpendEndpoint,
 		report.DuplicateSpendRejected,
 		report.RedactedFailureBodies,

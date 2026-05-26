@@ -278,7 +278,7 @@ func TestIssuerDHTTPCheckCommandPrintsDaemonReadinessReport(t *testing.T) {
 	}
 	text := out.String()
 	for _, want := range []string{
-		"issuerd_http_check passed=true health=true metadata=true blind_rsa=true voprf=true voprf_fail_closed=true spend=true duplicate_rejected=true redacted_failures=true method_restrictions=true findings=0\n",
+		"issuerd_http_check passed=true health=true metadata=true blind_rsa=true voprf=true voprf_fail_closed=true binary_mtls=true spend=true duplicate_rejected=true redacted_failures=true method_restrictions=true findings=0\n",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("issuerd-http-check output missing %q:\n%s", want, text)

@@ -95,6 +95,9 @@ func DecodePacketBatch(data []byte) (PacketBatch, error) {
 	if offset != len(data) {
 		return PacketBatch{}, fmt.Errorf("server: trailing packet batch bytes")
 	}
+	if err := validatePacketBatch(batch); err != nil {
+		return PacketBatch{}, err
+	}
 	return batch, nil
 }
 
@@ -111,6 +114,13 @@ func validatePacketBatch(batch PacketBatch) error {
 		}
 		if len(packet) > maxPacketBytes {
 			return fmt.Errorf("server: packet length %d exceeds %d", len(packet), maxPacketBytes)
+		}
+		protocolNumber := packetProtocolNumber(packet)
+		if protocolNumber == 0 {
+			return fmt.Errorf("server: packet entry %d is not IPv4 or IPv6", i)
+		}
+		if batch.ProtocolNumbers[i] != protocolNumber {
+			return fmt.Errorf("server: packet entry %d protocol number %d does not match packet family %d", i, batch.ProtocolNumbers[i], protocolNumber)
 		}
 	}
 	return nil

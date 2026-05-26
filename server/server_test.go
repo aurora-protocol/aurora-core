@@ -142,6 +142,31 @@ func TestPacketBatchCodecRejectsEmptyPacketEntry(t *testing.T) {
 	}
 }
 
+func TestPacketBatchCodecRejectsProtocolNumberMismatch(t *testing.T) {
+	encodedMismatch := []byte{
+		0x00, 0x01,
+		0x00, 0x1e,
+		0x00, 0x00, 0x00, 0x04,
+		0x45, 0x00, 0x00, 0x14,
+	}
+
+	if _, err := DecodePacketBatch(encodedMismatch); err == nil {
+		t.Fatal("DecodePacketBatch accepted an IPv4 packet labeled as IPv6")
+	}
+	if _, err := EncodePacketBatch(PacketBatch{
+		Packets:         [][]byte{{0x45, 0x00, 0x00, 0x14}},
+		ProtocolNumbers: []uint16{30},
+	}); err == nil {
+		t.Fatal("EncodePacketBatch accepted an IPv4 packet labeled as IPv6")
+	}
+	if _, err := EncodePacketBatch(PacketBatch{
+		Packets:         [][]byte{{0x05, 0x00, 0x00, 0x14}},
+		ProtocolNumbers: []uint16{0},
+	}); err == nil {
+		t.Fatal("EncodePacketBatch accepted a non-IP packet")
+	}
+}
+
 func TestHarnessHandlerExchangesPacketBatchesThroughPrivateCarrierSlot(t *testing.T) {
 	handler, err := NewHarnessHandler(HarnessOptions{
 		NowUnix:   200,

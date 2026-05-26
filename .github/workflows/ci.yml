@@ -22,6 +22,8 @@ jobs:
           go-version-file: go.mod
       - name: Test
         run: go test ./...
+      - name: Test lab build gates
+        run: go test -tags=aurora_lab ./...
       - name: Check structural vector drift
         run: go run ./cmd/auroractl vectors --check
       - name: Check real crypto vector drift

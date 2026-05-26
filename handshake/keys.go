@@ -232,13 +232,25 @@ func ComputeClientFinished(suite uint64, clientFinishedKey, preludeTranscriptHas
 	if err != nil {
 		return nil, err
 	}
-	capsuleHash, err := auroracrypto.SuiteHash(suite, encodedUnsigned)
+	return computeClientFinished(suite, clientFinishedKey, preludeTranscriptHash, encodedUnsigned)
+}
+
+func ComputeRouteClientFinished(suite uint64, clientFinishedKey, hopPreludeTranscriptHash []byte, capsule1 protocol.RouteCapsule1Plain) ([]byte, error) {
+	encodedUnsigned, err := protocol.Encode(capsule1.UnsignedClientFinished())
+	if err != nil {
+		return nil, err
+	}
+	return computeClientFinished(suite, clientFinishedKey, hopPreludeTranscriptHash, encodedUnsigned)
+}
+
+func computeClientFinished(suite uint64, clientFinishedKey, transcriptHashForHop, encodedUnsignedCapsule1 []byte) ([]byte, error) {
+	capsuleHash, err := auroracrypto.SuiteHash(suite, encodedUnsignedCapsule1)
 	if err != nil {
 		return nil, err
 	}
 	input, err := auroracrypto.SuiteHash(suite,
 		[]byte("aurora v2.0 client finished"),
-		preludeTranscriptHash,
+		transcriptHashForHop,
 		capsuleHash,
 	)
 	if err != nil {
@@ -252,6 +264,18 @@ func ComputeServerFinished(suite uint64, serverFinishedKey, preludeTranscriptHas
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	return computeServerFinished(suite, serverFinishedKey, preludeTranscriptHash, encodedCapsule1, accept)
+}
+
+func ComputeRouteServerFinished(suite uint64, serverFinishedKey, hopPreludeTranscriptHash []byte, capsule1 protocol.RouteCapsule1Plain, accept protocol.PolicyAccept) ([]byte, []byte, []byte, error) {
+	encodedCapsule1, err := protocol.Encode(capsule1)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return computeServerFinished(suite, serverFinishedKey, hopPreludeTranscriptHash, encodedCapsule1, accept)
+}
+
+func computeServerFinished(suite uint64, serverFinishedKey, transcriptHashForHop, encodedCapsule1 []byte, accept protocol.PolicyAccept) ([]byte, []byte, []byte, error) {
 	capsule1Hash, err := auroracrypto.SuiteHash(suite, encodedCapsule1)
 	if err != nil {
 		return nil, nil, nil, err
@@ -266,7 +290,7 @@ func ComputeServerFinished(suite uint64, serverFinishedKey, preludeTranscriptHas
 	}
 	input, err := auroracrypto.SuiteHash(suite,
 		[]byte("aurora v2.0 server finished"),
-		preludeTranscriptHash,
+		transcriptHashForHop,
 		capsule1Hash,
 		policyAcceptHash,
 	)

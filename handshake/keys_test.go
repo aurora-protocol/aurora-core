@@ -193,3 +193,86 @@ func TestFinishedAndApplicationSecrets(t *testing.T) {
 		t.Fatalf("client finished did not bind capsule plaintext")
 	}
 }
+
+func TestRouteCapsuleFinishedUsesHopTranscript(t *testing.T) {
+	hopTranscript := hx(0x44, 48)
+	secrets, err := DeriveHandshakeSecrets(registry.SuiteHybrid768AESGCM, hx(1, 32), hx(2, 32), hx(0x43, 48), hopTranscript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule1 := protocol.RouteCapsule1Plain{
+		MsgType:         registry.MsgRouteCapsule1,
+		RouteInstanceID: 77,
+		HopIndex:        1,
+		AdmissionProof: protocol.AdmissionProof{
+			ProofVersion:          registry.Version20,
+			ProofType:             registry.ProofLabStaticToken,
+			IssuerID:              hx(1, 16),
+			TokenKeyID:            hx(2, 32),
+			RelayBucketID:         hx(3, 16),
+			TokenScopeID:          hx(4, 16),
+			ExpiryUnix:            2000000000,
+			TokenNonce:            hx(5, 32),
+			RedemptionContextHash: hx(6, 48),
+			TokenAuthenticator:    []byte("token"),
+		},
+		ReplayProof: protocol.ReplayProof{
+			ProofVersion:        registry.Version20,
+			ReplayEpochID:       1,
+			TokenRedemptionHash: hx(7, 48),
+			ClientReplayNonce:   hx(8, 32),
+			ReplayContextHash:   hx(9, 48),
+			ReplayWindowID:      hx(10, 16),
+		},
+		PolicyOffer: protocol.PolicyOffer{
+			OfferedVersions:         []uint64{registry.Version20},
+			OfferedSuites:           []uint64{registry.SuiteHybrid768AESGCM},
+			OfferedMethods:          []uint64{registry.MethodWebH2Stream},
+			MinimumPolicyID:         registry.PolicyAdversarialDPI,
+			RequestedPolicyID:       registry.PolicyAdversarialDPI,
+			RequestedRouteModeID:    registry.RouteSplit2,
+			RequestedShapeID:        registry.ShapeNormal,
+			TunnelPersonalityOffers: []uint64{registry.PersonalityProxyFlow},
+		},
+	}
+	clientFinished, err := ComputeRouteClientFinished(registry.SuiteHybrid768AESGCM, secrets.ClientFinishedKey, hopTranscript, capsule1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule1.ClientFinished = clientFinished
+	accept := protocol.PolicyAccept{
+		SelectedVersion:           registry.Version20,
+		SelectedSuite:             registry.SuiteHybrid768AESGCM,
+		SelectedMethod:            registry.MethodWebH2Stream,
+		SelectedPolicy:            registry.PolicyAdversarialDPI,
+		SelectedRouteModeID:       registry.RouteSplit2,
+		SelectedShape:             registry.ShapeNormal,
+		SelectedTunnelPersonality: registry.PersonalityProxyFlow,
+	}
+	serverFinished, capsuleHash, policyHash, err := ComputeRouteServerFinished(registry.SuiteHybrid768AESGCM, secrets.ServerFinishedKey, hopTranscript, capsule1, accept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := DeriveApplicationSecrets(registry.SuiteHybrid768AESGCM, secrets.HandshakeSecret, hopTranscript, capsuleHash, policyHash, serverFinished)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clientFinished) != 48 || len(serverFinished) != 48 || len(app.ClientAppKey0) != 32 {
+		t.Fatalf("unexpected route secret lengths")
+	}
+	changedTranscriptFinished, _, _, err := ComputeRouteServerFinished(registry.SuiteHybrid768AESGCM, secrets.ServerFinishedKey, hx(0x45, 48), capsule1, accept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(serverFinished, changedTranscriptFinished) {
+		t.Fatalf("route server finished did not bind hop transcript")
+	}
+	capsule1.Padding = []byte{1}
+	changedClientFinished, err := ComputeRouteClientFinished(registry.SuiteHybrid768AESGCM, secrets.ClientFinishedKey, hopTranscript, capsule1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(clientFinished, changedClientFinished) {
+		t.Fatalf("route client finished did not bind route capsule plaintext")
+	}
+}

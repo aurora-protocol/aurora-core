@@ -32,6 +32,8 @@ func main() {
 		capabilities()
 	case "active-probes":
 		err = activeProbes(os.Stdout)
+	case "crypto-check":
+		err = cryptoCheck(os.Stdout)
 	case "wire-check":
 		err = wireCheck(os.Stdout)
 	case "check-config":
@@ -50,7 +52,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|wire-check|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|crypto-check|wire-check|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -254,13 +256,42 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- Appendix A registries")
 	fmt.Fprintln(w, "- Appendix B.4 and B.5 structural vectors")
 	fmt.Fprintln(w, "- DirectoryConsensus, RelayDescriptor, CoverTemplate trust hashes, signature inputs, and strict ML-DSA authority quorum")
-	fmt.Fprintln(w, "- AES-256-GCM, HKDF labels, SHA-384/SHA-512 suite hashes, ML-KEM wrappers, and ML-DSA verification")
+	fmt.Fprintln(w, "- AES-256-GCM, HKDF labels, SHA-384/SHA-512 suite hashes, ML-KEM wrappers, ML-KEM provider agreement, and ML-DSA verification")
 	fmt.Fprintln(w, "- first-hop prelude transcript hashing, Finished messages, and application secret derivation")
 	fmt.Fprintln(w, "- first-hop, split-2 route-prelude, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, and ML-DSA artifacts")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
 	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing")
 	fmt.Fprintln(w, "not production-complete:")
 	fmt.Fprintln(w, "- full real-crypto vector package, Privacy Pass production proof verification, cover-origin gateway, active-probe harness, platform adapters, DPI evaluation")
+}
+
+func cryptoCheck(w io.Writer) error {
+	results, err := auroracrypto.CheckMLKEMBackendAgreement()
+	if err != nil {
+		return err
+	}
+	passed := true
+	for _, result := range results {
+		passed = passed && result.Passed
+	}
+	fmt.Fprintf(w, "crypto_check passed=%t backends=%d\n", passed, len(results))
+	for _, result := range results {
+		fmt.Fprintf(
+			w,
+			"scheme %s passed=%t stdlib=%s cross_check=%s public_key_bytes=%d ciphertext_bytes=%d shared_secret_bytes=%d\n",
+			result.Scheme,
+			result.Passed,
+			result.StandardLibraryBackend,
+			result.CrossCheckBackend,
+			result.PublicKeyBytes,
+			result.CiphertextBytes,
+			result.SharedSecretBytes,
+		)
+	}
+	if !passed {
+		return fmt.Errorf("crypto-check failed provider agreement")
+	}
+	return nil
 }
 
 func activeProbes(w io.Writer) error {

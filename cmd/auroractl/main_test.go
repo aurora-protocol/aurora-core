@@ -51,6 +51,26 @@ func TestWireCheckCommandPrintsPublicWireReport(t *testing.T) {
 	}
 }
 
+func TestCryptoCheckCommandPrintsProviderAgreement(t *testing.T) {
+	var out bytes.Buffer
+	if err := cryptoCheck(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"crypto_check passed=true backends=2\n",
+		"scheme ML-KEM-768 passed=true stdlib=crypto/mlkem cross_check=github.com/cloudflare/circl/kem/mlkem public_key_bytes=1184 ciphertext_bytes=1088 shared_secret_bytes=32\n",
+		"scheme ML-KEM-1024 passed=true stdlib=crypto/mlkem cross_check=github.com/cloudflare/circl/kem/mlkem public_key_bytes=1568 ciphertext_bytes=1568 shared_secret_bytes=32\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("crypto-check output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "passed=false") {
+		t.Fatalf("crypto-check output contains failing agreement:\n%s", text)
+	}
+}
+
 func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	var out bytes.Buffer
 	capabilitiesReport(&out)
@@ -60,6 +80,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	}
 	if !strings.Contains(text, "first-hop, split-2 route-prelude, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors") {
 		t.Fatalf("capabilities output missing real-crypto vector coverage:\n%s", text)
+	}
+	if !strings.Contains(text, "ML-KEM provider agreement") {
+		t.Fatalf("capabilities output missing ML-KEM provider agreement:\n%s", text)
 	}
 	if strings.Contains(text, "not production-complete:\n- ML-DSA") {
 		t.Fatalf("capabilities output still reports ML-DSA work as the first missing item:\n%s", text)
@@ -207,6 +230,7 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go test ./...",
 		"go run ./cmd/auroractl vectors --check",
 		"go run ./cmd/auroractl vectors --real-crypto --check",
+		"go run ./cmd/auroractl crypto-check",
 		"go run ./cmd/auroractl wire-check",
 	} {
 		if !strings.Contains(text, want) {

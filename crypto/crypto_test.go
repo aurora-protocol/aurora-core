@@ -193,6 +193,39 @@ func TestMLKEM1024SeedConstructorIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestMLKEMBackendAgreementChecksStdlibAndCIRCL(t *testing.T) {
+	results, err := CheckMLKEMBackendAgreement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("backend agreement result count = %d, want 2", len(results))
+	}
+	for _, result := range results {
+		if !result.Passed {
+			t.Fatalf("%s backend agreement did not pass: %+v", result.Scheme, result)
+		}
+		if result.StandardLibraryBackend != "crypto/mlkem" {
+			t.Fatalf("%s stdlib backend = %q", result.Scheme, result.StandardLibraryBackend)
+		}
+		if result.CrossCheckBackend != "github.com/cloudflare/circl/kem/mlkem" {
+			t.Fatalf("%s cross-check backend = %q", result.Scheme, result.CrossCheckBackend)
+		}
+		switch result.Scheme {
+		case "ML-KEM-768":
+			if result.PublicKeyBytes != 1184 || result.CiphertextBytes != 1088 || result.SharedSecretBytes != 32 {
+				t.Fatalf("ML-KEM-768 sizes = %+v", result)
+			}
+		case "ML-KEM-1024":
+			if result.PublicKeyBytes != 1568 || result.CiphertextBytes != 1568 || result.SharedSecretBytes != 32 {
+				t.Fatalf("ML-KEM-1024 sizes = %+v", result)
+			}
+		default:
+			t.Fatalf("unexpected backend agreement scheme %q", result.Scheme)
+		}
+	}
+}
+
 func TestChaCha20Poly1305RFCVector(t *testing.T) {
 	key := mustHex(t, "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
 	nonce := mustHex(t, "070000004041424344454647")

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/issuerd"
 )
 
@@ -58,6 +59,52 @@ func TestHarnessHandlerServesCoverAndIssuerEndpoints(t *testing.T) {
 	}
 	if raw, err := hex.DecodeString(issued.AdmissionProof); err != nil || len(raw) == 0 {
 		t.Fatalf("issue response admission proof is not non-empty hex: len=%d err=%v", len(raw), err)
+	}
+}
+
+func TestHarnessHandlerUsesInjectedSpentTokenCacheForIssuerHTTP(t *testing.T) {
+	spentTokens := admission.NewMemoryReplayCache()
+	handler, err := NewHarnessHandler(HarnessOptions{
+		NowUnix:         200,
+		SpentTokenCache: spentTokens,
+	})
+	if err != nil {
+		t.Fatalf("NewHarnessHandler failed: %v", err)
+	}
+	issueBody := mustJSON(t, map[string]any{
+		"token_nonce":             strings.Repeat("44", 32),
+		"redemption_context_hash": strings.Repeat("45", 48),
+		"expiry_unix":             uint64(250),
+	})
+	issue := serveRequest(handler, http.MethodPost, "/issuer/blind-rsa/issue", issueBody)
+	if issue.status != http.StatusOK {
+		t.Fatalf("issuer issue endpoint = %d %s", issue.status, issue.body)
+	}
+	var issued struct {
+		AdmissionProof string `json:"admission_proof"`
+	}
+	if err := json.Unmarshal(issue.body, &issued); err != nil {
+		t.Fatalf("issue response JSON failed: %v", err)
+	}
+
+	spend := serveRequest(handler, http.MethodPost, "/issuer/token/spend", mustJSON(t, map[string]any{
+		"admission_proof": issued.AdmissionProof,
+	}))
+	if spend.status != http.StatusOK {
+		t.Fatalf("token spend endpoint = %d %s", spend.status, spend.body)
+	}
+	var spent struct {
+		SpentKey string `json:"spent_key"`
+	}
+	if err := json.Unmarshal(spend.body, &spent); err != nil {
+		t.Fatalf("spend response JSON failed: %v", err)
+	}
+	spentKey, err := hex.DecodeString(spent.SpentKey)
+	if err != nil {
+		t.Fatalf("spent key is not hex: %v", err)
+	}
+	if !spentTokens.Has(spentKey) {
+		t.Fatalf("injected spent-token cache did not record spent key")
 	}
 }
 

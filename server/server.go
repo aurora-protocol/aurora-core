@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"time"
 
+	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/issuerd"
 	"github.com/aurora-protocol/aurora-core/relay"
 )
@@ -20,6 +21,7 @@ type HarnessOptions struct {
 	CoverBody       []byte
 	CoverOrigin     http.Handler
 	PacketExchanger PacketExchanger
+	SpentTokenCache admission.ReplayCache
 }
 
 type Options struct {
@@ -43,7 +45,9 @@ type ReadinessReport struct {
 
 func NewHarnessHandler(opts HarnessOptions) (http.Handler, error) {
 	now := normalizeHarnessNow(opts.NowUnix)
-	service, err := issuerd.NewHarnessService(now)
+	service, err := issuerd.NewHarnessServiceWithOptions(now, issuerd.ServiceOptions{
+		SpentTokenCache: opts.SpentTokenCache,
+	})
 	if err != nil {
 		return nil, err
 	}

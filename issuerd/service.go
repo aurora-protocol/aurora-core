@@ -29,10 +29,14 @@ type Service struct {
 	authorityKeys          []protocol.AuthorityKeyRecord
 	blindRSAKey            *rsa.PrivateKey
 	blindRSATokenKeyDER    []byte
-	spentTokens            *admission.MemoryReplayCache
+	spentTokens            admission.ReplayCache
 	verifierServiceSigners map[string]*ecdsa.PrivateKey
 	authorizedRelayKeys    map[uint64][]protocol.PublicKeyRecord
 	voprfVerifierAvailable bool
+}
+
+type ServiceOptions struct {
+	SpentTokenCache admission.ReplayCache
 }
 
 type IssueBlindRSA2048Request struct {
@@ -66,6 +70,10 @@ type ServiceReadinessReport struct {
 }
 
 func NewHarnessService(nowUnix uint64) (*Service, error) {
+	return NewHarnessServiceWithOptions(nowUnix, ServiceOptions{})
+}
+
+func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service, error) {
 	authoritySigner, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -169,13 +177,17 @@ func NewHarnessService(nowUnix uint64) (*Service, error) {
 		KeyStatus:      registry.AuthorityActive,
 		UsageFlags:     registry.UsageMaySignIssuerMetadata,
 	}}
+	spentTokens := opts.SpentTokenCache
+	if spentTokens == nil {
+		spentTokens = admission.NewMemoryReplayCache()
+	}
 	return &Service{
 		nowUnix:                nowUnix,
 		metadata:               metadata,
 		authorityKeys:          authorityKeys,
 		blindRSAKey:            blindRSAKey,
 		blindRSATokenKeyDER:    blindRSAKeyDER,
-		spentTokens:            admission.NewMemoryReplayCache(),
+		spentTokens:            spentTokens,
 		verifierServiceSigners: map[string]*ecdsa.PrivateKey{string(metadata.VerifierServices[0].ServiceID): serviceSigner},
 		authorizedRelayKeys:    make(map[uint64][]protocol.PublicKeyRecord),
 		voprfVerifierAvailable: true,

@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -105,6 +107,27 @@ func TestRunCoverOriginURLServesReverseProxiedCover(t *testing.T) {
 	code := run([]string{"--cover-origin-url", "https://cover.example"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run returned %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestRunOpensPersistentSpentTokenCacheWhenConfigured(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spent-token-cache.log")
+	restoreListen := setListenAndServeForTest(func(addr string, handler http.Handler) error {
+		return http.ErrServerClosed
+	})
+	defer restoreListen()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--spent-token-cache", path}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run returned %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("spent-token cache file was not created: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("spent-token cache mode = %o, want 600", got)
 	}
 }
 

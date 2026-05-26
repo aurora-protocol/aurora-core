@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 
+	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/platform"
 	"github.com/aurora-protocol/aurora-core/server"
 )
@@ -40,6 +41,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	now := flags.Uint64("harness-now", 200, "harness unix timestamp")
 	readinessCheck := flags.Bool("readiness-check", false, "run the server readiness harness and exit")
 	packetMode := flags.String("packet-mode", packetModeLoopback, "packet exchange mode: loopback or tun")
+	spentTokenCachePath := flags.String("spent-token-cache", "", "append-only spent-token replay cache path")
 	tunDevice := flags.String("tun-device", defaultTUN.DevicePath, "Linux TUN device path")
 	tunInterface := flags.String("tun-iface", defaultTUN.InterfaceName, "Linux TUN interface name")
 	tunMTU := flags.Int("tun-mtu", defaultTUN.MTU, "Linux TUN MTU")
@@ -80,6 +82,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if packetCloser != nil {
 		defer packetCloser.Close()
 	}
+	var spentTokenCache admission.ReplayCache
+	var spentTokenCacheCloser io.Closer
+	if *spentTokenCachePath != "" {
+		cache, err := admission.NewFileReplayCache(*spentTokenCachePath)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		spentTokenCache = cache
+		spentTokenCacheCloser = cache
+	}
+	if spentTokenCacheCloser != nil {
+		defer spentTokenCacheCloser.Close()
+	}
 	var coverOrigin http.Handler
 	if *coverOriginURL != "" {
 		coverOrigin, err = newCoverOrigin(*coverOriginURL)
@@ -93,6 +109,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		CoverBody:       []byte(*coverBody),
 		CoverOrigin:     coverOrigin,
 		PacketExchanger: packetExchanger,
+		SpentTokenCache: spentTokenCache,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, err)

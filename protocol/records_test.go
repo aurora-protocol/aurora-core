@@ -2,6 +2,10 @@ package protocol
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/hex"
 	"testing"
 
@@ -119,6 +123,36 @@ func TestPublicKeyCompatibilityRejectsFixedLengthMismatches(t *testing.T) {
 	for _, record := range cases {
 		if err := record.ValidateCompatibility(); err == nil {
 			t.Fatalf("fixed-length public key accepted with %d bytes: %+v", len(record.PublicKey), record)
+		}
+	}
+}
+
+func TestPublicKeyCompatibilityRejectsMalformedOrWrongCurveSPKI(t *testing.T) {
+	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p384SPKI, err := x509.MarshalPKIXPublicKey(&p384.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []PublicKeyRecord{{
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SPKI,
+		PublicKey:       []byte("not-spki"),
+	}, {
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SPKI,
+		PublicKey:       p384SPKI,
+	}, {
+		SignatureScheme: registry.SigECDSAP384SHA384DER,
+		KeyEncoding:     registry.KeyP384SPKI,
+		PublicKey:       []byte("not-spki"),
+	}}
+	for _, record := range cases {
+		if err := record.ValidateCompatibility(); err == nil {
+			t.Fatalf("invalid SPKI public key accepted: %+v", record)
 		}
 	}
 }

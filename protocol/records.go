@@ -2,7 +2,10 @@ package protocol
 
 import (
 	"bytes"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/x509"
 	"fmt"
 
 	"github.com/aurora-protocol/aurora-core/registry"
@@ -40,10 +43,12 @@ func (r PublicKeyRecord) ValidateCompatibility() error {
 		if r.KeyEncoding == registry.KeyP256SEC1Uncompressed {
 			return validatePublicKeyLength(r.PublicKey, 65, "P-256 SEC1 public key")
 		}
+		return validateECDSASPKIPublicKey(r.PublicKey, elliptic.P256(), "P-256 SPKI public key")
 	case registry.SigECDSAP384SHA384DER:
 		if r.KeyEncoding == registry.KeyP384SEC1Uncompressed {
 			return validatePublicKeyLength(r.PublicKey, 97, "P-384 SEC1 public key")
 		}
+		return validateECDSASPKIPublicKey(r.PublicKey, elliptic.P384(), "P-384 SPKI public key")
 	case registry.SigMLDSA65:
 		return validatePublicKeyLength(r.PublicKey, mldsa65.PublicKeySize, "ML-DSA-65 public key")
 	case registry.SigMLDSA87:
@@ -81,6 +86,21 @@ func validateSignatureKeyEncodingCompatibility(signatureScheme, keyEncoding uint
 		}
 	default:
 		return fmt.Errorf("protocol: unknown signature scheme 0x%x", signatureScheme)
+	}
+	return nil
+}
+
+func validateECDSASPKIPublicKey(publicKey []byte, curve elliptic.Curve, label string) error {
+	parsed, err := x509.ParsePKIXPublicKey(publicKey)
+	if err != nil {
+		return fmt.Errorf("protocol: invalid %s: %w", label, err)
+	}
+	pk, ok := parsed.(*ecdsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("protocol: %s is not ECDSA", label)
+	}
+	if pk.Curve != curve {
+		return fmt.Errorf("protocol: %s curve mismatch", label)
 	}
 	return nil
 }

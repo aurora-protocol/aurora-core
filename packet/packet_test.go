@@ -116,6 +116,20 @@ func TestProtectorRejectsMetadataMismatch(t *testing.T) {
 	}
 }
 
+func TestProtectorRejectsReservedDirectionBeforeSeal(t *testing.T) {
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
+	p := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		Direction:       2,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	if _, err := p.Seal(block); err == nil {
+		t.Fatalf("reserved packet direction was sealed")
+	}
+}
+
 func TestReceiverRejectsDuplicatePacketNumber(t *testing.T) {
 	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
 	protector := &Protector{
@@ -376,6 +390,43 @@ func TestProtectorRejectsMalformedDataFrame(t *testing.T) {
 	}
 	if _, err := p.Open(pkt); err == nil {
 		t.Fatalf("malformed datagram frame accepted")
+	}
+}
+
+func TestProtectorRejectsFlowOpenInBackwardDirection(t *testing.T) {
+	flow := protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           44,
+		FlowKind:         0x01,
+		TargetKind:       0x01,
+		TargetHost:       []byte{93, 184, 216, 34},
+		TargetPort:       443,
+		NameBindingID:    bytesOf(0x11, 16),
+		DNSAnswerSetHash: bytesOf(0x22, 48),
+	}
+	payload, err := protocol.Encode(flow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{
+		FrameType: registry.FrameFlowOpen,
+		FlowID:    44,
+		Payload:   payload,
+	}}}
+	p := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		HopLayer:        1,
+		Direction:       1,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	pkt, err := p.Seal(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Open(pkt); err == nil {
+		t.Fatalf("backward-direction FLOW_OPEN accepted")
 	}
 }
 

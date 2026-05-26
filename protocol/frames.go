@@ -72,6 +72,23 @@ func ValidateFrameBlock(block FrameBlock) error {
 	return nil
 }
 
+func ValidateFrameBlockForDirection(block FrameBlock, direction uint8) error {
+	if direction > 1 {
+		return fmt.Errorf("protocol: reserved packet direction 0x%x", direction)
+	}
+	if err := ValidateFrameBlock(block); err != nil {
+		return err
+	}
+	if direction == 1 {
+		for _, frame := range block.Frames {
+			if frame.FrameType == registry.FrameFlowOpen {
+				return fmt.Errorf("protocol: FLOW_OPEN is malformed in backward direction")
+			}
+		}
+	}
+	return nil
+}
+
 func ValidateFrameType(frameType uint64) error {
 	switch frameType {
 	case registry.FrameStreamData,

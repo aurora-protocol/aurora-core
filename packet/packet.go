@@ -60,6 +60,9 @@ type Protector struct {
 }
 
 func (p *Protector) Seal(block protocol.FrameBlock) (AuroraPacket, error) {
+	if p.Direction > 1 {
+		return AuroraPacket{}, fmt.Errorf("packet: reserved packet direction 0x%x", p.Direction)
+	}
 	plaintext, err := protocol.Encode(block)
 	if err != nil {
 		return AuroraPacket{}, err
@@ -113,7 +116,7 @@ func (p Protector) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
 	if err != nil {
 		return protocol.FrameBlock{}, err
 	}
-	if err := protocol.ValidateFrameBlock(block); err != nil {
+	if err := protocol.ValidateFrameBlockForDirection(block, pkt.Direction); err != nil {
 		return protocol.FrameBlock{}, err
 	}
 	return block, nil

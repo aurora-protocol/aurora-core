@@ -24,8 +24,8 @@ type KeyUpdateResult struct {
 }
 
 func DeriveKeyUpdate(suite uint64, currentAppSecret []byte, frame protocol.KeyUpdate) (KeyMaterial, error) {
-	if frame.NewKeyPhase != frame.OldKeyPhase+1 {
-		return KeyMaterial{}, fmt.Errorf("packet: skipped key phase %d -> %d", frame.OldKeyPhase, frame.NewKeyPhase)
+	if err := protocol.ValidateKeyUpdate(frame); err != nil {
+		return KeyMaterial{}, err
 	}
 	context, err := KeyUpdateContext(frame)
 	if err != nil {

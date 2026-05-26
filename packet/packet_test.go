@@ -795,6 +795,60 @@ func TestDirectionStateApplyReceivedUpdateValidatesStateBeforeMutation(t *testin
 	}
 }
 
+func TestDirectionStateRejectsKeyPhaseWrapBeforeMutation(t *testing.T) {
+	t.Run("initiate", func(t *testing.T) {
+		state := DirectionState{
+			RouteInstanceID: 0x46,
+			HopLayer:        1,
+			Direction:       0,
+			KeyPhase:        255,
+			Material: KeyMaterial{
+				AppSecret: bytesOf(0x51, 48),
+				Key:       bytesOf(0x52, 32),
+				IV:        bytesOf(0x53, 12),
+			},
+		}
+
+		if _, err := state.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa6, 16), true, 1); err == nil {
+			t.Fatalf("key phase wrap update was initiated")
+		}
+		if state.KeyPhase != 255 || !state.DrainUntil.IsZero() || state.pendingSentUpdateActive {
+			t.Fatalf("key phase wrap mutated send state: %+v", state)
+		}
+	})
+
+	t.Run("receive", func(t *testing.T) {
+		state := DirectionState{
+			RouteInstanceID: 0x47,
+			HopLayer:        1,
+			Direction:       0,
+			KeyPhase:        255,
+			Material: KeyMaterial{
+				AppSecret: bytesOf(0x61, 48),
+				Key:       bytesOf(0x62, 32),
+				IV:        bytesOf(0x63, 12),
+			},
+		}
+		update := protocol.KeyUpdate{
+			RouteInstanceID: 0x47,
+			HopLayer:        1,
+			Direction:       0,
+			OldKeyPhase:     255,
+			NewKeyPhase:     0,
+			UpdateNonce:     bytesOf(0xa7, 16),
+			AckRequired:     true,
+			UpdateReason:    1,
+		}
+
+		if _, err := state.ApplyReceivedUpdate(registry.SuiteHybrid768AESGCM, update, bytesOf(0xb7, 16)); err == nil {
+			t.Fatalf("key phase wrap update was received")
+		}
+		if state.KeyPhase != 255 || !state.DrainUntil.IsZero() || len(state.lastReceivedUpdate) != 0 {
+			t.Fatalf("key phase wrap mutated receive state: %+v", state)
+		}
+	})
+}
+
 func TestDirectionStateDuplicateKeyUpdateIsIdempotentOnlyWhileDraining(t *testing.T) {
 	state := DirectionState{
 		RouteInstanceID: 0x43,

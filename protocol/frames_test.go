@@ -237,6 +237,15 @@ func TestValidateFrameBlockRejectsMalformedKeyUpdatePayloads(t *testing.T) {
 			UpdateNonce:     bytes.Repeat([]byte{0x11}, 16),
 			UpdateReason:    1,
 		}),
+		"key update phase wrap": keyUpdateFrameForTest(t, KeyUpdate{
+			RouteInstanceID: 7,
+			HopLayer:        1,
+			Direction:       0,
+			OldKeyPhase:     255,
+			NewKeyPhase:     0,
+			UpdateNonce:     bytes.Repeat([]byte{0x15}, 16),
+			UpdateReason:    1,
+		}),
 		"key update direction": keyUpdateFrameForTest(t, KeyUpdate{
 			RouteInstanceID: 7,
 			HopLayer:        1,

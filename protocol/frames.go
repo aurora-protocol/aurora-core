@@ -293,7 +293,7 @@ func ValidateKeyUpdate(update KeyUpdate) error {
 	if update.Direction > 1 {
 		return fmt.Errorf("protocol: reserved KEY_UPDATE direction 0x%x", update.Direction)
 	}
-	if update.NewKeyPhase != update.OldKeyPhase+1 {
+	if uint16(update.NewKeyPhase) != uint16(update.OldKeyPhase)+1 {
 		return fmt.Errorf("protocol: skipped KEY_UPDATE phase %d -> %d", update.OldKeyPhase, update.NewKeyPhase)
 	}
 	return nil

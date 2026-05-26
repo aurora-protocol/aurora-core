@@ -345,6 +345,46 @@ func TestRouteClientDoesNotReleaseCapsuleBeforePreludeVerification(t *testing.T)
 	}
 }
 
+func TestRouteSessionDrainsOldInstanceDuringRotation(t *testing.T) {
+	session := NewClientSession()
+	session.ActivateRoute(100, 1)
+	if !session.AcceptsRouteInstance(100, 10) {
+		t.Fatalf("active route instance was rejected")
+	}
+	if err := session.RotateRoute(200, 1, 20, 5); err != nil {
+		t.Fatal(err)
+	}
+	if !session.AcceptsRouteInstance(200, 21) {
+		t.Fatalf("new route instance was rejected after rotation")
+	}
+	if !session.AcceptsRouteInstance(100, 24) {
+		t.Fatalf("old route instance was not accepted during drain")
+	}
+	if session.AcceptsRouteInstance(100, 25) {
+		t.Fatalf("old route instance was accepted after drain expiry")
+	}
+}
+
+func TestRouteSessionRejectsOverlappingRotationWhileDraining(t *testing.T) {
+	session := NewClientSession()
+	session.ActivateRoute(100, 1)
+	if err := session.RotateRoute(200, 1, 20, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.RotateRoute(300, 1, 21, 10); err == nil {
+		t.Fatalf("overlapping route rotation was accepted while old route was draining")
+	}
+	if !session.AcceptsRouteInstance(200, 21) || !session.AcceptsRouteInstance(100, 21) {
+		t.Fatalf("rotation rejection disturbed active or draining route state")
+	}
+	if err := session.RotateRoute(300, 1, 30, 10); err != nil {
+		t.Fatalf("rotation after drain expiry was rejected: %v", err)
+	}
+	if !session.AcceptsRouteInstance(300, 31) || !session.AcceptsRouteInstance(200, 31) {
+		t.Fatalf("post-drain rotation state mismatch")
+	}
+}
+
 func routeTestEnvelope() EnvelopeInput {
 	return EnvelopeInput{
 		RouteInstanceID:                1,

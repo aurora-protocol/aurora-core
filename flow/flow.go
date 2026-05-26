@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -134,12 +135,33 @@ func (m *Manager) ConfirmUDP(confirm protocol.UDPTargetConfirm) error {
 	if state.Kind != FlowKindUDPAssociation {
 		return fmt.Errorf("flow: target confirmation on non-UDP flow")
 	}
+	if err := validateUDPConfirmAgainstFlow(state, confirm); err != nil {
+		return err
+	}
 	state.ConfirmedHost = append([]byte(nil), confirm.SelectedIP...)
 	state.ConfirmedPort = confirm.SelectedPort
 	state.ConfirmedDNSAnswerSetHash = append([]byte(nil), confirm.DNSAnswerSetHash...)
 	state.ConfirmedTTLSeconds = confirm.TTLSeconds
 	state.ConfirmedResolutionSource = confirm.ResolutionSource
 	m.flows[confirm.FlowID] = state
+	return nil
+}
+
+func validateUDPConfirmAgainstFlow(state FlowState, confirm protocol.UDPTargetConfirm) error {
+	switch state.UDPFQDNMode {
+	case UDPFQDNNoneIPAuthoritative, UDPFQDNClientResolvedNameBinding:
+	default:
+		return nil
+	}
+	if state.TargetKind != TargetKindIPv4 && state.TargetKind != TargetKindIPv6 {
+		return nil
+	}
+	if confirm.TargetKind != state.TargetKind || confirm.SelectedPort != state.TargetPort || !bytes.Equal(confirm.SelectedIP, state.TargetHost) {
+		return fmt.Errorf("flow: UDP target confirm does not match IP-authoritative flow target")
+	}
+	if len(state.DNSAnswerSetHash) == 48 && !bytes.Equal(confirm.DNSAnswerSetHash, state.DNSAnswerSetHash) {
+		return fmt.Errorf("flow: UDP target confirm DNS answer hash mismatch")
+	}
 	return nil
 }
 

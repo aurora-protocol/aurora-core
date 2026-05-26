@@ -224,7 +224,7 @@ func TestSplit2OnionEntrySeesOnlyOpaqueForwardFrame(t *testing.T) {
 		Key:             bytesOf(0x41, 32),
 		StaticIV:        bytesOf(0x42, 12),
 	}
-	outer, err := SealSplit2Onion(exitBlock, entry, exit, routeForwardForPacketTest(7, 1))
+	outer, err := SealSplit2Onion(exitBlock, entry, exit, routeForwardForPacketTest(t, 7, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,10 +266,10 @@ func TestSplit2OnionMaintainsIndependentHopCounters(t *testing.T) {
 	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
 	entry := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 8, HopLayer: 0, Key: bytesOf(0x51, 32), StaticIV: bytesOf(0x52, 12)}
 	exit := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 8, HopLayer: 1, Key: bytesOf(0x61, 32), StaticIV: bytesOf(0x62, 12)}
-	if _, err := SealSplit2Onion(block, entry, exit, routeForwardForPacketTest(8, 1)); err != nil {
+	if _, err := SealSplit2Onion(block, entry, exit, routeForwardForPacketTest(t, 8, 1)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SealSplit2Onion(block, entry, exit, routeForwardForPacketTest(8, 1)); err != nil {
+	if _, err := SealSplit2Onion(block, entry, exit, routeForwardForPacketTest(t, 8, 1)); err != nil {
 		t.Fatal(err)
 	}
 	if entry.NextPacket != 2 || exit.NextPacket != 2 {
@@ -281,7 +281,7 @@ func TestSplit2OnionWrongInnerHopLayerFails(t *testing.T) {
 	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
 	entry := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 9, HopLayer: 0, Key: bytesOf(0x71, 32), StaticIV: bytesOf(0x72, 12)}
 	exit := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 9, HopLayer: 1, Key: bytesOf(0x81, 32), StaticIV: bytesOf(0x82, 12)}
-	outer, err := SealSplit2Onion(block, entry, exit, routeForwardForPacketTest(9, 1))
+	outer, err := SealSplit2Onion(block, entry, exit, routeForwardForPacketTest(t, 9, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +486,8 @@ func TestAuroraPacketEncodeDecode(t *testing.T) {
 	}
 }
 
-func routeForwardForPacketTest(routeInstanceID uint64, hopIndex uint8) protocol.RouteForwardFrame {
+func routeForwardForPacketTest(t *testing.T, routeInstanceID uint64, hopIndex uint8) protocol.RouteForwardFrame {
+	t.Helper()
 	return protocol.RouteForwardFrame{
 		RouteInstanceID:                routeInstanceID,
 		HopIndex:                       hopIndex,
@@ -494,6 +495,18 @@ func routeForwardForPacketTest(routeInstanceID uint64, hopIndex uint8) protocol.
 		PreviousHopRelayDescriptorHash: bytesOf(0x92, 48),
 		NextRelayRoutingRecordID:       bytesOf(0x93, 16),
 		NextRelayLocatorType:           registry.LocatorAuthority,
-		NextRelayLocator:               []byte("exit.example:443"),
+		NextRelayLocator:               routeAuthorityLocatorForPacketTest(t, "exit.example", 443),
 	}
+}
+
+func routeAuthorityLocatorForPacketTest(t *testing.T, authority string, port uint16) []byte {
+	t.Helper()
+	e := wire.NewEncoder()
+	e.WriteOpaque16([]byte(authority))
+	e.WriteUint16(port)
+	out, err := e.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }

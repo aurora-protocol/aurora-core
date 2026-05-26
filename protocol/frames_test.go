@@ -240,7 +240,7 @@ func TestRouteControlPayloadsRoundTrip(t *testing.T) {
 		PreviousHopRelayDescriptorHash: bytes.Repeat([]byte{0x77}, 48),
 		NextRelayRoutingRecordID:       bytes.Repeat([]byte{0x88}, 16),
 		NextRelayLocatorType:           registry.LocatorAuthority,
-		NextRelayLocator:               []byte("next.example"),
+		NextRelayLocator:               routeAuthorityLocatorForTest(t, "next.example", 443),
 		OpaqueNextHopPrelude:           []byte("sealed"),
 	}
 	encodedForward, err := Encode(forward)
@@ -299,7 +299,7 @@ func TestValidateFrameBlockRejectsMalformedRouteForwardPayload(t *testing.T) {
 		PreviousHopRelayDescriptorHash: bytes.Repeat([]byte{0x77}, 48),
 		NextRelayRoutingRecordID:       bytes.Repeat([]byte{0x88}, 16),
 		NextRelayLocatorType:           registry.LocatorAuthority,
-		NextRelayLocator:               []byte("next.example"),
+		NextRelayLocator:               routeAuthorityLocatorForTest(t, "next.example", 443),
 		OpaqueNextHopPrelude:           []byte("sealed"),
 	}
 	cases := map[string][]byte{
@@ -318,6 +318,15 @@ func TestValidateFrameBlockRejectsMalformedRouteForwardPayload(t *testing.T) {
 				t.Fatal(err)
 			}
 			return append(payload, 0xff)
+		}(),
+		"authority missing port": func() []byte {
+			forward := base
+			forward.NextRelayLocator = []byte("next.example")
+			payload, err := Encode(forward)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return payload
 		}(),
 	}
 	for name, payload := range cases {
@@ -521,6 +530,18 @@ func keyUpdateRequestFrameForTest(t *testing.T, req KeyUpdateRequest) AuroraFram
 		FrameType: registry.FrameKeyUpdateRequest,
 		Payload:   payload,
 	}
+}
+
+func routeAuthorityLocatorForTest(t *testing.T, authority string, port uint16) []byte {
+	t.Helper()
+	e := wire.NewEncoder()
+	e.WriteOpaque16([]byte(authority))
+	e.WriteUint16(port)
+	out, err := e.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func bytesReader(encoded []byte) *wire.Reader {

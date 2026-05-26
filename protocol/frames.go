@@ -707,12 +707,35 @@ func ValidateRouteForwardFrame(forward RouteForwardFrame) error {
 		if len(forward.NextRelayLocator) != 18 {
 			return fmt.Errorf("protocol: IPv6 locator must be 18 bytes")
 		}
-	case registry.LocatorAuthority, registry.LocatorOpaque:
+	case registry.LocatorAuthority:
+		if err := validateAuthorityLocator(forward.NextRelayLocator); err != nil {
+			return err
+		}
+	case registry.LocatorOpaque:
 		if len(forward.NextRelayLocator) == 0 {
 			return fmt.Errorf("protocol: route-forward locator is empty")
 		}
 	default:
 		return fmt.Errorf("protocol: reserved route-forward locator type 0x%x", forward.NextRelayLocatorType)
+	}
+	return nil
+}
+
+func validateAuthorityLocator(locator []byte) error {
+	r := wire.NewReader(locator)
+	authority := r.ReadOpaque16()
+	port := r.ReadUint16()
+	if r.Err() != nil {
+		return r.Err()
+	}
+	if !r.EOF() {
+		return fmt.Errorf("protocol: trailing authority locator bytes")
+	}
+	if len(authority) == 0 {
+		return fmt.Errorf("protocol: authority locator name is empty")
+	}
+	if port == 0 {
+		return fmt.Errorf("protocol: authority locator port is zero")
 	}
 	return nil
 }

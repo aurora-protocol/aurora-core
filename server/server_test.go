@@ -347,6 +347,19 @@ func TestRunReadinessHarnessUsesValidDefaultClock(t *testing.T) {
 	}
 }
 
+func TestRunClientInteropHarnessExercisesLiveHTTPBoundary(t *testing.T) {
+	report, err := RunClientInteropHarness(200)
+	if err != nil {
+		t.Fatalf("RunClientInteropHarness failed: %v", err)
+	}
+	if !report.Passed {
+		t.Fatalf("client interop report failed: %+v", report)
+	}
+	if !report.HealthEndpoint || !report.PacketExchangeEndpoint || !report.CoverNeutralInvalidPacket {
+		t.Fatalf("client interop report missing live HTTP coverage: %+v", report)
+	}
+}
+
 type servedResponse struct {
 	status int
 	header http.Header

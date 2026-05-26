@@ -389,6 +389,27 @@ func TestServerCheckCommandReportsRunnableLinuxServerSurface(t *testing.T) {
 	}
 }
 
+func TestClientCheckCommandReportsLiveServerClientInterop(t *testing.T) {
+	var out bytes.Buffer
+	if err := clientCheck(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"client_check passed=true",
+		"health=true",
+		"packet_exchange=true",
+		"cover_neutral_invalid_packet=true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("client-check output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "passed=false") {
+		t.Fatalf("client-check output contains failing result:\n%s", text)
+	}
+}
+
 func TestCoverCheckCommandPrintsDeploymentReport(t *testing.T) {
 	var out bytes.Buffer
 	if err := coverCheck(&out); err != nil {

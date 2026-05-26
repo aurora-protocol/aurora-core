@@ -112,6 +112,32 @@ func TestMLKEM768RoundTrip(t *testing.T) {
 	}
 }
 
+func TestMLKEM1024SeedConstructorIsDeterministic(t *testing.T) {
+	seed := repeated(0x42, 64)
+	decap1, err := NewMLKEM1024DecapsulationKey(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decap2, err := NewMLKEM1024DecapsulationKey(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decap1.EncapsulationKeyBytes(), decap2.EncapsulationKeyBytes()) {
+		t.Fatalf("ML-KEM-1024 seed constructor produced different encapsulation keys")
+	}
+	clientShared, ciphertext, err := EncapsulateMLKEM1024(decap1.EncapsulationKeyBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverShared, err := decap2.Decapsulate(ciphertext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(clientShared, serverShared) {
+		t.Fatalf("ML-KEM-1024 shared secret mismatch")
+	}
+}
+
 func TestChaCha20Poly1305RFCVector(t *testing.T) {
 	key := mustHex(t, "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
 	nonce := mustHex(t, "070000004041424344454647")

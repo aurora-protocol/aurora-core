@@ -54,6 +54,14 @@ func GenerateMLKEM1024() (*MLKEM1024DecapsulationKey, error) {
 	return &MLKEM1024DecapsulationKey{key: k}, nil
 }
 
+func NewMLKEM1024DecapsulationKey(seed []byte) (*MLKEM1024DecapsulationKey, error) {
+	k, err := mlkem.NewDecapsulationKey1024(seed)
+	if err != nil {
+		return nil, err
+	}
+	return &MLKEM1024DecapsulationKey{key: k}, nil
+}
+
 func (k *MLKEM1024DecapsulationKey) EncapsulationKeyBytes() []byte {
 	return k.key.EncapsulationKey().Bytes()
 }

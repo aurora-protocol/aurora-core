@@ -56,6 +56,8 @@ func main() {
 		err = issuerCheck(os.Stdout)
 	case "issuerd-check":
 		err = issuerDCheck(os.Stdout)
+	case "issuerd-http-check":
+		err = issuerDHTTPCheck(os.Stdout)
 	case "cover-check":
 		err = coverCheck(os.Stdout)
 	case "crypto-check":
@@ -78,7 +80,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|evaluation-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|cover-check|crypto-check|wire-check|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|evaluation-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|cover-check|crypto-check|wire-check|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -343,9 +345,9 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- signed directory, relay descriptor, and cover-template real-crypto vectors")
 	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, exit-layer packet, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
-	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, external evaluation evidence verifier, platform adapter conformance profiles, platform packaging and entitlement conformance matrix, release readiness evidence verifier, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, issuer service readiness harness, cover-origin deployment conformance harness")
+	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, external evaluation evidence verifier, platform adapter conformance profiles, platform packaging and entitlement conformance matrix, release readiness evidence verifier, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, issuer service readiness harness, issuer HTTP daemon readiness harness, cover-origin deployment conformance harness")
 	fmt.Fprintln(w, "not production-complete:")
-	fmt.Fprintln(w, "- live issuer deployment, real signed platform release execution/device provisioning, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation")
+	fmt.Fprintln(w, "- external live issuer deployment, real signed platform release execution/device provisioning, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation")
 }
 
 func cryptoCheck(w io.Writer) error {
@@ -638,6 +640,35 @@ func issuerDCheck(w io.Writer) error {
 	}
 	if !report.Passed {
 		return fmt.Errorf("issuerd-check failed service readiness")
+	}
+	return nil
+}
+
+func issuerDHTTPCheck(w io.Writer) error {
+	report, err := issuerd.RunHTTPReadinessHarness(200)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(
+		w,
+		"issuerd_http_check passed=%t health=%t metadata=%t blind_rsa=%t voprf=%t voprf_fail_closed=%t spend=%t duplicate_rejected=%t redacted_failures=%t method_restrictions=%t findings=%d\n",
+		report.Passed,
+		report.HealthEndpoint,
+		report.MetadataEndpoint,
+		report.BlindRSAIssueEndpoint,
+		report.VOPRFVerifyEndpoint,
+		report.VOPRFFailClosedEndpoint,
+		report.SpendEndpoint,
+		report.DuplicateSpendRejected,
+		report.RedactedFailureBodies,
+		report.MethodRestrictions,
+		len(report.Findings),
+	)
+	for _, finding := range report.Findings {
+		fmt.Fprintf(w, "issuerd_http_finding %s\n", finding)
+	}
+	if !report.Passed {
+		return fmt.Errorf("issuerd-http-check failed daemon readiness")
 	}
 	return nil
 }

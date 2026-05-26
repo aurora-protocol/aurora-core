@@ -81,9 +81,9 @@ func (f *DNSForwarder) OpenFakeIPUDPFlow(flowID uint64, domain string, answers [
 	if err != nil {
 		return protocol.FlowOpen{}, SyntheticAnswer{}, err
 	}
-	ip := net.ParseIP(answer.FakeIP).To4()
+	ip := firstIPv4Answer(answers)
 	if ip == nil {
-		return protocol.FlowOpen{}, SyntheticAnswer{}, fmt.Errorf("flow: synthetic answer was not IPv4")
+		return protocol.FlowOpen{}, SyntheticAnswer{}, fmt.Errorf("flow: no IPv4 answer for fake-IP UDP flow")
 	}
 	open := protocol.FlowOpen{
 		FlowOpenVersion:  registry.Version20,
@@ -99,6 +99,15 @@ func (f *DNSForwarder) OpenFakeIPUDPFlow(flowID uint64, domain string, answers [
 		PriorityClass:    PriorityRealtime,
 	}
 	return open, answer, nil
+}
+
+func firstIPv4Answer(answers []string) net.IP {
+	for _, answer := range answers {
+		if ip := net.ParseIP(answer).To4(); ip != nil {
+			return ip
+		}
+	}
+	return nil
 }
 
 func (f *DNSForwarder) EncryptedDNSFrame(flowID uint64, dnsMessage []byte) (protocol.AuroraFrame, error) {

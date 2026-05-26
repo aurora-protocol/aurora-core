@@ -42,8 +42,11 @@ func TestDNSForwarderBuildsFakeIPUDPFlowWithoutRawDomainLeak(t *testing.T) {
 	if !bytes.Equal(open.NameBindingID, answer.NameBindingID) || !bytes.Equal(open.DNSAnswerSetHash, answer.DNSAnswerSetHash) {
 		t.Fatalf("flow binding fields do not match synthetic answer")
 	}
-	if net.IP(open.TargetHost).String() != answer.FakeIP {
-		t.Fatalf("flow target %v does not match fake IP %s", open.TargetHost, answer.FakeIP)
+	if net.IP(open.TargetHost).String() != "93.184.216.34" {
+		t.Fatalf("flow target %v is not the resolved real IP", open.TargetHost)
+	}
+	if net.IP(open.TargetHost).String() == answer.FakeIP {
+		t.Fatalf("fake IP was sent as the exit target: %s", answer.FakeIP)
 	}
 }
 

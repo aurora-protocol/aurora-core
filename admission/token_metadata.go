@@ -13,6 +13,7 @@ import (
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
+	auroratrust "github.com/aurora-protocol/aurora-core/trust"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
@@ -82,6 +83,46 @@ func (v BlindRSA2048Verifier) VerifyBlindRSA2048(proof protocol.AdmissionProof) 
 	return VerifyBlindRSA2048(proof, v.TokenVerificationKeyDER)
 }
 
+func VerifyBlindRSA2048WithIssuerMetadata(proof protocol.AdmissionProof, metadata protocol.IssuerMetadata, now uint64) error {
+	if proof.ProofType != registry.ProofBlindRSA2048 {
+		return fmt.Errorf("admission: issuer metadata verifier cannot verify proof type 0x%x", proof.ProofType)
+	}
+	if err := metadata.ValidateStructural(now, false); err != nil {
+		return err
+	}
+	if !bytes.Equal(proof.IssuerID, metadata.IssuerID) {
+		return fmt.Errorf("admission: issuer metadata id mismatch")
+	}
+	if !containsVarint(metadata.SupportedProofTypes, proof.ProofType) {
+		return fmt.Errorf("admission: issuer metadata does not support proof type 0x%x", proof.ProofType)
+	}
+	metadataHash, err := auroratrust.IssuerMetadataHash(metadata)
+	if err != nil {
+		return err
+	}
+	tokenMetadata, err := protocol.DecodeAuroraTokenMetadataBytes(proof.TokenPublicMetadata)
+	if err != nil {
+		return err
+	}
+	if err := tokenMetadata.ValidateForProof(proof, metadataHash); err != nil {
+		return err
+	}
+	if !bytes.Equal(tokenMetadata.IssuerName, metadata.IssuerName) {
+		return fmt.Errorf("admission: token metadata issuer name mismatch")
+	}
+	key, err := issuerTokenKeyForProof(metadata, proof, now)
+	if err != nil {
+		return err
+	}
+	if err := requireOriginAllowed(metadata, proof, tokenMetadata.OriginInfo, now); err != nil {
+		return err
+	}
+	if err := requireBindingPolicyAllowsProof(metadata, proof); err != nil {
+		return err
+	}
+	return VerifyBlindRSA2048(proof, key.TokenVerificationKey.TokenVerificationKey)
+}
+
 func VerifyBlindRSA2048(proof protocol.AdmissionProof, tokenVerificationKeyDER []byte) error {
 	if proof.ProofType != registry.ProofBlindRSA2048 {
 		return fmt.Errorf("admission: Blind RSA verifier cannot verify proof type 0x%x", proof.ProofType)
@@ -126,6 +167,79 @@ func VerifyBlindRSA2048(proof protocol.AdmissionProof, tokenVerificationKeyDER [
 		return fmt.Errorf("admission: Blind RSA authenticator verification failed: %w", err)
 	}
 	return nil
+}
+
+func issuerTokenKeyForProof(metadata protocol.IssuerMetadata, proof protocol.AdmissionProof, now uint64) (protocol.IssuerTokenKeyRecord, error) {
+	var matches []protocol.IssuerTokenKeyRecord
+	for _, key := range metadata.TokenKeyMappings {
+		if key.ProofType == proof.ProofType && bytes.Equal(key.TokenKeyID, proof.TokenKeyID) {
+			matches = append(matches, key)
+		}
+	}
+	if len(matches) != 1 {
+		return protocol.IssuerTokenKeyRecord{}, fmt.Errorf("admission: issuer token key lookup returned %d matches", len(matches))
+	}
+	if err := matches[0].Validate(now); err != nil {
+		return protocol.IssuerTokenKeyRecord{}, err
+	}
+	return matches[0], nil
+}
+
+func requireOriginAllowed(metadata protocol.IssuerMetadata, proof protocol.AdmissionProof, originInfo []byte, now uint64) error {
+	for _, scope := range metadata.RelayBucketScopes {
+		if !bytes.Equal(scope.RelayBucketID, proof.RelayBucketID) || !bytes.Equal(scope.TokenScopeID, proof.TokenScopeID) {
+			continue
+		}
+		if now < scope.ValidFromUnix || now >= scope.ValidUntilUnix {
+			continue
+		}
+		if originAllowedByScope(metadata.OriginInfoPolicies, scope.AllowedOriginPolicyID, originInfo, now) {
+			return nil
+		}
+	}
+	return fmt.Errorf("admission: origin info not authorized for relay bucket scope")
+}
+
+func originAllowedByScope(policies []protocol.OriginInfoPolicy, allowedPolicyIDs []uint64, originInfo []byte, now uint64) bool {
+	for _, policy := range policies {
+		if !containsVarint(allowedPolicyIDs, policy.PolicyID) {
+			continue
+		}
+		if now < policy.ValidFromUnix || now >= policy.ValidUntilUnix {
+			continue
+		}
+		if len(originInfo) == 0 && policy.AllowEmptyOriginInfo {
+			return true
+		}
+		if bytes.Equal(policy.OriginInfo, originInfo) {
+			return true
+		}
+	}
+	return false
+}
+
+func requireBindingPolicyAllowsProof(metadata protocol.IssuerMetadata, proof protocol.AdmissionProof) error {
+	for _, policy := range metadata.AuxiliaryBindingPolicies {
+		if policy.ProofType != proof.ProofType {
+			continue
+		}
+		if policy.BindingProofRequired && len(proof.BindingProof) == 0 {
+			return fmt.Errorf("admission: binding proof required by issuer metadata")
+		}
+		if len(proof.BindingProof) > int(policy.MaxBindingProofLen) {
+			return fmt.Errorf("admission: binding proof exceeds issuer metadata limit")
+		}
+	}
+	return nil
+}
+
+func containsVarint(values []uint64, want uint64) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func parseBlindRSA2048PublicKey(encoded []byte) (*rsa.PublicKey, error) {

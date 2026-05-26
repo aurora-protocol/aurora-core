@@ -50,6 +50,7 @@ func TestPlatformProfilesMatchRequiredLocalInterfaces(t *testing.T) {
 		{KindApple, PacketNetworkExtension, true, []string{LocalSOCKS5, LocalHTTPConnect, LocalDNSForwarder}, false},
 		{KindAndroid, PacketVpnService, true, []string{LocalSOCKS5, LocalHTTPConnect, LocalDNSForwarder}, false},
 		{KindFreeBSD, PacketTUN, true, []string{LocalSOCKS5, LocalHTTPConnect, LocalDNSForwarder}, false},
+		{KindOpenWrt, PacketTUN, true, []string{LocalSOCKS5, LocalHTTPConnect, LocalDNSForwarder}, false},
 		{KindCI, PacketNone, true, []string{LocalSOCKS5, LocalHTTPConnect}, true},
 	}
 	for _, tc := range cases {
@@ -134,7 +135,7 @@ type recordingCoreSink struct {
 	udpDatagrams   int
 	dnsMessages    int
 	networkChanges int
-	lastTCPFlow     protocol.FlowOpen
+	lastTCPFlow    protocol.FlowOpen
 	lastDNSMessage []byte
 }
 

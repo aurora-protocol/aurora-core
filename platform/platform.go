@@ -16,6 +16,7 @@ const (
 	KindApple   Kind = "apple"
 	KindAndroid Kind = "android"
 	KindFreeBSD Kind = "freebsd"
+	KindOpenWrt Kind = "openwrt"
 	KindCI      Kind = "ci"
 )
 
@@ -53,6 +54,8 @@ func ProfileFor(kind Kind) Profile {
 	case KindAndroid:
 		return Profile{Kind: kind, PacketMode: PacketVpnService, SupportsLocalProxy: true, LocalModes: localModes(true)}
 	case KindFreeBSD:
+		return Profile{Kind: kind, PacketMode: PacketTUN, SupportsLocalProxy: true, LocalModes: localModes(true)}
+	case KindOpenWrt:
 		return Profile{Kind: kind, PacketMode: PacketTUN, SupportsLocalProxy: true, LocalModes: localModes(true)}
 	case KindCI:
 		return Profile{Kind: kind, PacketMode: PacketNone, SupportsLocalProxy: true, LocalModes: localModes(false), NoEntitlementOnly: true}

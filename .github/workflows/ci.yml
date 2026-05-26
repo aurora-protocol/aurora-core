@@ -32,6 +32,8 @@ jobs:
         run: go run ./cmd/auroractl classifier-check
       - name: Check platform adapter conformance
         run: go run ./cmd/auroractl platform-check
+      - name: Check platform packaging conformance
+        run: go run ./cmd/auroractl packaging-check
       - name: Check production proof harness
         run: go run ./cmd/auroractl proof-check
       - name: Check issuer operations harness

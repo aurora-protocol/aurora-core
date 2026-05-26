@@ -93,6 +93,27 @@ func TestPlatformCheckCommandPrintsAdapterConformance(t *testing.T) {
 	}
 }
 
+func TestPackagingCheckCommandPrintsEntitlementConformance(t *testing.T) {
+	var out bytes.Buffer
+	if err := packagingCheck(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"packaging_check passed=true targets=9 release_targets=6 entitlement_free_ci=3 thin_adapters=9 no_crypto=9 mock_packet_flow=3 failures=0\n",
+		"packaging_target apple-release passed=true kind=apple release=true ci=false packet=network-extension entitlement_free=false mock_packet_flow=false thin_adapter=true no_crypto=true local_proxy=true\n",
+		"packaging_target apple-ci passed=true kind=apple release=false ci=true packet=none entitlement_free=true mock_packet_flow=true thin_adapter=true no_crypto=true local_proxy=true\n",
+		"packaging_target portable-ci passed=true kind=ci release=false ci=true packet=none entitlement_free=true mock_packet_flow=true thin_adapter=true no_crypto=true local_proxy=true\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("packaging-check output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "passed=false") {
+		t.Fatalf("packaging-check output contains failing target:\n%s", text)
+	}
+}
+
 func TestProofCheckCommandPrintsProductionProofReport(t *testing.T) {
 	var out bytes.Buffer
 	if err := proofCheck(&out); err != nil {
@@ -195,6 +216,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "platform adapter conformance profiles") {
 		t.Fatalf("capabilities output missing platform adapter conformance:\n%s", text)
 	}
+	if !strings.Contains(text, "platform packaging and entitlement conformance matrix") {
+		t.Fatalf("capabilities output missing platform packaging conformance:\n%s", text)
+	}
 	if !strings.Contains(text, "Privacy Pass Blind RSA production proof harness") {
 		t.Fatalf("capabilities output missing production proof harness:\n%s", text)
 	}
@@ -216,7 +240,10 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if strings.Contains(text, "production cover-origin deployment") {
 		t.Fatalf("capabilities output still lists local cover-origin deployment conformance as unimplemented:\n%s", text)
 	}
-	if !strings.Contains(text, "issuer daemon deployment/live Privacy Pass issuance, production platform packaging/device entitlements, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation") {
+	if strings.Contains(text, "production platform packaging/device entitlements") {
+		t.Fatalf("capabilities output still lists local platform packaging conformance as unimplemented:\n%s", text)
+	}
+	if !strings.Contains(text, "issuer daemon deployment/live Privacy Pass issuance, signed platform release artifacts/device provisioning, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation") {
 		t.Fatalf("capabilities output stopped tracking remaining production work:\n%s", text)
 	}
 }
@@ -399,6 +426,7 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go run ./cmd/auroractl proof-check",
 		"go run ./cmd/auroractl issuer-check",
 		"go run ./cmd/auroractl cover-check",
+		"go run ./cmd/auroractl packaging-check",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("CI workflow missing %q:\n%s", want, text)

@@ -41,6 +41,8 @@ func main() {
 		err = classifierCheck(os.Stdout)
 	case "platform-check":
 		err = platformCheck(os.Stdout)
+	case "packaging-check":
+		err = packagingCheck(os.Stdout)
 	case "proof-check":
 		err = proofCheck(os.Stdout)
 	case "issuer-check":
@@ -67,7 +69,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|platform-check|proof-check|issuer-check|cover-check|crypto-check|wire-check|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|platform-check|packaging-check|proof-check|issuer-check|cover-check|crypto-check|wire-check|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -332,9 +334,9 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- signed directory, relay descriptor, and cover-template real-crypto vectors")
 	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, exit-layer packet, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
-	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, platform adapter conformance profiles, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, cover-origin deployment conformance harness")
+	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, HTTP cover-origin gateway handler, gateway-backed active-probe harness, DPI/classifier baseline harness, platform adapter conformance profiles, platform packaging and entitlement conformance matrix, Privacy Pass Blind RSA production proof harness, issuer operations conformance harness, cover-origin deployment conformance harness")
 	fmt.Fprintln(w, "not production-complete:")
-	fmt.Fprintln(w, "- issuer daemon deployment/live Privacy Pass issuance, production platform packaging/device entitlements, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation")
+	fmt.Fprintln(w, "- issuer daemon deployment/live Privacy Pass issuance, signed platform release artifacts/device provisioning, real deployment security assessment, external DPI/classifier evaluation, external active-probe evaluation")
 }
 
 func cryptoCheck(w io.Writer) error {
@@ -457,6 +459,49 @@ func platformCheck(w io.Writer) error {
 	}
 	if !report.Passed {
 		return fmt.Errorf("platform-check failed adapter conformance")
+	}
+	return nil
+}
+
+func packagingCheck(w io.Writer) error {
+	report, err := auroraplatform.VerifyPackagingBlueprints(auroraplatform.PackagingBlueprints())
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(
+		w,
+		"packaging_check passed=%t targets=%d release_targets=%d entitlement_free_ci=%d thin_adapters=%d no_crypto=%d mock_packet_flow=%d failures=%d\n",
+		report.Passed,
+		len(report.Targets),
+		report.ReleaseTargets,
+		report.EntitlementFreeCITargets,
+		report.ThinAdapterTargets,
+		report.NoCryptoTargets,
+		report.MockPacketFlowTargets,
+		len(report.Failures),
+	)
+	for _, target := range report.Targets {
+		fmt.Fprintf(
+			w,
+			"packaging_target %s passed=%t kind=%s release=%t ci=%t packet=%s entitlement_free=%t mock_packet_flow=%t thin_adapter=%t no_crypto=%t local_proxy=%t\n",
+			target.Name,
+			target.Passed,
+			target.Kind,
+			target.Release,
+			target.CI,
+			target.PacketMode,
+			target.EntitlementFree,
+			target.UsesMockPacketFlow,
+			target.UsesThinAdapter,
+			target.NoCryptoState,
+			target.LocalProxyFallback,
+		)
+	}
+	for _, failure := range report.Failures {
+		fmt.Fprintf(w, "packaging_failure target=%s field=%s\n", failure.TargetName, failure.Field)
+	}
+	if !report.Passed {
+		return fmt.Errorf("packaging-check failed platform packaging conformance")
 	}
 	return nil
 }

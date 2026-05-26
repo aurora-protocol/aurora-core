@@ -69,6 +69,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "server: TLS is required for non-loopback listen addresses")
 		return 2
 	}
+	if !*readinessCheck && !isLoopbackListenAddress(*listen) && *spentTokenCachePath == "" {
+		fmt.Fprintln(stderr, "server: persistent spent-token replay cache is required for non-loopback listen addresses")
+		return 2
+	}
 	if *readinessCheck {
 		report, err := server.RunReadinessHarness(*now)
 		if err != nil {

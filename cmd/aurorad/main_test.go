@@ -79,6 +79,7 @@ func TestRunTunPacketModeOpensLinuxTUNDevice(t *testing.T) {
 }
 
 func TestRunTLSModeServesHTTPSForAppleClients(t *testing.T) {
+	spentTokenCachePath := filepath.Join(t.TempDir(), "spent-token-cache.log")
 	var gotAddr, gotCert, gotKey string
 	restoreListen := setListenAndServeTLSForTest(func(addr string, handler http.Handler, certFile, keyFile string) error {
 		gotAddr = addr
@@ -99,6 +100,7 @@ func TestRunTLSModeServesHTTPSForAppleClients(t *testing.T) {
 		"--listen", "0.0.0.0:9443",
 		"--tls-cert", "/tmp/aurora-cert.pem",
 		"--tls-key", "/tmp/aurora-key.pem",
+		"--spent-token-cache", spentTokenCachePath,
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run returned %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -108,6 +110,26 @@ func TestRunTLSModeServesHTTPSForAppleClients(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "scheme=https") {
 		t.Fatalf("stdout missing HTTPS scheme: %s", stdout.String())
+	}
+}
+
+func TestRunRejectsNonLoopbackTLSWithoutPersistentSpentTokenCache(t *testing.T) {
+	restoreListen := setListenAndServeTLSForTest(func(addr string, handler http.Handler, certFile, keyFile string) error {
+		return http.ErrServerClosed
+	})
+	defer restoreListen()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--listen", "0.0.0.0:9443",
+		"--tls-cert", "/tmp/aurora-cert.pem",
+		"--tls-key", "/tmp/aurora-key.pem",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("run accepted public TLS without persistent spent-token cache stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "persistent spent-token") || !strings.Contains(stderr.String(), "non-loopback") {
+		t.Fatalf("stderr missing persistent replay-cache requirement: %s", stderr.String())
 	}
 }
 

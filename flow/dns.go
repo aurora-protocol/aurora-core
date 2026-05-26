@@ -102,12 +102,5 @@ func (f *DNSForwarder) OpenFakeIPUDPFlow(flowID uint64, domain string, answers [
 }
 
 func (f *DNSForwarder) EncryptedDNSFrame(flowID uint64, dnsMessage []byte) (protocol.AuroraFrame, error) {
-	if len(dnsMessage) == 0 {
-		return protocol.AuroraFrame{}, fmt.Errorf("flow: empty DNS message")
-	}
-	return protocol.AuroraFrame{
-		FrameType: registry.FrameDNSMessage,
-		FlowID:    flowID,
-		Payload:   append([]byte(nil), dnsMessage...),
-	}, nil
+	return protocol.NewDNSMessageFrame(flowID, dnsMessage)
 }

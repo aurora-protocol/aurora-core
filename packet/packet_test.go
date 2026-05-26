@@ -318,6 +318,27 @@ func TestProtectorRejectsFlowOpenWithUnknownCriticalExtension(t *testing.T) {
 	}
 }
 
+func TestProtectorRejectsMalformedDataFrame(t *testing.T) {
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{
+		FrameType: registry.FrameDatagramData,
+		FlowID:    0,
+		Payload:   []byte("udp"),
+	}}}
+	p := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	pkt, err := p.Seal(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Open(pkt); err == nil {
+		t.Fatalf("malformed datagram frame accepted")
+	}
+}
+
 func TestKeyUpdateDerivationAndACK(t *testing.T) {
 	frame := protocol.KeyUpdate{
 		RouteInstanceID: 0x42,

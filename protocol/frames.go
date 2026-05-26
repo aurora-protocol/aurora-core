@@ -62,6 +62,9 @@ func ValidateFrameBlock(block FrameBlock) error {
 		if err := ValidateFrameType(frame.FrameType); err != nil {
 			return err
 		}
+		if err := ValidateDataFrame(frame); err != nil {
+			return err
+		}
 		if err := ValidateFlowManagementFrame(frame); err != nil {
 			return err
 		}
@@ -95,6 +98,46 @@ func ValidateFrameType(frameType uint64) error {
 		}
 		return nil
 	}
+}
+
+func NewStreamDataFrame(flowID uint64, data []byte, flags uint64) (AuroraFrame, error) {
+	return newDataFrame(registry.FrameStreamData, flowID, data, flags)
+}
+
+func NewDatagramDataFrame(flowID uint64, data []byte, flags uint64) (AuroraFrame, error) {
+	return newDataFrame(registry.FrameDatagramData, flowID, data, flags)
+}
+
+func NewDNSMessageFrame(flowID uint64, message []byte) (AuroraFrame, error) {
+	return newDataFrame(registry.FrameDNSMessage, flowID, message, 0)
+}
+
+func newDataFrame(frameType, flowID uint64, payload []byte, flags uint64) (AuroraFrame, error) {
+	frame := AuroraFrame{
+		FrameType: frameType,
+		FlowID:    flowID,
+		Flags:     flags,
+		Payload:   append([]byte(nil), payload...),
+	}
+	if err := ValidateDataFrame(frame); err != nil {
+		return AuroraFrame{}, err
+	}
+	return frame, nil
+}
+
+func ValidateDataFrame(frame AuroraFrame) error {
+	switch frame.FrameType {
+	case registry.FrameStreamData, registry.FrameDatagramData, registry.FrameDNSMessage:
+	default:
+		return nil
+	}
+	if frame.FlowID == 0 {
+		return fmt.Errorf("protocol: data frame has zero flow_id")
+	}
+	if len(frame.Payload) == 0 {
+		return fmt.Errorf("protocol: data frame has empty payload")
+	}
+	return nil
 }
 
 type KeyUpdate struct {

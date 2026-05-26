@@ -29,6 +29,7 @@ func TestKindsHaveStableInternalCodes(t *testing.T) {
 		{WrongH3Settings, 0x000f, "f000f"},
 		{UnsupportedVersion, 0x0010, "f0010"},
 		{MalformedHybridShare, 0x0011, "f0011"},
+		{RateLimited, 0x0012, "f0012"},
 	}
 	seen := make(map[uint16]bool, len(cases))
 	for _, tc := range cases {
@@ -64,6 +65,7 @@ func TestProbeSensitiveFailuresUseCoverOriginAction(t *testing.T) {
 		PolicyGate,
 		VerifierUnavailable,
 		ReplayCacheFailure,
+		RateLimited,
 	}
 	first := Classify(kinds[0])
 	for _, kind := range kinds {
@@ -102,6 +104,7 @@ func TestActiveProbeCasesCoverSpecChecklist(t *testing.T) {
 		"wrong-h3-settings":         WrongH3Settings,
 		"malformed-flow-open":       MalformedFlowOpen,
 		"malformed-key-update":      MalformedKeyUpdate,
+		"rate-limited":              RateLimited,
 	}
 	got := ActiveProbeCases()
 	if len(got) != len(want) {

@@ -26,6 +26,7 @@ const (
 	WrongH3Settings
 	UnsupportedVersion
 	MalformedHybridShare
+	RateLimited
 )
 
 type Action uint8
@@ -74,7 +75,7 @@ type ProbeFinding struct {
 }
 
 func (k Kind) Code() uint16 {
-	if k < BadAccessHint || k > MalformedHybridShare {
+	if k < BadAccessHint || k > RateLimited {
 		return uint16(Unknown)
 	}
 	return uint16(k)
@@ -153,6 +154,7 @@ func ActiveProbeCases() []ProbeCase {
 		{Name: "wrong-h3-settings", Kind: WrongH3Settings},
 		{Name: "malformed-flow-open", Kind: MalformedFlowOpen},
 		{Name: "malformed-key-update", Kind: MalformedKeyUpdate},
+		{Name: "rate-limited", Kind: RateLimited},
 	}
 }
 

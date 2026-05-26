@@ -384,11 +384,34 @@ var blockedExitPrefixes = []netip.Prefix{
 type ExitFlowHandler struct {
 	Policy               ExitPolicy
 	UDPConfirmTTLSeconds uint32
+	RateLimit            ExitRateLimit
 
-	flows *coreflow.Manager
+	flows            *coreflow.Manager
+	rateWindow       exitRateWindow
+	rateWindowActive bool
 }
 
 const maxUDPConfirmTTLSeconds uint32 = 86400
+
+type ExitRateLimit struct {
+	WindowSeconds uint64
+	MaxFlowOpens  uint32
+	MaxBytes      uint64
+}
+
+type exitRateWindow struct {
+	StartedAtUnix uint64
+	FlowOpens     uint32
+	Bytes         uint64
+}
+
+func DefaultExitRateLimit() ExitRateLimit {
+	return ExitRateLimit{
+		WindowSeconds: 60,
+		MaxFlowOpens:  1024,
+		MaxBytes:      64 * 1024 * 1024,
+	}
+}
 
 type ExitEventKind uint8
 
@@ -418,6 +441,7 @@ func NewExitFlowHandler(policy ExitPolicy) *ExitFlowHandler {
 	return &ExitFlowHandler{
 		Policy:               policy,
 		UDPConfirmTTLSeconds: 300,
+		RateLimit:            DefaultExitRateLimit(),
 		flows:                coreflow.NewManager(),
 	}
 }
@@ -476,8 +500,14 @@ func (h *ExitFlowHandler) HandleFlowOpenFrame(frame protocol.AuroraFrame, now ui
 	if err := h.checkExitPolicy(open); err != nil {
 		return nil, err
 	}
+	if _, ok := h.FlowState(open.FlowID); ok {
+		return nil, fmt.Errorf("relay: duplicate flow_id %d", open.FlowID)
+	}
 	out, err := h.confirmFramesForOpen(open)
 	if err != nil {
+		return nil, err
+	}
+	if err := h.consumeRateLimit(now, 1, 0); err != nil {
 		return nil, err
 	}
 	ttl := h.effectiveUDPConfirmTTLSeconds()
@@ -493,6 +523,9 @@ func (h *ExitFlowHandler) HandleFlowOpenFrame(frame protocol.AuroraFrame, now ui
 
 func (h *ExitFlowHandler) handleDataFrame(frame protocol.AuroraFrame, now uint64) (ExitFrameEvent, error) {
 	if frame.FrameType == registry.FrameDNSMessage {
+		if err := h.consumeRateLimit(now, 0, uint64(len(frame.Payload))); err != nil {
+			return ExitFrameEvent{}, err
+		}
 		state, _ := h.FlowState(frame.FlowID)
 		return ExitFrameEvent{
 			Kind:      ExitEventDNSMessage,
@@ -511,6 +544,9 @@ func (h *ExitFlowHandler) handleDataFrame(frame protocol.AuroraFrame, now uint64
 	}
 	switch frame.FrameType {
 	case registry.FrameStreamData:
+		if err := h.consumeRateLimit(now, 0, uint64(len(frame.Payload))); err != nil {
+			return ExitFrameEvent{}, err
+		}
 		if state.Kind == coreflow.FlowKindUDPAssociation {
 			var accepted bool
 			state, accepted = h.flows.AcceptDatagramWithOptions(frame.FlowID, coreflow.DatagramOptions{NowUnix: now})
@@ -528,6 +564,9 @@ func (h *ExitFlowHandler) handleDataFrame(frame protocol.AuroraFrame, now uint64
 			Data:      append([]byte(nil), frame.Payload...),
 		}, nil
 	case registry.FrameDatagramData:
+		if err := h.consumeRateLimit(now, 0, uint64(len(frame.Payload))); err != nil {
+			return ExitFrameEvent{}, err
+		}
 		var accepted bool
 		state, accepted = h.flows.AcceptDatagramWithOptions(frame.FlowID, coreflow.DatagramOptions{NowUnix: now})
 		if !accepted {
@@ -585,6 +624,31 @@ func (h *ExitFlowHandler) ensure() {
 	if h.UDPConfirmTTLSeconds == 0 {
 		h.UDPConfirmTTLSeconds = 300
 	}
+	if h.RateLimit.WindowSeconds == 0 && h.RateLimit.MaxFlowOpens == 0 && h.RateLimit.MaxBytes == 0 {
+		h.RateLimit = DefaultExitRateLimit()
+	}
+}
+
+func (h *ExitFlowHandler) consumeRateLimit(now uint64, flowOpens uint32, bytes uint64) error {
+	limit := h.RateLimit
+	if limit.WindowSeconds == 0 {
+		limit.WindowSeconds = DefaultExitRateLimit().WindowSeconds
+	}
+	if !h.rateWindowActive || now >= h.rateWindow.StartedAtUnix+limit.WindowSeconds {
+		h.rateWindow = exitRateWindow{StartedAtUnix: now}
+		h.rateWindowActive = true
+	}
+	if limit.MaxFlowOpens != 0 && flowOpens != 0 &&
+		(h.rateWindow.FlowOpens >= limit.MaxFlowOpens || flowOpens > limit.MaxFlowOpens-h.rateWindow.FlowOpens) {
+		return failure.NewError(failure.RateLimited, "relay: flow-open rate limit exceeded")
+	}
+	if limit.MaxBytes != 0 && bytes != 0 &&
+		(h.rateWindow.Bytes >= limit.MaxBytes || bytes > limit.MaxBytes-h.rateWindow.Bytes) {
+		return failure.NewError(failure.RateLimited, "relay: byte rate limit exceeded")
+	}
+	h.rateWindow.FlowOpens += flowOpens
+	h.rateWindow.Bytes += bytes
+	return nil
 }
 
 func (h *ExitFlowHandler) checkExitPolicy(open protocol.FlowOpen) error {

@@ -284,6 +284,73 @@ func TestExitFlowHandlerRejectsMismatchedFlowIDBeforeOpen(t *testing.T) {
 	}
 }
 
+func TestExitFlowHandlerAppliesFlowOpenRateLimitBeforeStateMutation(t *testing.T) {
+	handler := NewExitFlowHandler(DefaultExitPolicy())
+	handler.RateLimit = ExitRateLimit{
+		WindowSeconds: 60,
+		MaxFlowOpens:  1,
+	}
+	first := relayTCPFlowOpen(50, "example.com")
+	if _, err := handler.HandleFlowOpenFrame(flowOpenFrame(t, first), 100); err != nil {
+		t.Fatal(err)
+	}
+	second := relayTCPFlowOpen(51, "example.net")
+	_, err := handler.HandleFlowOpenFrame(flowOpenFrame(t, second), 101)
+	var failureErr *failure.Error
+	if !errors.As(err, &failureErr) || failureErr.Kind != failure.RateLimited {
+		t.Fatalf("second flow open error = %v, want rate-limit failure", err)
+	}
+	if _, ok := handler.FlowState(51); ok {
+		t.Fatalf("rate-limited flow open mutated state")
+	}
+	if _, err := handler.HandleFlowOpenFrame(flowOpenFrame(t, second), 161); err != nil {
+		t.Fatalf("flow open after rate-limit window rejected: %v", err)
+	}
+}
+
+func TestExitFlowHandlerAppliesByteRateLimitBeforeActivityMutation(t *testing.T) {
+	handler := NewExitFlowHandler(DefaultExitPolicy())
+	handler.RateLimit = ExitRateLimit{
+		WindowSeconds: 60,
+		MaxFlowOpens:  10,
+		MaxBytes:      4,
+	}
+	open := relayUDPFlowOpen(52, []byte{93, 184, 216, 34})
+	if _, err := handler.HandleFlowOpenFrame(flowOpenFrame(t, open), 100); err != nil {
+		t.Fatal(err)
+	}
+	datagram, err := protocol.NewDatagramDataFrame(52, []byte("1234"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handler.HandleFrameBlock(protocol.FrameBlock{Frames: []protocol.AuroraFrame{datagram}}, 101); err != nil {
+		t.Fatal(err)
+	}
+	state, ok := handler.FlowState(52)
+	if !ok {
+		t.Fatalf("accepted flow missing after first datagram")
+	}
+	if state.LastActivityUnix != 101 {
+		t.Fatalf("first datagram activity = %d, want 101", state.LastActivityUnix)
+	}
+	datagram, err = protocol.NewDatagramDataFrame(52, []byte("5"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = handler.HandleFrameBlock(protocol.FrameBlock{Frames: []protocol.AuroraFrame{datagram}}, 102)
+	var failureErr *failure.Error
+	if !errors.As(err, &failureErr) || failureErr.Kind != failure.RateLimited {
+		t.Fatalf("second datagram error = %v, want rate-limit failure", err)
+	}
+	state, ok = handler.FlowState(52)
+	if !ok {
+		t.Fatalf("rate-limited flow disappeared")
+	}
+	if state.LastActivityUnix != 101 {
+		t.Fatalf("rate-limited datagram changed activity to %d", state.LastActivityUnix)
+	}
+}
+
 func TestAdmissionPolicyRejectsVOPRFWithoutVerifierService(t *testing.T) {
 	proof := relayAdmissionProof(registry.ProofVOPRFP384SHA384)
 	if err := (AdmissionPolicy{NowUnix: 20}).AllowsProof(proof); err == nil {

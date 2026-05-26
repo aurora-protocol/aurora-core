@@ -50,6 +50,31 @@ func TestDNSForwarderBuildsFakeIPUDPFlowWithoutRawDomainLeak(t *testing.T) {
 	}
 }
 
+func TestDNSForwarderBuildsFakeIPUDPFlowWithIPv6Target(t *testing.T) {
+	f := NewDNSForwarder(DNSForwarderOptions{FakeIPCIDR: "198.18.0.0/15"})
+	open, _, err := f.OpenFakeIPUDPFlow(78, "Example.COM.", []string{"2001:4860:4860::8888"}, 443, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if open.TargetKind != TargetKindIPv6 {
+		t.Fatalf("IPv6 fake-IP flow target_kind = 0x%x, want IPv6", open.TargetKind)
+	}
+	if len(open.TargetHost) != 16 || net.IP(open.TargetHost).String() != "2001:4860:4860::8888" {
+		t.Fatalf("IPv6 fake-IP flow target host = %x", open.TargetHost)
+	}
+	if open.UDPFQDNMode != UDPFQDNClientResolvedNameBinding || open.LocalBindingMode != LocalBindingTransparentFakeIP {
+		t.Fatalf("IPv6 fake-IP flow used wrong binding mode: %+v", open)
+	}
+}
+
+func TestDNSAnswerSetHashIsOrderIndependent(t *testing.T) {
+	first := DNSAnswerSetHash([]string{"93.184.216.34", "2001:4860:4860::8888"})
+	second := DNSAnswerSetHash([]string{"2001:4860:4860::8888", "93.184.216.34"})
+	if !bytes.Equal(first, second) {
+		t.Fatalf("DNS answer set hash depends on answer order: %x vs %x", first, second)
+	}
+}
+
 func TestDNSForwarderUsesDNSMessageFramesForEncryptedForwarding(t *testing.T) {
 	f := NewDNSForwarder(DNSForwarderOptions{})
 	frame, err := f.EncryptedDNSFrame(9, []byte{0x12, 0x34, 0x01, 0x00})

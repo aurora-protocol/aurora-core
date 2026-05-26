@@ -81,16 +81,16 @@ func (f *DNSForwarder) OpenFakeIPUDPFlow(flowID uint64, domain string, answers [
 	if err != nil {
 		return protocol.FlowOpen{}, SyntheticAnswer{}, err
 	}
-	ip := firstIPv4Answer(answers)
-	if ip == nil {
-		return protocol.FlowOpen{}, SyntheticAnswer{}, fmt.Errorf("flow: no IPv4 answer for fake-IP UDP flow")
+	targetKind, targetHost, err := firstIPTarget(answers)
+	if err != nil {
+		return protocol.FlowOpen{}, SyntheticAnswer{}, err
 	}
 	open := protocol.FlowOpen{
 		FlowOpenVersion:  registry.Version20,
 		FlowID:           flowID,
 		FlowKind:         FlowKindUDPAssociation,
-		TargetKind:       TargetKindIPv4,
-		TargetHost:       append([]byte(nil), ip...),
+		TargetKind:       targetKind,
+		TargetHost:       targetHost,
 		TargetPort:       port,
 		UDPFQDNMode:      UDPFQDNClientResolvedNameBinding,
 		NameBindingID:    append([]byte(nil), answer.NameBindingID...),
@@ -101,13 +101,16 @@ func (f *DNSForwarder) OpenFakeIPUDPFlow(flowID uint64, domain string, answers [
 	return open, answer, nil
 }
 
-func firstIPv4Answer(answers []string) net.IP {
+func firstIPTarget(answers []string) (uint8, []byte, error) {
 	for _, answer := range answers {
 		if ip := net.ParseIP(answer).To4(); ip != nil {
-			return ip
+			return TargetKindIPv4, append([]byte(nil), ip...), nil
+		}
+		if ip := net.ParseIP(answer).To16(); ip != nil {
+			return TargetKindIPv6, append([]byte(nil), ip...), nil
 		}
 	}
-	return nil
+	return 0, nil, fmt.Errorf("flow: no IP answer for fake-IP UDP flow")
 }
 
 func (f *DNSForwarder) EncryptedDNSFrame(flowID uint64, dnsMessage []byte) (protocol.AuroraFrame, error) {

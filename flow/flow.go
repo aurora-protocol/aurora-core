@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 
@@ -392,7 +393,7 @@ func canonicalDomain(domain string) string {
 func bindingID(domain string, answers []string) []byte {
 	h := sha256.New()
 	h.Write([]byte(canonicalDomain(domain)))
-	for _, answer := range answers {
+	for _, answer := range canonicalAnswers(answers) {
 		h.Write([]byte{0})
 		h.Write([]byte(answer))
 	}
@@ -400,6 +401,21 @@ func bindingID(domain string, answers []string) []byte {
 }
 
 func DNSAnswerSetHash(answers []string) []byte {
-	h := sha256.Sum256([]byte(strings.Join(answers, "\x00")))
+	h := sha256.Sum256([]byte(strings.Join(canonicalAnswers(answers), "\x00")))
 	return auroracrypto.PreHash([]byte(hex.EncodeToString(h[:])))
+}
+
+func canonicalAnswers(answers []string) []string {
+	out := make([]string, 0, len(answers))
+	for _, answer := range answers {
+		answer = strings.TrimSpace(strings.ToLower(answer))
+		if ip := net.ParseIP(answer); ip != nil {
+			answer = ip.String()
+		}
+		if answer != "" {
+			out = append(out, answer)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

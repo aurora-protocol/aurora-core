@@ -1,6 +1,7 @@
 package packet
 
 import (
+	"bytes"
 	"fmt"
 	"time"
 
@@ -93,6 +94,9 @@ type DirectionState struct {
 	KeyPhase        uint8
 	Material        KeyMaterial
 	DrainUntil      time.Time
+
+	lastReceivedUpdate       []byte
+	lastReceivedUpdateResult KeyUpdateResult
 }
 
 func (s *DirectionState) InitiateUpdate(suite uint64, updateNonce []byte, ackRequired bool, reason uint64) (protocol.KeyUpdate, error) {
@@ -113,6 +117,7 @@ func (s *DirectionState) InitiateUpdate(suite uint64, updateNonce []byte, ackReq
 	s.KeyPhase = frame.NewKeyPhase
 	s.Material = next
 	s.DrainUntil = time.Now().Add(MaxDrainWindow)
+	s.clearLastReceivedUpdate()
 	return frame, nil
 }
 
@@ -126,7 +131,14 @@ func (s *DirectionState) ApplyReceivedUpdate(suite uint64, frame protocol.KeyUpd
 	if frame.Direction != s.Direction {
 		return KeyUpdateResult{}, fmt.Errorf("packet: KEY_UPDATE direction mismatch")
 	}
+	encodedFrame, err := protocol.Encode(frame)
+	if err != nil {
+		return KeyUpdateResult{}, err
+	}
 	if frame.OldKeyPhase != s.KeyPhase {
+		if s.isDuplicateReceivedUpdate(frame, encodedFrame, time.Now()) {
+			return cloneKeyUpdateResult(s.lastReceivedUpdateResult), nil
+		}
 		return KeyUpdateResult{}, fmt.Errorf("packet: KEY_UPDATE old phase %d does not match active phase %d", frame.OldKeyPhase, s.KeyPhase)
 	}
 	res, err := ApplyReceivedKeyUpdate(suite, s.Material.AppSecret, frame, ackNonce)
@@ -136,5 +148,38 @@ func (s *DirectionState) ApplyReceivedUpdate(suite uint64, frame protocol.KeyUpd
 	s.KeyPhase = frame.NewKeyPhase
 	s.Material = res.Next
 	s.DrainUntil = time.Now().Add(MaxDrainWindow)
+	s.lastReceivedUpdate = append(s.lastReceivedUpdate[:0], encodedFrame...)
+	s.lastReceivedUpdateResult = cloneKeyUpdateResult(res)
 	return res, nil
+}
+
+func (s *DirectionState) isDuplicateReceivedUpdate(frame protocol.KeyUpdate, encodedFrame []byte, now time.Time) bool {
+	if len(s.lastReceivedUpdate) == 0 || s.DrainUntil.IsZero() || now.After(s.DrainUntil) {
+		return false
+	}
+	if frame.NewKeyPhase != s.KeyPhase {
+		return false
+	}
+	return bytes.Equal(s.lastReceivedUpdate, encodedFrame)
+}
+
+func (s *DirectionState) clearLastReceivedUpdate() {
+	s.lastReceivedUpdate = nil
+	s.lastReceivedUpdateResult = KeyUpdateResult{}
+}
+
+func cloneKeyUpdateResult(in KeyUpdateResult) KeyUpdateResult {
+	out := KeyUpdateResult{
+		Next: KeyMaterial{
+			AppSecret: append([]byte(nil), in.Next.AppSecret...),
+			Key:       append([]byte(nil), in.Next.Key...),
+			IV:        append([]byte(nil), in.Next.IV...),
+		},
+	}
+	if in.ACK != nil {
+		ack := *in.ACK
+		ack.AckNonce = append([]byte(nil), in.ACK.AckNonce...)
+		out.ACK = &ack
+	}
+	return out
 }

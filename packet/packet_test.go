@@ -3,6 +3,7 @@ package packet
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/protocol"
@@ -601,8 +602,57 @@ func TestDirectionStateApplyReceivedUpdateValidatesStateBeforeMutation(t *testin
 	if res.ACK == nil || res.ACK.AckedDirection != 0 || res.ACK.AckedKeyPhase != 1 {
 		t.Fatalf("valid KEY_UPDATE did not produce matching ACK: %+v", res.ACK)
 	}
-	if _, err := state.ApplyReceivedUpdate(registry.SuiteHybrid768AESGCM, rightDirection, bytesOf(0xbd, 16)); err == nil {
+	staleChanged := rightDirection
+	staleChanged.UpdateNonce = bytesOf(0xbe, 16)
+	if _, err := state.ApplyReceivedUpdate(registry.SuiteHybrid768AESGCM, staleChanged, bytesOf(0xbd, 16)); err == nil {
 		t.Fatalf("stale KEY_UPDATE old phase accepted after state advanced")
+	}
+}
+
+func TestDirectionStateDuplicateKeyUpdateIsIdempotentOnlyWhileDraining(t *testing.T) {
+	state := DirectionState{
+		RouteInstanceID: 0x43,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        0,
+		Material: KeyMaterial{
+			AppSecret: bytesOf(0x61, 48),
+			Key:       bytesOf(0x62, 32),
+			IV:        bytesOf(0x63, 12),
+		},
+	}
+	update := protocol.KeyUpdate{
+		RouteInstanceID: 0x43,
+		HopLayer:        1,
+		Direction:       0,
+		OldKeyPhase:     0,
+		NewKeyPhase:     1,
+		UpdateNonce:     bytesOf(0xa1, 16),
+		AckRequired:     true,
+		UpdateReason:    1,
+	}
+	first, err := state.ApplyReceivedUpdate(registry.SuiteHybrid768AESGCM, update, bytesOf(0xb1, 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate, err := state.ApplyReceivedUpdate(registry.SuiteHybrid768AESGCM, update, bytesOf(0xb2, 16))
+	if err != nil {
+		t.Fatalf("byte-identical duplicate KEY_UPDATE was not idempotent: %v", err)
+	}
+	if state.KeyPhase != 1 {
+		t.Fatalf("duplicate KEY_UPDATE advanced state again: %+v", state)
+	}
+	if duplicate.ACK == nil || !bytes.Equal(duplicate.ACK.AckNonce, first.ACK.AckNonce) {
+		t.Fatalf("duplicate KEY_UPDATE produced a different ACK: first=%+v duplicate=%+v", first.ACK, duplicate.ACK)
+	}
+	changed := update
+	changed.UpdateNonce = bytesOf(0xa2, 16)
+	if _, err := state.ApplyReceivedUpdate(registry.SuiteHybrid768AESGCM, changed, bytesOf(0xb3, 16)); err == nil {
+		t.Fatalf("non-identical stale KEY_UPDATE was accepted")
+	}
+	state.DrainUntil = time.Now().Add(-time.Second)
+	if _, err := state.ApplyReceivedUpdate(registry.SuiteHybrid768AESGCM, update, bytesOf(0xb4, 16)); err == nil {
+		t.Fatalf("duplicate KEY_UPDATE was accepted after drain expiry")
 	}
 }
 

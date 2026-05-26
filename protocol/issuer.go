@@ -464,6 +464,12 @@ func (s IssuerVerifierServiceRecord) validateStructural(allowLab bool) error {
 	if len(s.ServiceID) != 16 {
 		return fmt.Errorf("protocol: verifier service id must be 16 bytes")
 	}
+	if err := validateVerifierServiceKind(s.ServiceKind, allowLab); err != nil {
+		return err
+	}
+	if err := validateVerifierServiceProtocol(s.ServiceProtocolID); err != nil {
+		return err
+	}
 	if s.ValidUntilUnix <= s.ValidFromUnix {
 		return fmt.Errorf("protocol: verifier service validity interval is empty")
 	}
@@ -484,6 +490,30 @@ func (s IssuerVerifierServiceRecord) validateStructural(allowLab bool) error {
 		}
 	}
 	return nil
+}
+
+func validateVerifierServiceKind(serviceKind uint64, allowLab bool) error {
+	switch serviceKind {
+	case registry.VerifierServiceKindVOPRF, registry.VerifierServiceKindOpaqueIssuer:
+		return nil
+	}
+	if serviceKind >= 0x7000 && serviceKind <= 0x7eff {
+		return nil
+	}
+	if allowLab && serviceKind >= 0x7f00 && serviceKind <= 0x7fff {
+		return nil
+	}
+	return fmt.Errorf("protocol: verifier service kind 0x%x is reserved", serviceKind)
+}
+
+func validateVerifierServiceProtocol(serviceProtocolID uint64) error {
+	if serviceProtocolID == registry.IssuerVerifierVOPRFMTLS13 {
+		return nil
+	}
+	if serviceProtocolID >= 0x7000 && serviceProtocolID <= 0x7eff {
+		return nil
+	}
+	return fmt.Errorf("protocol: verifier service protocol 0x%x is reserved", serviceProtocolID)
 }
 
 func validateIssuerStatusKnown(status uint8, label string) error {

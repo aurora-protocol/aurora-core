@@ -115,6 +115,59 @@ func TestLabStaticTokenKeyRecordRequiresEmptyKeyMaterial(t *testing.T) {
 	}
 }
 
+func TestIssuerMetadataValidateStructuralRejectsReservedVerifierServiceIDs(t *testing.T) {
+	base := IssuerMetadata{
+		MetadataVersion:      registry.Version20,
+		IssuerID:             fill(0x20, 16),
+		ValidFromUnix:        10,
+		ValidUntilUnix:       30,
+		IssuerName:           []byte("issuer"),
+		SupportedProofTypes:  []uint64{registry.ProofVOPRFP384SHA384},
+		MetadataSigningKeyID: fill(0x21, 16),
+		SignatureScheme:      registry.SigECDSAP256SHA384DER,
+		KeyEncoding:          registry.KeyP256SEC1Uncompressed,
+		VerifierServices: []IssuerVerifierServiceRecord{{
+			ServiceID:         fill(0x22, 16),
+			ServiceKind:       registry.VerifierServiceKindVOPRF,
+			ServiceProtocolID: registry.IssuerVerifierVOPRFMTLS13,
+			ServiceAuthKey: PublicKeyRecord{
+				SignatureScheme: registry.SigECDSAP256SHA384DER,
+				KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+				PublicKey:       fill(0x23, 65),
+			},
+			AllowedProofTypes:     []uint64{registry.ProofVOPRFP384SHA384},
+			AllowedRelayBucketIDs: [][]byte{fill(0x24, 16)},
+			RequestAuthPolicyID:   1,
+			ValidFromUnix:         10,
+			ValidUntilUnix:        30,
+			ServiceStatus:         registry.IssuerStatusActive,
+		}},
+	}
+	if err := base.ValidateStructural(20, false); err != nil {
+		t.Fatalf("valid verifier service metadata rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*IssuerVerifierServiceRecord){
+		"reserved service kind": func(service *IssuerVerifierServiceRecord) {
+			service.ServiceKind = 0x1000
+		},
+		"lab service kind": func(service *IssuerVerifierServiceRecord) {
+			service.ServiceKind = 0x7f00
+		},
+		"reserved service protocol": func(service *IssuerVerifierServiceRecord) {
+			service.ServiceProtocolID = 0x1000
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			metadata := base
+			metadata.VerifierServices = append([]IssuerVerifierServiceRecord(nil), base.VerifierServices...)
+			mutate(&metadata.VerifierServices[0])
+			if err := metadata.ValidateStructural(20, false); err == nil {
+				t.Fatalf("reserved verifier service identifier accepted")
+			}
+		})
+	}
+}
+
 func TestIssuerMetadataAndVerifierPayloadsRoundTrip(t *testing.T) {
 	tokenKey := fill(0x31, 64)
 	tokenKeyID := sha256.Sum256(tokenKey)

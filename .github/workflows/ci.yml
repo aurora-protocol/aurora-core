@@ -20,5 +20,7 @@ jobs:
         run: go test ./...
       - name: Check structural vector drift
         run: go run ./cmd/auroractl vectors --check
+      - name: Check real crypto vector drift
+        run: go run ./cmd/auroractl vectors --real-crypto --check
       - name: Check public wire markers
         run: go run ./cmd/auroractl wire-check

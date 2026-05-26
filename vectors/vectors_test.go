@@ -1,6 +1,12 @@
 package vectors
 
-import "testing"
+import (
+	"encoding/hex"
+	"testing"
+
+	"github.com/cloudflare/circl/kem/mlkem/mlkem768"
+	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
+)
 
 func TestStructuralBundleMatchesSpecAnchors(t *testing.T) {
 	bundle, err := GenerateStructuralBundle()
@@ -27,5 +33,38 @@ func TestStructuralBundleMatchesSpecAnchors(t *testing.T) {
 	}
 	if bundle.FlowClose != "07000100000000000000630004646f6e6500" {
 		t.Fatalf("flow close vector drifted: %s", bundle.FlowClose)
+	}
+}
+
+func TestFirstHopRealCryptoBundleIsDeterministicAndVerifiable(t *testing.T) {
+	first, err := GenerateFirstHopRealCryptoBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := GenerateFirstHopRealCryptoBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("first-hop real crypto vector is not deterministic:\nfirst=%+v\nsecond=%+v", first, second)
+	}
+	assertHexLen := func(name, value string, wantBytes int) {
+		t.Helper()
+		decoded, err := hex.DecodeString(value)
+		if err != nil {
+			t.Fatalf("%s is not hex: %v", name, err)
+		}
+		if len(decoded) != wantBytes {
+			t.Fatalf("%s length = %d, want %d", name, len(decoded), wantBytes)
+		}
+	}
+	assertHexLen("client_mlkem_encapsulation_key", first.ClientMLKEMEncapsulationKey, mlkem768.PublicKeySize)
+	assertHexLen("server_mlkem_ciphertext_to_client", first.ServerMLKEMCiphertextToClient, mlkem768.CiphertextSize)
+	assertHexLen("mlkem_shared_secret", first.MLKEMSharedSecret, mlkem768.SharedKeySize)
+	assertHexLen("server_pq_public_key", first.ServerPQPublicKey, mldsa65.PublicKeySize)
+	assertHexLen("server_prelude_signature_pq", first.ServerPreludeSignaturePQ, mldsa65.SignatureSize)
+	assertHexLen("prelude_transcript_hash", first.PreludeTranscriptHash, 48)
+	if first.CoverPrelude0 == "" || first.CoverPrelude1 == "" || first.ServerPreludeSignatureClassical == "" || first.ClassicalSharedSecret == "" {
+		t.Fatalf("first-hop real crypto vector omitted required first-hop fields: %+v", first)
 	}
 }

@@ -6,6 +6,7 @@ import (
 
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/protocol"
+	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
@@ -153,6 +154,8 @@ func SealPrivatePrelude(env EnvelopeInput, private PrivatePrelude) (protocol.Rou
 	if err != nil {
 		return protocol.RoutePreludeEnvelope{}, err
 	}
+	private.MsgType = registry.MsgRoutePrelude0
+	private.Version = registry.Version20
 	private.RoutePreludeWrapContext = context
 	private.RouteInstanceID = env.RouteInstanceID
 	private.HopIndex = env.HopIndex

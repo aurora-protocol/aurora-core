@@ -86,6 +86,9 @@ func TestRoutePreludeWrapRoundTripRejectsMismatchedVisibleEnvelope(t *testing.T)
 	if !bytes.Equal(opened.RoutePreludeWrapContext, context) {
 		t.Fatalf("private prelude did not carry wrap context")
 	}
+	if opened.MsgType != registry.MsgRoutePrelude0 || opened.Version != registry.Version20 {
+		t.Fatalf("private prelude header was not canonical: %+v", opened)
+	}
 	env.NextRelayDescriptorHash = rb(0x99, 48)
 	if _, err := OpenPrivatePrelude(env, envelope); err == nil {
 		t.Fatalf("expected visible-envelope mismatch to fail")

@@ -65,6 +65,9 @@ func ValidateFrameBlock(block FrameBlock) error {
 		if err := ValidateDataFrame(frame); err != nil {
 			return err
 		}
+		if err := ValidateKeyUpdateFrame(frame); err != nil {
+			return err
+		}
 		if err := ValidateFlowManagementFrame(frame); err != nil {
 			return err
 		}
@@ -246,6 +249,65 @@ func DecodeKeyUpdateRequest(r *wire.Reader) KeyUpdateRequest {
 		RequestNonce:       r.ReadOpaque16(),
 		RequestReason:      r.ReadVarint(),
 	}
+}
+
+func ValidateKeyUpdateFrame(frame AuroraFrame) error {
+	r := wire.NewReader(frame.Payload)
+	switch frame.FrameType {
+	case registry.FrameKeyUpdate:
+		update := DecodeKeyUpdate(r)
+		if r.Err() != nil {
+			return r.Err()
+		}
+		if !r.EOF() {
+			return fmt.Errorf("protocol: trailing KEY_UPDATE payload bytes")
+		}
+		return ValidateKeyUpdate(update)
+	case registry.FrameKeyUpdateAck:
+		ack := DecodeKeyUpdateACK(r)
+		if r.Err() != nil {
+			return r.Err()
+		}
+		if !r.EOF() {
+			return fmt.Errorf("protocol: trailing KEY_UPDATE_ACK payload bytes")
+		}
+		return ValidateKeyUpdateACK(ack)
+	case registry.FrameKeyUpdateRequest:
+		req := DecodeKeyUpdateRequest(r)
+		if r.Err() != nil {
+			return r.Err()
+		}
+		if !r.EOF() {
+			return fmt.Errorf("protocol: trailing KEY_UPDATE_REQUEST payload bytes")
+		}
+		return ValidateKeyUpdateRequest(req)
+	default:
+		return nil
+	}
+}
+
+func ValidateKeyUpdate(update KeyUpdate) error {
+	if update.Direction > 1 {
+		return fmt.Errorf("protocol: reserved KEY_UPDATE direction 0x%x", update.Direction)
+	}
+	if update.NewKeyPhase != update.OldKeyPhase+1 {
+		return fmt.Errorf("protocol: skipped KEY_UPDATE phase %d -> %d", update.OldKeyPhase, update.NewKeyPhase)
+	}
+	return nil
+}
+
+func ValidateKeyUpdateACK(ack KeyUpdateACK) error {
+	if ack.AckedDirection > 1 {
+		return fmt.Errorf("protocol: reserved KEY_UPDATE_ACK direction 0x%x", ack.AckedDirection)
+	}
+	return nil
+}
+
+func ValidateKeyUpdateRequest(req KeyUpdateRequest) error {
+	if req.RequestedDirection > 1 {
+		return fmt.Errorf("protocol: reserved KEY_UPDATE_REQUEST direction 0x%x", req.RequestedDirection)
+	}
+	return nil
 }
 
 type FlowOpen struct {

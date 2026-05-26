@@ -188,6 +188,50 @@ func TestKeyUpdateControlPayloadsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestValidateFrameBlockRejectsMalformedKeyUpdatePayloads(t *testing.T) {
+	cases := map[string]AuroraFrame{
+		"key update skipped phase": keyUpdateFrameForTest(t, KeyUpdate{
+			RouteInstanceID: 7,
+			HopLayer:        1,
+			Direction:       0,
+			OldKeyPhase:     1,
+			NewKeyPhase:     3,
+			UpdateNonce:     bytes.Repeat([]byte{0x11}, 16),
+			UpdateReason:    1,
+		}),
+		"key update direction": keyUpdateFrameForTest(t, KeyUpdate{
+			RouteInstanceID: 7,
+			HopLayer:        1,
+			Direction:       2,
+			OldKeyPhase:     1,
+			NewKeyPhase:     2,
+			UpdateNonce:     bytes.Repeat([]byte{0x12}, 16),
+			UpdateReason:    1,
+		}),
+		"key update ack direction": keyUpdateACKFrameForTest(t, KeyUpdateACK{
+			RouteInstanceID: 7,
+			HopLayer:        1,
+			AckedDirection:  2,
+			AckedKeyPhase:   2,
+			AckNonce:        bytes.Repeat([]byte{0x13}, 16),
+		}),
+		"key update request direction": keyUpdateRequestFrameForTest(t, KeyUpdateRequest{
+			RouteInstanceID:    7,
+			HopLayer:           1,
+			RequestedDirection: 2,
+			RequestNonce:       bytes.Repeat([]byte{0x14}, 16),
+			RequestReason:      1,
+		}),
+	}
+	for name, frame := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateFrameBlock(FrameBlock{Frames: []AuroraFrame{frame}}); err == nil {
+				t.Fatalf("malformed key update frame accepted: %+v", frame)
+			}
+		})
+	}
+}
+
 func TestRouteControlPayloadsRoundTrip(t *testing.T) {
 	forward := RouteForwardFrame{
 		RouteInstanceID:                11,
@@ -398,6 +442,42 @@ func TestValidateUDPTargetConfirmRejectsMalformedTarget(t *testing.T) {
 		if err := ValidateUDPTargetConfirm(confirm); err == nil {
 			t.Fatalf("malformed UDP target confirm accepted: %+v", confirm)
 		}
+	}
+}
+
+func keyUpdateFrameForTest(t *testing.T, update KeyUpdate) AuroraFrame {
+	t.Helper()
+	payload, err := Encode(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return AuroraFrame{
+		FrameType: registry.FrameKeyUpdate,
+		Payload:   payload,
+	}
+}
+
+func keyUpdateACKFrameForTest(t *testing.T, ack KeyUpdateACK) AuroraFrame {
+	t.Helper()
+	payload, err := Encode(ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return AuroraFrame{
+		FrameType: registry.FrameKeyUpdateAck,
+		Payload:   payload,
+	}
+}
+
+func keyUpdateRequestFrameForTest(t *testing.T, req KeyUpdateRequest) AuroraFrame {
+	t.Helper()
+	payload, err := Encode(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return AuroraFrame{
+		FrameType: registry.FrameKeyUpdateRequest,
+		Payload:   payload,
 	}
 }
 

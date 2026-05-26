@@ -37,6 +37,64 @@ func IssuerMetadataSignatureInput(m protocol.IssuerMetadata) ([]byte, error) {
 	return auroracrypto.PreHash(preimage), nil
 }
 
+func VerifyIssuerMetadataSignature(m protocol.IssuerMetadata, keys []protocol.AuthorityKeyRecord, now uint64) error {
+	if now < m.ValidFromUnix || now >= m.ValidUntilUnix {
+		return fmt.Errorf("trust: issuer metadata outside validity interval")
+	}
+	if err := ValidateIssuerServiceAuthKeySeparation(m, keys, now); err != nil {
+		return err
+	}
+	key, err := LocateAuthorityKeyByID(keys, m.MetadataSigningKeyID, m.SignatureScheme, m.KeyEncoding, now, registry.UsageMaySignIssuerMetadata)
+	if err != nil {
+		return err
+	}
+	input, err := IssuerMetadataSignatureInput(m)
+	if err != nil {
+		return err
+	}
+	if err := auroracrypto.VerifySignature(m.SignatureScheme, m.KeyEncoding, key.PublicKey.PublicKey, input, m.MetadataSignature); err != nil {
+		return err
+	}
+	return nil
+}
+
+func LocateAuthorityKeyByID(keys []protocol.AuthorityKeyRecord, keyID []byte, signatureScheme, keyEncoding uint64, now uint64, requiredUsage uint32) (protocol.AuthorityKeyRecord, error) {
+	var matches []protocol.AuthorityKeyRecord
+	for _, key := range keys {
+		if !bytes.Equal(key.AuthorityKeyID, keyID) {
+			continue
+		}
+		if key.PublicKey.SignatureScheme != signatureScheme || key.PublicKey.KeyEncoding != keyEncoding {
+			continue
+		}
+		if err := key.Validate(now, requiredUsage); err != nil {
+			continue
+		}
+		matches = append(matches, key)
+	}
+	if len(matches) != 1 {
+		return protocol.AuthorityKeyRecord{}, fmt.Errorf("trust: authority key-id lookup returned %d matches", len(matches))
+	}
+	return matches[0], nil
+}
+
+func ValidateIssuerServiceAuthKeySeparation(m protocol.IssuerMetadata, keys []protocol.AuthorityKeyRecord, now uint64) error {
+	for _, service := range m.VerifierServices {
+		if err := service.ServiceAuthKey.ValidateCompatibility(); err != nil {
+			return err
+		}
+		for _, key := range keys {
+			if err := key.Validate(now, 0); err != nil {
+				continue
+			}
+			if bytes.Equal(service.ServiceAuthKey.PublicKey, key.PublicKey.PublicKey) {
+				return fmt.Errorf("trust: issuer verifier service auth key reuses authority key material")
+			}
+		}
+	}
+	return nil
+}
+
 func AuthenticatorInputHash(authenticatorInput []byte) []byte {
 	return auroracrypto.PreHashLabel("aurora v2.0 authenticator input", authenticatorInput)
 }
@@ -92,6 +150,20 @@ func ValidateIssuerVerifierResponseFreshness(req protocol.IssuerVerifierRequest,
 	}
 	if resp.ValidUntilUnix > req.RequestTimeUnix+maxFreshnessSeconds {
 		return fmt.Errorf("trust: issuer verifier response freshness window too long")
+	}
+	return nil
+}
+
+func VerifyIssuerVerifierResponse(req protocol.IssuerVerifierRequest, service protocol.IssuerVerifierServiceRecord, resp protocol.IssuerVerifierResponse, now uint64, maxFreshnessSeconds uint64) error {
+	if err := ValidateIssuerVerifierResponseFreshness(req, service, resp, now, maxFreshnessSeconds); err != nil {
+		return err
+	}
+	input, err := IssuerVerifierResponseSignatureInput(resp.RequestHash, resp)
+	if err != nil {
+		return err
+	}
+	if err := auroracrypto.VerifySignature(service.ServiceAuthKey.SignatureScheme, service.ServiceAuthKey.KeyEncoding, service.ServiceAuthKey.PublicKey, input, resp.ServiceSignature); err != nil {
+		return err
 	}
 	return nil
 }

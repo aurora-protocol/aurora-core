@@ -35,7 +35,7 @@ func ValidateTemplate(tpl protocol.CoverTemplate, opts ValidationOptions) error 
 		return err
 	}
 	seenClasses := make(map[uint64]struct{}, len(tpl.RequestClasses))
-	gatewayCarrier := false
+	privateCarrier := false
 	for _, class := range tpl.RequestClasses {
 		if _, ok := seenClasses[class.ClassID]; ok {
 			return fmt.Errorf("cover: duplicate request class id 0x%x", class.ClassID)
@@ -48,18 +48,24 @@ func ValidateTemplate(tpl protocol.CoverTemplate, opts ValidationOptions) error 
 			if !isKnownMethodFamily(class.AllowedMethodFamily) {
 				return fmt.Errorf("cover: protocol carrier has invalid method family 0x%x", class.AllowedMethodFamily)
 			}
+			if class.ClassType == registry.RequestSidecarOriginSlot && class.AllowedMethodFamily != registry.MethodShadowOrigin {
+				return fmt.Errorf("cover: sidecar-origin carrier requires shadow-origin method family")
+			}
 		}
-		if class.ClassType == registry.RequestGatewayOwnedSlot && (class.MayCarryPrelude || class.MayCarryCapsule) {
-			gatewayCarrier = true
+		if isPrivateCarrierClass(class) {
+			privateCarrier = true
 		}
 	}
-	if !gatewayCarrier {
-		return fmt.Errorf("cover: no gateway-owned request class can carry protocol material")
+	if !privateCarrier {
+		return fmt.Errorf("cover: no private request class can carry protocol material")
 	}
 	return nil
 }
 
 func SelectCarrierClass(tpl protocol.CoverTemplate, classID uint64, method uint64, needCapsule bool) (protocol.RequestClass, error) {
+	if method == registry.MethodShadowOrigin {
+		return SelectPrivateCarrierClass(tpl, classID, method, needCapsule)
+	}
 	class, err := SelectGatewayOwnedClass(tpl, classID, needCapsule)
 	if err != nil {
 		return protocol.RequestClass{}, err
@@ -68,6 +74,28 @@ func SelectCarrierClass(tpl protocol.CoverTemplate, classID uint64, method uint6
 		return protocol.RequestClass{}, fmt.Errorf("cover: request class method family 0x%x does not match selected method 0x%x", class.AllowedMethodFamily, method)
 	}
 	return class, nil
+}
+
+func SelectPrivateCarrierClass(tpl protocol.CoverTemplate, classID uint64, method uint64, needCapsule bool) (protocol.RequestClass, error) {
+	for _, class := range tpl.RequestClasses {
+		if class.ClassID != classID {
+			continue
+		}
+		if !isPrivateCarrierClass(class) {
+			return protocol.RequestClass{}, fmt.Errorf("cover: request class is not a private carrier slot")
+		}
+		if class.AllowedMethodFamily != method {
+			return protocol.RequestClass{}, fmt.Errorf("cover: request class method family 0x%x does not match selected method 0x%x", class.AllowedMethodFamily, method)
+		}
+		if needCapsule && !class.MayCarryCapsule {
+			return protocol.RequestClass{}, fmt.Errorf("cover: request class cannot carry capsule")
+		}
+		if !needCapsule && !class.MayCarryPrelude {
+			return protocol.RequestClass{}, fmt.Errorf("cover: request class cannot carry prelude")
+		}
+		return class, nil
+	}
+	return protocol.RequestClass{}, fmt.Errorf("cover: request class not found")
 }
 
 func SelectGatewayOwnedClass(tpl protocol.CoverTemplate, classID uint64, needCapsule bool) (protocol.RequestClass, error) {
@@ -87,6 +115,13 @@ func SelectGatewayOwnedClass(tpl protocol.CoverTemplate, classID uint64, needCap
 		return class, nil
 	}
 	return protocol.RequestClass{}, fmt.Errorf("cover: request class not found")
+}
+
+func isPrivateCarrierClass(class protocol.RequestClass) bool {
+	if !class.MayCarryPrelude && !class.MayCarryCapsule {
+		return false
+	}
+	return class.ClassType == registry.RequestGatewayOwnedSlot || class.ClassType == registry.RequestSidecarOriginSlot
 }
 
 func validatePreludeEnvelope(p protocol.PreludeEnvelope) error {
@@ -127,7 +162,7 @@ func validateCapsuleEnvelope(tpl protocol.CoverTemplate) error {
 	}
 	needsLocalConsume := false
 	for _, class := range tpl.RequestClasses {
-		if class.ClassType == registry.RequestGatewayOwnedSlot && class.MayCarryCapsule {
+		if (class.ClassType == registry.RequestGatewayOwnedSlot || class.ClassType == registry.RequestSidecarOriginSlot) && class.MayCarryCapsule {
 			needsLocalConsume = true
 			break
 		}

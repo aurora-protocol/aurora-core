@@ -114,6 +114,36 @@ func TestSelectCarrierClassRequiresMatchingMethodFamily(t *testing.T) {
 	}
 }
 
+func TestValidateTemplateAcceptsSidecarShadowOriginCarrier(t *testing.T) {
+	tpl := validTemplate(t)
+	tpl.RequestClasses[0].ClassType = registry.RequestSidecarOriginSlot
+	tpl.RequestClasses[0].AllowedMethodFamily = registry.MethodShadowOrigin
+	refreshOriginCommitment(t, &tpl)
+	if err := ValidateTemplate(tpl, ValidationOptions{NowUnix: 150, MaxFutureSkew: 120}); err != nil {
+		t.Fatalf("sidecar shadow-origin carrier rejected: %v", err)
+	}
+}
+
+func TestSelectCarrierClassAllowsSidecarForShadowOrigin(t *testing.T) {
+	tpl := validTemplate(t)
+	tpl.RequestClasses = append(tpl.RequestClasses, protocol.RequestClass{
+		ClassID:             3,
+		ClassType:           registry.RequestSidecarOriginSlot,
+		AllowedMethodFamily: registry.MethodShadowOrigin,
+		PathTemplateID:      cb(0x12, 16),
+		MayCarryPrelude:     true,
+		MayCarryCapsule:     true,
+	})
+	refreshOriginCommitment(t, &tpl)
+	class, err := SelectCarrierClass(tpl, 3, registry.MethodShadowOrigin, true)
+	if err != nil {
+		t.Fatalf("sidecar shadow-origin carrier not selected: %v", err)
+	}
+	if class.ClassType != registry.RequestSidecarOriginSlot {
+		t.Fatalf("selected wrong class type: %+v", class)
+	}
+}
+
 func TestValidateTemplateRejectsOriginPassThroughProtocolMaterial(t *testing.T) {
 	tpl := validTemplate(t)
 	tpl.RequestClasses[1].MayCarryPrelude = true

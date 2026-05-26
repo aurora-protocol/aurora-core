@@ -5,13 +5,16 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"strings"
 
 	"github.com/aurora-protocol/aurora-core/config"
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/aurora-protocol/aurora-core/transport"
 	corevectors "github.com/aurora-protocol/aurora-core/vectors"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
@@ -29,6 +32,8 @@ func main() {
 		capabilities()
 	case "active-probes":
 		err = activeProbes(os.Stdout)
+	case "wire-check":
+		err = wireCheck(os.Stdout)
 	case "check-config":
 		if len(os.Args) != 3 {
 			err = fmt.Errorf("check-config requires a path")
@@ -45,7 +50,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]]|capabilities|active-probes|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]]|capabilities|active-probes|wire-check|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -191,6 +196,164 @@ func activeProbes(w io.Writer) error {
 		return fmt.Errorf("active-probes failed neutrality check")
 	}
 	return nil
+}
+
+func wireCheck(w io.Writer) error {
+	carriers := []transport.CarrierRequestInput{
+		publicCarrierInput(registry.MethodWebH2Stream, "cover.example", "/assets/app.bin", http.Header{"Content-Type": []string{"application/octet-stream"}}),
+		publicCarrierInput(registry.MethodWebH1WS, "cover.example", "/events/stream", http.Header{"User-Agent": []string{"Mozilla/5.0"}}),
+		publicCarrierInput(registry.MethodShadowOrigin, "static.example", "/catalog/segment", http.Header{"Accept": []string{"*/*"}}),
+		publicCarrierInput(registry.MethodWebH3Stream, "media.example", "/session/42", http.Header{"Content-Type": []string{"application/octet-stream"}}),
+		publicH3DatagramCarrierInput(),
+	}
+	passed := true
+	results := make([]wireCheckResult, 0, len(carriers))
+	for _, input := range carriers {
+		built, err := transport.BuildCarrierRequest(input)
+		result := wireCheckResult{Name: input.Plan.Carrier.Name, Passed: err == nil}
+		if err == nil {
+			if marker := visibleCarrierMarker(built); marker != "" {
+				result.Passed = false
+				result.Detail = marker
+			}
+		} else {
+			result.Detail = err.Error()
+		}
+		passed = passed && result.Passed
+		results = append(results, result)
+	}
+	fmt.Fprintf(w, "public_wire_check passed=%t carriers=%d\n", passed, len(results))
+	for _, result := range results {
+		if result.Detail == "" {
+			fmt.Fprintf(w, "carrier %s passed=%t\n", result.Name, result.Passed)
+			continue
+		}
+		fmt.Fprintf(w, "carrier %s passed=%t detail=%s\n", result.Name, result.Passed, result.Detail)
+	}
+	if !passed {
+		return fmt.Errorf("wire-check found forbidden public marker")
+	}
+	return nil
+}
+
+type wireCheckResult struct {
+	Name   string
+	Passed bool
+	Detail string
+}
+
+func publicCarrierInput(method uint64, authority, path string, header http.Header) transport.CarrierRequestInput {
+	return transport.CarrierRequestInput{
+		Plan: transport.CarrierPlan{
+			Carrier: transport.Carrier{MethodID: method, Name: publicCarrierName(method)},
+			UDPMode: transport.UDPOverStreamFallback,
+		},
+		Template:       publicCarrierTemplate(method),
+		RequestClassID: 1,
+		NeedCapsule:    true,
+		Scheme:         "https",
+		Authority:      authority,
+		Path:           path,
+		Header:         header,
+		Payload:        []byte{0x80, 0x01},
+		WebSocketKeySeed: []byte{
+			0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+			0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		},
+	}
+}
+
+func publicH3DatagramCarrierInput() transport.CarrierRequestInput {
+	input := publicCarrierInput(registry.MethodWebH3ExtDgram, "media.example", "/items/live", http.Header{"Accept": []string{"*/*"}})
+	input.Plan.UDPMode = transport.UDPNativeDatagram
+	input.Template.H3Profile = protocol.H3CoverProfile{
+		ProfileID:                  7,
+		SupportsH3Datagram:         true,
+		SupportsWebTransportH3:     true,
+		WebTransportProfileID:      1,
+		QUICDatagramRequired:       true,
+		DatagramSizeDistributionID: repeated(0x22, 16),
+		DatagramRateDistributionID: repeated(0x33, 16),
+	}
+	input.H3DatagramSettingsOK = true
+	input.QUICMaxDatagramFrameSize = 1200
+	return input
+}
+
+func publicCarrierTemplate(method uint64) protocol.CoverTemplate {
+	return protocol.CoverTemplate{RequestClasses: []protocol.RequestClass{{
+		ClassID:             1,
+		ClassType:           registry.RequestGatewayOwnedSlot,
+		AllowedMethodFamily: method,
+		PathTemplateID:      repeated(0x11, 16),
+		MayCarryPrelude:     true,
+		MayCarryCapsule:     true,
+	}}}
+}
+
+func publicCarrierName(method uint64) string {
+	switch method {
+	case registry.MethodWebH2Stream:
+		return "web.h2.stream"
+	case registry.MethodWebH1WS:
+		return "web.h1.ws"
+	case registry.MethodShadowOrigin:
+		return "web.shadow-origin"
+	case registry.MethodWebH3Stream:
+		return "web.h3.stream"
+	case registry.MethodWebH3ExtDgram:
+		return "web.h3.ext-dgram"
+	default:
+		return "unknown"
+	}
+}
+
+func visibleCarrierMarker(built transport.BuiltCarrierRequest) string {
+	if built.Request == nil {
+		return "missing request"
+	}
+	values := []string{built.Request.Host, built.Request.URL.Host, built.Request.URL.Path, built.ProtocolToken}
+	for _, value := range values {
+		if marker := forbiddenPublicWireMarker(value); marker != "" {
+			return marker
+		}
+	}
+	for key, values := range built.Request.Header {
+		if marker := forbiddenPublicWireMarker(key); marker != "" {
+			return marker
+		}
+		for _, value := range values {
+			if marker := forbiddenPublicWireMarker(value); marker != "" {
+				return marker
+			}
+		}
+	}
+	return ""
+}
+
+func forbiddenPublicWireMarker(value string) string {
+	lower := strings.ToLower(value)
+	for _, marker := range forbiddenPublicWireMarkers {
+		if strings.Contains(lower, marker) {
+			return marker
+		}
+	}
+	return ""
+}
+
+var forbiddenPublicWireMarkers = []string{
+	"aurora",
+	"proxy",
+	"vpn",
+	"gfw",
+	"china",
+	"auth",
+	"tunnel",
+	"bridge",
+	"relay",
+	"policy",
+	"adversarial",
+	"dpi",
 }
 
 func formatProbeSurface(surface failure.ProbeSurface) string {

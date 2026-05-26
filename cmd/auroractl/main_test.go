@@ -30,6 +30,27 @@ func TestActiveProbesCommandPrintsBaselineReport(t *testing.T) {
 	}
 }
 
+func TestWireCheckCommandPrintsPublicWireReport(t *testing.T) {
+	var out bytes.Buffer
+	if err := wireCheck(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"public_wire_check passed=true carriers=5\n",
+		"carrier web.h2.stream passed=true\n",
+		"carrier web.h1.ws passed=true\n",
+		"carrier web.h3.ext-dgram passed=true\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("wire-check output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "passed=false") {
+		t.Fatalf("wire-check output contains failing carrier:\n%s", text)
+	}
+}
+
 func TestVectorsCommandPrintsFlowManagementVectors(t *testing.T) {
 	var out bytes.Buffer
 	if err := vectors(nil, &out); err != nil {
@@ -85,7 +106,7 @@ func TestVectorsCheckRejectsSnapshotDrift(t *testing.T) {
 	}
 }
 
-func TestCIWorkflowRunsVectorDriftCheck(t *testing.T) {
+func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 	workflow, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "ci.yml"))
 	if err != nil {
 		t.Fatal(err)
@@ -94,6 +115,7 @@ func TestCIWorkflowRunsVectorDriftCheck(t *testing.T) {
 	for _, want := range []string{
 		"go test ./...",
 		"go run ./cmd/auroractl vectors --check",
+		"go run ./cmd/auroractl wire-check",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("CI workflow missing %q:\n%s", want, text)

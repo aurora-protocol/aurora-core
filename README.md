@@ -1,6 +1,6 @@
 # Aurora Prototype
 
-This workspace contains a dependency-free Go prototype foundation for the Aurora protocol specification.
+This repository is the portable Go monorepo for the Aurora prototype. It contains the shared protocol core plus the local client engine, relay services, operational helpers, generated vectors, and thin platform adapter contracts.
 
 Implemented now:
 
@@ -12,7 +12,17 @@ Implemented now:
 - SHA-384/SHA-512 suite hashes, TLS-style HKDF labels, AES-256-GCM, route-prelude wrapping, packet protection, and standard-library ML-KEM wrappers;
 - AccessHint computation, spent-hint cache, token redemption hash, token spent key, replay context hash, and bootstrap dedup key;
 - first-hop prelude transcript hashing, handshake key schedule, ClientFinished, ServerFinished, and application traffic secret derivation;
-- policy profiles, PAL scoring, PACE reference behavior, local config parsing, threat-safe logging wrappers, and `auroractl`.
+- policy profiles, PAL scoring, PACE reference behavior, local config parsing, threat-safe logging wrappers, `auroractl`, the local proxy client, relay admission/exit gates, vector drift tests, ops helpers, and generic platform adapter contracts.
+
+## Layout
+
+- `admission`, `crypto`, `flow`, `handshake`, `packet`, `policy`, `protocol`, `route`, `transport`, `trust`, and `wire`: portable protocol implementation.
+- `client`: local-interface-neutral client engine.
+- `relay`: relay-side cover, admission, and exit-policy gates.
+- `ops`: operational verifier and directory helper logic.
+- `vectors`: generated structural vector bundle and drift tests.
+- `platform`: thin adapter contracts for platform packet APIs.
+- `cmd/auroractl`: local vector, config, and capability diagnostics.
 
 This is not a production VPN or circumvention client. The spec still requires independent cryptographic review, real ML-DSA support, production Privacy Pass verification, cover-origin gateway behavior, active-probe testing, platform adapters, and DPI/classifier evaluation before production use.
 

@@ -90,6 +90,54 @@ func TestOpenCoverCapsuleRejectsPlainRouteInstanceMismatch(t *testing.T) {
 	}
 }
 
+func TestRouteCapsuleControlAEADRoundTripBindsHopContext(t *testing.T) {
+	ctx := controlTestContext()
+	ctx.HopIndex = 1
+	ctx.HandshakeBindingContext = repeatedByte(0x91, 48)
+	ctx.PreludeTranscriptHashForThisHop = repeatedByte(0x92, 48)
+	capsule1 := protocol.RouteCapsule1Plain{
+		AdmissionProof: sampleControlCapsule1().AdmissionProof,
+		ReplayProof:    sampleControlCapsule1().ReplayProof,
+		PolicyOffer:    sampleControlCapsule1().PolicyOffer,
+		ClientFinished: repeatedByte(0x93, 48),
+	}
+	sealed1, err := SealRouteCapsule1(ctx, capsule1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened1, err := OpenRouteCapsule1(ctx, sealed1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened1.MsgType != registry.MsgRouteCapsule1 || opened1.RouteInstanceID != ctx.RouteInstanceID || opened1.HopIndex != ctx.HopIndex {
+		t.Fatalf("opened RouteCapsule1 header = msg 0x%x route %d hop %d", opened1.MsgType, opened1.RouteInstanceID, opened1.HopIndex)
+	}
+	changedCtx := ctx
+	changedCtx.HandshakeBindingContext = repeatedByte(0x94, 48)
+	if _, err := OpenRouteCapsule1(changedCtx, sealed1); err == nil {
+		t.Fatalf("RouteCapsule1 opened with wrong hop binding context")
+	}
+
+	capsule2 := protocol.RouteCapsule2Plain{
+		PolicyAccept:   samplePolicyAcceptForControl(),
+		ServerFinished: repeatedByte(0x95, 48),
+	}
+	sealed2, err := SealRouteCapsule2(ctx, capsule2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened2, err := OpenRouteCapsule2(ctx, sealed2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened2.MsgType != registry.MsgRouteCapsule2 || opened2.RouteInstanceID != ctx.RouteInstanceID || opened2.HopIndex != ctx.HopIndex {
+		t.Fatalf("opened RouteCapsule2 header = msg 0x%x route %d hop %d", opened2.MsgType, opened2.RouteInstanceID, opened2.HopIndex)
+	}
+	if _, err := OpenRouteCapsule1(ctx, sealed2); err == nil {
+		t.Fatalf("RouteCapsule2 opened with RouteCapsule1 direction/AAD")
+	}
+}
+
 func controlTestContext() ControlCapsuleContext {
 	return ControlCapsuleContext{
 		SelectedVersion:                 registry.Version20,
@@ -102,6 +150,18 @@ func controlTestContext() ControlCapsuleContext {
 		ClientHSIV:                      repeatedByte(0x42, 12),
 		ServerHSKey:                     repeatedByte(0x43, 32),
 		ServerHSIV:                      repeatedByte(0x44, 12),
+	}
+}
+
+func samplePolicyAcceptForControl() protocol.PolicyAccept {
+	return protocol.PolicyAccept{
+		SelectedVersion:           registry.Version20,
+		SelectedSuite:             registry.SuiteHybrid768AESGCM,
+		SelectedMethod:            registry.MethodWebH2Stream,
+		SelectedPolicy:            registry.PolicyAdversarialDPI,
+		SelectedRouteModeID:       registry.RouteSplit2,
+		SelectedShape:             registry.ShapeNormal,
+		SelectedTunnelPersonality: registry.PersonalityProxyFlow,
 	}
 }
 

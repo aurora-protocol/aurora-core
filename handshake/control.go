@@ -77,6 +77,58 @@ func OpenCoverCapsule2(ctx ControlCapsuleContext, sealed []byte) (protocol.Cover
 	return plain, nil
 }
 
+func SealRouteCapsule1(ctx ControlCapsuleContext, plain protocol.RouteCapsule1Plain) ([]byte, error) {
+	plain.MsgType = registry.MsgRouteCapsule1
+	plain.RouteInstanceID = ctx.RouteInstanceID
+	plain.HopIndex = ctx.HopIndex
+	encoded, err := protocol.Encode(plain)
+	if err != nil {
+		return nil, err
+	}
+	return sealControl(ctx, registry.MsgRouteCapsule1, ControlDirectionClientToHop, ctx.ClientHSKey, ctx.ClientHSIV, encoded)
+}
+
+func OpenRouteCapsule1(ctx ControlCapsuleContext, sealed []byte) (protocol.RouteCapsule1Plain, error) {
+	plaintext, err := openControl(ctx, registry.MsgRouteCapsule1, ControlDirectionClientToHop, ctx.ClientHSKey, ctx.ClientHSIV, sealed)
+	if err != nil {
+		return protocol.RouteCapsule1Plain{}, err
+	}
+	plain, err := decodeRouteCapsule1Plain(plaintext)
+	if err != nil {
+		return protocol.RouteCapsule1Plain{}, err
+	}
+	if plain.MsgType != registry.MsgRouteCapsule1 || plain.RouteInstanceID != ctx.RouteInstanceID || plain.HopIndex != ctx.HopIndex {
+		return protocol.RouteCapsule1Plain{}, fmt.Errorf("handshake: RouteCapsule1 plaintext header mismatch")
+	}
+	return plain, nil
+}
+
+func SealRouteCapsule2(ctx ControlCapsuleContext, plain protocol.RouteCapsule2Plain) ([]byte, error) {
+	plain.MsgType = registry.MsgRouteCapsule2
+	plain.RouteInstanceID = ctx.RouteInstanceID
+	plain.HopIndex = ctx.HopIndex
+	encoded, err := protocol.Encode(plain)
+	if err != nil {
+		return nil, err
+	}
+	return sealControl(ctx, registry.MsgRouteCapsule2, ControlDirectionHopToClient, ctx.ServerHSKey, ctx.ServerHSIV, encoded)
+}
+
+func OpenRouteCapsule2(ctx ControlCapsuleContext, sealed []byte) (protocol.RouteCapsule2Plain, error) {
+	plaintext, err := openControl(ctx, registry.MsgRouteCapsule2, ControlDirectionHopToClient, ctx.ServerHSKey, ctx.ServerHSIV, sealed)
+	if err != nil {
+		return protocol.RouteCapsule2Plain{}, err
+	}
+	plain, err := decodeRouteCapsule2Plain(plaintext)
+	if err != nil {
+		return protocol.RouteCapsule2Plain{}, err
+	}
+	if plain.MsgType != registry.MsgRouteCapsule2 || plain.RouteInstanceID != ctx.RouteInstanceID || plain.HopIndex != ctx.HopIndex {
+		return protocol.RouteCapsule2Plain{}, fmt.Errorf("handshake: RouteCapsule2 plaintext header mismatch")
+	}
+	return plain, nil
+}
+
 func sealControl(ctx ControlCapsuleContext, msgType uint64, direction uint8, key, iv, plaintext []byte) ([]byte, error) {
 	aad, err := controlAAD(ctx, msgType, direction)
 	if err != nil {
@@ -125,6 +177,30 @@ func decodeCoverCapsule1Plain(encoded []byte) (protocol.CoverCapsule1Plain, erro
 	}
 	if !r.EOF() {
 		return protocol.CoverCapsule1Plain{}, fmt.Errorf("handshake: trailing CoverCapsule1 bytes")
+	}
+	return out, nil
+}
+
+func decodeRouteCapsule1Plain(encoded []byte) (protocol.RouteCapsule1Plain, error) {
+	r := wire.NewReader(encoded)
+	out := protocol.DecodeRouteCapsule1Plain(r)
+	if r.Err() != nil {
+		return protocol.RouteCapsule1Plain{}, r.Err()
+	}
+	if !r.EOF() {
+		return protocol.RouteCapsule1Plain{}, fmt.Errorf("handshake: trailing RouteCapsule1 bytes")
+	}
+	return out, nil
+}
+
+func decodeRouteCapsule2Plain(encoded []byte) (protocol.RouteCapsule2Plain, error) {
+	r := wire.NewReader(encoded)
+	out := protocol.DecodeRouteCapsule2Plain(r)
+	if r.Err() != nil {
+		return protocol.RouteCapsule2Plain{}, r.Err()
+	}
+	if !r.EOF() {
+		return protocol.RouteCapsule2Plain{}, fmt.Errorf("handshake: trailing RouteCapsule2 bytes")
 	}
 	return out, nil
 }

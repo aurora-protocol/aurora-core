@@ -197,3 +197,78 @@ func DecodeCoverCapsule2Plain(r *wire.Reader) CoverCapsule2Plain {
 		Extensions:      DecodeExtensions(r),
 	}
 }
+
+type RouteCapsule1Plain struct {
+	MsgType         uint64
+	RouteInstanceID uint64
+	HopIndex        uint8
+	AdmissionProof  AdmissionProof
+	ReplayProof     ReplayProof
+	PolicyOffer     PolicyOffer
+	ClientFinished  []byte
+	Padding         []byte
+	Extensions      []Extension
+}
+
+func (c RouteCapsule1Plain) EncodeTo(e *wire.Encoder) {
+	e.WriteVarint(c.MsgType)
+	e.WriteVarint(c.RouteInstanceID)
+	e.WriteUint8(c.HopIndex)
+	c.AdmissionProof.EncodeTo(e)
+	c.ReplayProof.EncodeTo(e)
+	c.PolicyOffer.EncodeTo(e)
+	e.WriteOpaque16(c.ClientFinished)
+	e.WriteOpaque16(c.Padding)
+	EncodeExtensions(e, c.Extensions)
+}
+
+func DecodeRouteCapsule1Plain(r *wire.Reader) RouteCapsule1Plain {
+	return RouteCapsule1Plain{
+		MsgType:         r.ReadVarint(),
+		RouteInstanceID: r.ReadVarint(),
+		HopIndex:        r.ReadUint8(),
+		AdmissionProof:  DecodeAdmissionProof(r),
+		ReplayProof:     DecodeReplayProof(r),
+		PolicyOffer:     DecodePolicyOffer(r),
+		ClientFinished:  r.ReadOpaque16(),
+		Padding:         r.ReadOpaque16(),
+		Extensions:      DecodeExtensions(r),
+	}
+}
+
+func (c RouteCapsule1Plain) UnsignedClientFinished() RouteCapsule1Plain {
+	c.ClientFinished = nil
+	return c
+}
+
+type RouteCapsule2Plain struct {
+	MsgType         uint64
+	RouteInstanceID uint64
+	HopIndex        uint8
+	PolicyAccept    PolicyAccept
+	ServerFinished  []byte
+	Padding         []byte
+	Extensions      []Extension
+}
+
+func (c RouteCapsule2Plain) EncodeTo(e *wire.Encoder) {
+	e.WriteVarint(c.MsgType)
+	e.WriteVarint(c.RouteInstanceID)
+	e.WriteUint8(c.HopIndex)
+	c.PolicyAccept.EncodeTo(e)
+	e.WriteOpaque16(c.ServerFinished)
+	e.WriteOpaque16(c.Padding)
+	EncodeExtensions(e, c.Extensions)
+}
+
+func DecodeRouteCapsule2Plain(r *wire.Reader) RouteCapsule2Plain {
+	return RouteCapsule2Plain{
+		MsgType:         r.ReadVarint(),
+		RouteInstanceID: r.ReadVarint(),
+		HopIndex:        r.ReadUint8(),
+		PolicyAccept:    DecodePolicyAccept(r),
+		ServerFinished:  r.ReadOpaque16(),
+		Padding:         r.ReadOpaque16(),
+		Extensions:      DecodeExtensions(r),
+	}
+}

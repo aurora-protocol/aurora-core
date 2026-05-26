@@ -94,6 +94,42 @@ func TestCoverBootstrapMessagesRoundTrip(t *testing.T) {
 	if got := DecodeCoverCapsule2Plain(bytesReader(encodedC2)); !reflect.DeepEqual(got, c2) {
 		t.Fatalf("CoverCapsule2Plain round trip mismatch:\n got=%+v\nwant=%+v", got, c2)
 	}
+
+	rc1 := RouteCapsule1Plain{
+		MsgType:         registry.MsgRouteCapsule1,
+		RouteInstanceID: 55,
+		HopIndex:        1,
+		AdmissionProof:  sampleAdmissionProof(),
+		ReplayProof:     sampleReplayProof(),
+		PolicyOffer:     samplePolicyOffer(),
+		ClientFinished:  []byte("route-client-finished"),
+		Padding:         []byte("route-capsule1-pad"),
+		Extensions:      []Extension{{ExtensionType: 0x700a, Body: []byte("rc1")}},
+	}
+	encodedRC1, err := Encode(rc1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DecodeRouteCapsule1Plain(bytesReader(encodedRC1)); !reflect.DeepEqual(got, rc1) {
+		t.Fatalf("RouteCapsule1Plain round trip mismatch:\n got=%+v\nwant=%+v", got, rc1)
+	}
+
+	rc2 := RouteCapsule2Plain{
+		MsgType:         registry.MsgRouteCapsule2,
+		RouteInstanceID: 66,
+		HopIndex:        2,
+		PolicyAccept:    samplePolicyAccept(),
+		ServerFinished:  []byte("route-server-finished"),
+		Padding:         []byte("route-capsule2-pad"),
+		Extensions:      []Extension{{ExtensionType: 0x700b, Body: []byte("rc2")}},
+	}
+	encodedRC2, err := Encode(rc2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DecodeRouteCapsule2Plain(bytesReader(encodedRC2)); !reflect.DeepEqual(got, rc2) {
+		t.Fatalf("RouteCapsule2Plain round trip mismatch:\n got=%+v\nwant=%+v", got, rc2)
+	}
 }
 
 func sampleAdmissionProof() AdmissionProof {

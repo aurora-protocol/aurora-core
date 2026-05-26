@@ -668,6 +668,23 @@ func TestProtectorRejectsUnknownReservedFrameType(t *testing.T) {
 	}
 }
 
+func TestProtectorRejectsUnknownLabOnlyFrameTypeBeforeSeal(t *testing.T) {
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: 0x7f00}}}
+	p := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+
+	if _, err := p.Seal(block); err == nil {
+		t.Fatalf("unknown lab-only frame type was sealed")
+	}
+	if p.NextPacket != 0 {
+		t.Fatalf("rejected lab-only frame advanced packet counter to %d", p.NextPacket)
+	}
+}
+
 func TestProtectorRejectsFlowOpenWithUnknownCriticalExtension(t *testing.T) {
 	flow := protocol.FlowOpen{
 		FlowOpenVersion:  registry.Version20,

@@ -51,6 +51,24 @@ func TestValidateFrameBlockRejectsMalformedDataFrames(t *testing.T) {
 	}
 }
 
+func TestValidateFrameBlockRejectsLabOnlyFrameType(t *testing.T) {
+	err := ValidateFrameBlock(FrameBlock{Frames: []AuroraFrame{{
+		FrameType: 0x7f00,
+	}}})
+	if err == nil {
+		t.Fatalf("lab-only frame type was accepted")
+	}
+}
+
+func TestValidateFrameBlockAllowsPrivateUseFrameType(t *testing.T) {
+	err := ValidateFrameBlock(FrameBlock{Frames: []AuroraFrame{{
+		FrameType: 0x7000,
+	}}})
+	if err != nil {
+		t.Fatalf("private-use frame type was rejected: %v", err)
+	}
+}
+
 func TestFlowCloseEncodesOptionalFinalSequenceAndReason(t *testing.T) {
 	close := FlowClose{
 		FlowID:                   7,

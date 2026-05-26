@@ -141,6 +141,9 @@ func ValidateFrameType(frameType uint64) error {
 		if frameType <= 0x6fff {
 			return fmt.Errorf("protocol: unknown reserved frame type 0x%x", frameType)
 		}
+		if frameType >= 0x7f00 && frameType <= 0x7fff {
+			return fmt.Errorf("protocol: unknown lab-only frame type 0x%x", frameType)
+		}
 		return nil
 	}
 }

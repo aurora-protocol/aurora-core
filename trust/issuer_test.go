@@ -276,3 +276,41 @@ func TestValidateIssuerVerifierResponseFreshness(t *testing.T) {
 		t.Fatalf("mismatched token spent key accepted")
 	}
 }
+
+func TestValidateIssuerVerifierResponseFreshnessRejectsUnusableService(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*protocol.IssuerVerifierServiceRecord, *protocol.IssuerVerifierResponse)
+	}{
+		{
+			name: "not yet valid",
+			mutate: func(service *protocol.IssuerVerifierServiceRecord, resp *protocol.IssuerVerifierResponse) {
+				service.ValidFromUnix = 221
+				resp.ValidUntilUnix = 250
+			},
+		},
+		{
+			name: "expired at current time",
+			mutate: func(service *protocol.IssuerVerifierServiceRecord, resp *protocol.IssuerVerifierResponse) {
+				service.ValidUntilUnix = 220
+				resp.ValidUntilUnix = 220
+			},
+		},
+		{
+			name: "revoked",
+			mutate: func(service *protocol.IssuerVerifierServiceRecord, resp *protocol.IssuerVerifierResponse) {
+				service.ServiceStatus = registry.IssuerStatusRevoked
+				resp.ValidUntilUnix = 250
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			service, req, resp := issuerVerifierRequestFixture(t)
+			tc.mutate(&service, &resp)
+			if err := ValidateIssuerVerifierResponseFreshness(req, service, resp, 220, 300); err == nil {
+				t.Fatalf("unusable verifier service accepted")
+			}
+		})
+	}
+}

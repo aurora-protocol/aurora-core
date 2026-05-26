@@ -231,6 +231,47 @@ func TestValidateIssuerVerifierResponseRequiresFreshMatchingAccept(t *testing.T)
 	}
 }
 
+func TestValidateIssuerVerifierResponseRejectsUnusableService(t *testing.T) {
+	service := verifierServiceRecord()
+	serviceSigner := attachVerifierServiceSigningKey(t, &service)
+	proof, replay, admissionContextHash, handshakeBinding := verifierProofReplay(t)
+	req, requestHash, err := BuildIssuerVerifierRequest(IssuerVerifierRequestInput{
+		Service:                   service,
+		AdmissionProof:            proof,
+		ReplayProof:               replay,
+		IssuerMetadataHash:        rb(0x30, 48),
+		RelayDescriptorHash:       rb(0x31, 48),
+		RouteInstanceID:           77,
+		HopIndex:                  1,
+		ReplayEpochValidUntilUnix: 800,
+		HandshakeBindingContext:   handshakeBinding,
+		AdmissionContextHash:      admissionContextHash,
+		ChallengeDigest:           rb(0x32, 32),
+		AuthenticatorInputHash:    rb(0x33, 48),
+		RequestNonce:              rb(0x34, 32),
+		RequestTimeUnix:           100,
+		NowUnix:                   100,
+		RequestAuthImplemented:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := protocol.IssuerVerifierResponse{
+		ResponseVersion: registry.Version20,
+		ServiceID:       append([]byte(nil), service.ServiceID...),
+		RequestHash:     requestHash,
+		Decision:        registry.VerifierDecisionAccept,
+		TokenSpentKey:   append([]byte(nil), req.TokenSpentKey...),
+		ValidUntilUnix:  200,
+		ResponseNonce:   rb(0x40, 32),
+	}
+	signVerifierResponse(t, serviceSigner, &resp)
+	service.ServiceStatus = registry.IssuerStatusRevoked
+	if err := ValidateIssuerVerifierResponse(service, req, resp, 150); err == nil {
+		t.Fatalf("verifier response from revoked service accepted")
+	}
+}
+
 func TestValidateIssuerVerifierResponseRejectsInvalidServiceSignature(t *testing.T) {
 	service := verifierServiceRecord()
 	attachVerifierServiceSigningKey(t, &service)

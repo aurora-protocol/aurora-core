@@ -135,6 +135,12 @@ func ValidateIssuerVerifierResponseFreshness(req protocol.IssuerVerifierRequest,
 	if !bytes.Equal(resp.TokenSpentKey, req.TokenSpentKey) {
 		return fmt.Errorf("trust: issuer verifier token spent key mismatch")
 	}
+	if now < service.ValidFromUnix || now >= service.ValidUntilUnix {
+		return fmt.Errorf("trust: issuer verifier service outside validity interval")
+	}
+	if service.ServiceStatus != registry.IssuerStatusActive && service.ServiceStatus != registry.IssuerStatusRetiring {
+		return fmt.Errorf("trust: issuer verifier service status not usable")
+	}
 	if now > resp.ValidUntilUnix {
 		return fmt.Errorf("trust: issuer verifier response expired")
 	}

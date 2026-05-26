@@ -36,7 +36,7 @@ func (s Secret) GoString() string {
 }
 
 func LabString(s Secret, labEnabled bool) string {
-	if !labEnabled {
+	if !labEnabled || !LabBuildEnabled() {
 		return s.String()
 	}
 	return fmt.Sprintf("[lab:%s:%s]", s.Kind, hex.EncodeToString(s.Data))

@@ -50,8 +50,15 @@ func TestLabStringRequiresExplicitLabMode(t *testing.T) {
 	if got := LabString(secret, false); strings.Contains(got, "deadbeef") || !strings.Contains(got, "[redacted:token-authenticator:4-bytes]") {
 		t.Fatalf("secret leaked without lab mode: %s", got)
 	}
-	if got := LabString(secret, true); !strings.Contains(got, "deadbeef") {
-		t.Fatalf("lab mode did not expose fixture secret: %s", got)
+	got := LabString(secret, true)
+	if LabBuildEnabled() {
+		if !strings.Contains(got, "deadbeef") {
+			t.Fatalf("lab build did not expose fixture secret with runtime lab flag: %s", got)
+		}
+		return
+	}
+	if strings.Contains(got, "deadbeef") || !strings.Contains(got, "[redacted:token-authenticator:4-bytes]") {
+		t.Fatalf("runtime lab flag exposed fixture secret without lab build: %s", got)
 	}
 }
 
@@ -61,8 +68,12 @@ func TestSafeFieldRedactsSensitiveRawValues(t *testing.T) {
 		t.Fatalf("sensitive raw field was not redacted: %+v", field)
 	}
 	secret := SafeField("hint_secret", Secret{Kind: HintSecret, Data: []byte{0xca, 0xfe}}, true)
-	if !strings.Contains(secret.Value, "cafe") {
-		t.Fatalf("lab-enabled secret field did not expose fixture bytes: %+v", secret)
+	if LabBuildEnabled() {
+		if !strings.Contains(secret.Value, "cafe") {
+			t.Fatalf("lab build did not expose secret field with runtime lab flag: %+v", secret)
+		}
+	} else if strings.Contains(secret.Value, "cafe") || !strings.Contains(secret.Value, "[redacted:hint-secret:2-bytes]") {
+		t.Fatalf("runtime lab flag exposed secret field without lab build: %+v", secret)
 	}
 	ordinary := SafeField("route_instance_id", "r1", false)
 	if ordinary.Value != "r1" {

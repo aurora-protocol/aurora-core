@@ -106,6 +106,9 @@ func (s *RelaySession) AcceptCoverPrelude0(p0 protocol.CoverPrelude0, cred admis
 }
 
 func (s *RelaySession) AcceptCoverPrelude0At(p0 protocol.CoverPrelude0, cred admission.AccessHintCredential, bindingContext []byte, p1 protocol.CoverPrelude1, nowUnix uint64) (protocol.CoverPrelude1, error) {
+	if err := ValidatePrelude0ClientHybridShares(p0); err != nil {
+		return protocol.CoverPrelude1{}, err
+	}
 	if err := admission.VerifyAndSpendAccessHintAt(s.hintCache, cred, bindingContext, p0.ClientNonce, p0.AccessHint, nowUnix); err != nil {
 		return protocol.CoverPrelude1{}, err
 	}

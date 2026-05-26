@@ -21,3 +21,19 @@ func ValidatePreludeHybridShares(suite uint64, p0 protocol.CoverPrelude0, p1 pro
 	}
 	return nil
 }
+
+func ValidatePrelude0ClientHybridShares(p0 protocol.CoverPrelude0) error {
+	for _, suite := range p0.SuiteOffers {
+		if err := validatePrelude0ClientHybridSharesForSuite(suite, p0); err == nil {
+			return nil
+		}
+	}
+	return failureError(failure.MalformedHybridShare, "handshake: malformed client hybrid share")
+}
+
+func validatePrelude0ClientHybridSharesForSuite(suite uint64, p0 protocol.CoverPrelude0) error {
+	if _, err := auroracrypto.NewECDHPublicKeyForSuite(suite, p0.ClientClassicalEphPub); err != nil {
+		return err
+	}
+	return auroracrypto.ValidateMLKEMEncapsulationKeyForSuite(suite, p0.ClientMLKEMEncapsulationKey)
+}

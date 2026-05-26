@@ -116,31 +116,7 @@ func TestVerifyCoverPrelude1ClassifiesMalformedHybridShares(t *testing.T) {
 }
 
 func TestRelaySpendsAccessHintBeforePrelude1(t *testing.T) {
-	cred := admission.AccessHintCredential{
-		HintIssuerID:  hs(0x01, 16),
-		RelayBucketID: hs(0x02, 16),
-		HintEpochID:   7,
-		HintSelector:  hs(0x03, 16),
-		HintSecret:    hs(0x04, 32),
-		MaxUses:       1,
-	}
-	binding := hs(0xaa, 48)
-	nonce := hs(0xbb, 32)
-	hint, err := admission.ComputeAccessHint(cred, binding, nonce)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p0 := protocol.CoverPrelude0{
-		MsgType:           registry.MsgCoverPrelude0,
-		Version:           registry.Version20,
-		ClientNonce:       nonce,
-		HintIssuerID:      cred.HintIssuerID,
-		RelayBucketID:     cred.RelayBucketID,
-		HintEpochID:       cred.HintEpochID,
-		HintSelector:      cred.HintSelector,
-		AccessHint:        hint,
-		ClientCoverRandom: hs(0xcc, 32),
-	}
+	cred, binding, p0 := accessHintPrelude0(t)
 	cache := admission.NewMemoryReplayCache()
 	relay := NewRelaySession(cache)
 	p1 := protocol.CoverPrelude1{MsgType: registry.MsgCoverPrelude1, Version: registry.Version20}
@@ -156,6 +132,29 @@ func TestRelaySpendsAccessHintBeforePrelude1(t *testing.T) {
 	}
 	if _, err := relay.AcceptCoverPrelude0(p0, cred, binding, p1); err == nil {
 		t.Fatalf("replayed access hint produced another prelude1")
+	}
+}
+
+func TestRelayRejectsMalformedPrelude0SharesBeforeSpendingHint(t *testing.T) {
+	cred, binding, p0 := accessHintPrelude0(t)
+	p0.ClientClassicalEphPub = []byte{0x01}
+	cache := admission.NewMemoryReplayCache()
+	relay := NewRelaySession(cache)
+	p1 := protocol.CoverPrelude1{MsgType: registry.MsgCoverPrelude1, Version: registry.Version20}
+	_, err := relay.AcceptCoverPrelude0(p0, cred, binding, p1)
+	if err == nil {
+		t.Fatalf("malformed Prelude0 shares were accepted")
+	}
+	var failureErr *FailureError
+	if !errors.As(err, &failureErr) || failureErr.Kind != failure.MalformedHybridShare {
+		t.Fatalf("malformed Prelude0 shares error = %T %[1]v, want %v", err, failure.MalformedHybridShare)
+	}
+	spentKey, err := admission.ComputeSpentHintKey(cred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cache.Has(spentKey) {
+		t.Fatalf("malformed Prelude0 spent AccessHint")
 	}
 }
 
@@ -193,6 +192,47 @@ func hs(b byte, n int) []byte {
 		out[i] = b
 	}
 	return out
+}
+
+func accessHintPrelude0(t *testing.T) (admission.AccessHintCredential, []byte, protocol.CoverPrelude0) {
+	t.Helper()
+	cred := admission.AccessHintCredential{
+		HintIssuerID:  hs(0x01, 16),
+		RelayBucketID: hs(0x02, 16),
+		HintEpochID:   7,
+		HintSelector:  hs(0x03, 16),
+		HintSecret:    hs(0x04, 32),
+		MaxUses:       1,
+	}
+	binding := hs(0xaa, 48)
+	nonce := hs(0xbb, 32)
+	hint, err := admission.ComputeAccessHint(cred, binding, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientECDH, err := auroracrypto.GenerateECDHForSuite(registry.SuiteHybrid768AESGCM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientKEM, err := auroracrypto.GenerateMLKEM768()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p0 := protocol.CoverPrelude0{
+		MsgType:                     registry.MsgCoverPrelude0,
+		Version:                     registry.Version20,
+		SuiteOffers:                 []uint64{registry.SuiteHybrid768AESGCM},
+		ClientNonce:                 nonce,
+		ClientClassicalEphPub:       clientECDH.PublicKeyBytes(),
+		ClientMLKEMEncapsulationKey: clientKEM.EncapsulationKeyBytes(),
+		HintIssuerID:                cred.HintIssuerID,
+		RelayBucketID:               cred.RelayBucketID,
+		HintEpochID:                 cred.HintEpochID,
+		HintSelector:                cred.HintSelector,
+		AccessHint:                  hint,
+		ClientCoverRandom:           hs(0xcc, 32),
+	}
+	return cred, binding, p0
 }
 
 func signedCoverPreludeVerificationInput(t *testing.T) CoverPreludeVerificationInput {

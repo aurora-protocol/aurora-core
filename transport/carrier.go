@@ -206,6 +206,9 @@ func carrierURL(scheme, authority, path string) (*url.URL, error) {
 	if !strings.HasPrefix(path, "/") {
 		return nil, fmt.Errorf("transport: carrier request path must start with /")
 	}
+	if containsForbiddenWireMarker(authority) || containsForbiddenWireMarker(path) {
+		return nil, fmt.Errorf("transport: visible carrier target contains protocol marker")
+	}
 	return &url.URL{Scheme: scheme, Host: authority, Path: path}, nil
 }
 

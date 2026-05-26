@@ -329,6 +329,28 @@ func TestBuildCarrierRequestRejectsForbiddenVisibleHeaderMarkers(t *testing.T) {
 	}
 }
 
+func TestBuildCarrierRequestRejectsForbiddenVisibleTargetMarkers(t *testing.T) {
+	tpl := transportTemplate(registry.MethodWebH2Stream)
+	plan := CarrierPlan{Carrier: Carrier{MethodID: registry.MethodWebH2Stream, Name: "web.h2.stream"}, UDPMode: UDPOverStreamFallback}
+	cases := []CarrierRequestInput{
+		{Authority: "relay.example", Path: "/assets/app.bin"},
+		{Authority: "cover.example", Path: "/vpn/assets/app.bin"},
+		{Authority: "cover.example", Path: "/assets/auth/callback"},
+		{Authority: "bridge.example", Path: "/assets/app.bin"},
+	}
+	for _, tc := range cases {
+		tc.Plan = plan
+		tc.Template = tpl
+		tc.RequestClassID = 1
+		tc.NeedCapsule = true
+		tc.Scheme = "https"
+		tc.Payload = []byte{0x01}
+		if _, err := BuildCarrierRequest(tc); err == nil {
+			t.Fatalf("carrier accepted forbidden visible target: authority=%q path=%q", tc.Authority, tc.Path)
+		}
+	}
+}
+
 func TestBuildH3ExtDatagramCarrierRequestUsesWebTransportAssociation(t *testing.T) {
 	tpl := h3DatagramTemplate()
 	plan := CarrierPlan{
@@ -514,7 +536,7 @@ func masqueCarrierInput(plan CarrierPlan, tpl protocol.CoverTemplate, allowVisib
 		RequestClassID:             1,
 		NeedCapsule:                true,
 		Scheme:                     "https",
-		Authority:                  "proxy.example",
+		Authority:                  "edge.example",
 		Path:                       "/.well-known/masque/udp/192.0.2.6/443/",
 		Payload:                    []byte{0xcc, 0xdd},
 		AllowVisibleProxySemantics: allowVisible,

@@ -54,6 +54,55 @@ func TestControlAADAppendixB4(t *testing.T) {
 	}
 }
 
+func TestControlAADRejectsReservedOrMismatchedDirection(t *testing.T) {
+	base := ControlAADInput{
+		SelectedVersion:                 registry.Version20,
+		SelectedSuite:                   registry.SuiteHybrid768AESGCM,
+		MsgType:                         registry.MsgCoverCapsule1,
+		RouteInstanceID:                 1,
+		HandshakeBindingContext:         repeated(0xaa, 48),
+		PreludeTranscriptHashForThisHop: repeated(0xbb, 48),
+	}
+	cases := map[string]ControlAADInput{
+		"reserved direction": func() ControlAADInput {
+			in := base
+			in.ControlDirection = 2
+			return in
+		}(),
+		"cover capsule 1 backward": func() ControlAADInput {
+			in := base
+			in.MsgType = registry.MsgCoverCapsule1
+			in.ControlDirection = 1
+			return in
+		}(),
+		"cover capsule 2 forward": func() ControlAADInput {
+			in := base
+			in.MsgType = registry.MsgCoverCapsule2
+			in.ControlDirection = 0
+			return in
+		}(),
+		"route capsule 1 backward": func() ControlAADInput {
+			in := base
+			in.MsgType = registry.MsgRouteCapsule1
+			in.ControlDirection = 1
+			return in
+		}(),
+		"route capsule 2 forward": func() ControlAADInput {
+			in := base
+			in.MsgType = registry.MsgRouteCapsule2
+			in.ControlDirection = 0
+			return in
+		}(),
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ControlAADPreimage(in); err == nil {
+				t.Fatalf("invalid control AAD input accepted: %+v", in)
+			}
+		})
+	}
+}
+
 func TestPacketADRejectsReservedDirection(t *testing.T) {
 	if _, err := PacketAD(registry.SuiteHybrid768AESGCM, 1, 0, 2, 0, 0); err == nil {
 		t.Fatalf("reserved packet direction accepted")

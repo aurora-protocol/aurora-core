@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
@@ -19,6 +20,9 @@ type ControlAADInput struct {
 }
 
 func ControlAADPreimage(in ControlAADInput) ([]byte, error) {
+	if err := validateControlAADInput(in); err != nil {
+		return nil, err
+	}
 	e := wire.NewEncoder()
 	e.WriteBytes([]byte("aurora v2.0 control aad"))
 	e.WriteVarint(in.SelectedVersion)
@@ -30,6 +34,23 @@ func ControlAADPreimage(in ControlAADInput) ([]byte, error) {
 	e.WriteOpaque16(in.HandshakeBindingContext)
 	e.WriteOpaque16(in.PreludeTranscriptHashForThisHop)
 	return e.Bytes()
+}
+
+func validateControlAADInput(in ControlAADInput) error {
+	if in.ControlDirection > 1 {
+		return fmt.Errorf("crypto: reserved control direction 0x%x", in.ControlDirection)
+	}
+	switch in.MsgType {
+	case registry.MsgCoverCapsule1, registry.MsgRouteCapsule1:
+		if in.ControlDirection != 0 {
+			return fmt.Errorf("crypto: control message 0x%x must use direction 0", in.MsgType)
+		}
+	case registry.MsgCoverCapsule2, registry.MsgRouteCapsule2:
+		if in.ControlDirection != 1 {
+			return fmt.Errorf("crypto: control message 0x%x must use direction 1", in.MsgType)
+		}
+	}
+	return nil
 }
 
 func ControlAAD(in ControlAADInput) ([]byte, error) {

@@ -126,6 +126,31 @@ func TestActiveProbeCasesArePubliclyIndistinguishable(t *testing.T) {
 	}
 }
 
+func TestActiveProbeSurfacesDoNotExposeProtocolSpecificSignals(t *testing.T) {
+	first, err := PublicProbeSurface(ActiveProbeCases()[0].Kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSafeReflectedLog(t, first.ReflectedLog)
+	for _, tc := range ActiveProbeCases()[1:] {
+		got, err := PublicProbeSurface(tc.Kind)
+		if err != nil {
+			t.Fatalf("%s surface failed: %v", tc.Name, err)
+		}
+		if got.HTTPStatus != first.HTTPStatus ||
+			got.CloseCode != first.CloseCode ||
+			got.TLSAlertClass != first.TLSAlertClass ||
+			got.QUICCloseCode != first.QUICCloseCode ||
+			got.WebSocketCloseCode != first.WebSocketCloseCode ||
+			got.TimingClass != first.TimingClass ||
+			string(got.Body) != string(first.Body) ||
+			got.ReflectedLog != first.ReflectedLog {
+			t.Fatalf("%s produced distinguishable public surface: %+v vs %+v", tc.Name, got, first)
+		}
+		assertSafeReflectedLog(t, got.ReflectedLog)
+	}
+}
+
 func assertSafeLogKey(t *testing.T, key string) {
 	t.Helper()
 	forbidden := []string{"aurora", "admission", "token", "hint", "capsule", "proof", "relay", "bridge"}
@@ -133,6 +158,17 @@ func assertSafeLogKey(t *testing.T, key string) {
 	for _, word := range forbidden {
 		if strings.Contains(lower, word) {
 			t.Fatalf("log key %q contains forbidden diagnostic word %q", key, word)
+		}
+	}
+}
+
+func assertSafeReflectedLog(t *testing.T, value string) {
+	t.Helper()
+	forbidden := []string{"aurora", "admission", "token", "hint", "capsule", "proof", "relay", "bridge", "proxy"}
+	lower := strings.ToLower(value)
+	for _, word := range forbidden {
+		if strings.Contains(lower, word) {
+			t.Fatalf("reflected log value %q contains forbidden diagnostic word %q", value, word)
 		}
 	}
 }

@@ -44,6 +44,17 @@ type Classification struct {
 	LogKey       string
 }
 
+type ProbeSurface struct {
+	HTTPStatus         int
+	Body               []byte
+	CloseCode          uint16
+	TLSAlertClass      uint16
+	QUICCloseCode      uint64
+	WebSocketCloseCode uint16
+	TimingClass        string
+	ReflectedLog       string
+}
+
 type ProbeCase struct {
 	Name string
 	Kind Kind
@@ -69,6 +80,18 @@ func Classify(k Kind) Classification {
 		Action: CoverOrigin,
 		LogKey: k.LogKey(),
 	}
+}
+
+func PublicProbeSurface(k Kind) (ProbeSurface, error) {
+	classification := Classify(k)
+	if classification.Action != CoverOrigin {
+		return ProbeSurface{}, fmt.Errorf("failure: public probe surface action = %d, want cover-origin", classification.Action)
+	}
+	return ProbeSurface{
+		HTTPStatus: classification.PublicStatus,
+		Body:       append([]byte(nil), classification.PublicBody...),
+		CloseCode:  classification.CloseCode,
+	}, nil
 }
 
 func ActiveProbeCases() []ProbeCase {
@@ -97,14 +120,27 @@ func VerifyProbeNeutrality(cases []ProbeCase) error {
 	if first.Action != CoverOrigin {
 		return fmt.Errorf("failure: probe case %q action = %d, want cover-origin", cases[0].Name, first.Action)
 	}
+	firstSurface, err := PublicProbeSurface(cases[0].Kind)
+	if err != nil {
+		return fmt.Errorf("failure: probe case %q surface: %w", cases[0].Name, err)
+	}
 	for _, tc := range cases[1:] {
 		got := Classify(tc.Kind)
 		if got.Action != CoverOrigin {
 			return fmt.Errorf("failure: probe case %q action = %d, want cover-origin", tc.Name, got.Action)
 		}
-		if got.PublicStatus != first.PublicStatus ||
-			got.CloseCode != first.CloseCode ||
-			!bytes.Equal(got.PublicBody, first.PublicBody) {
+		surface, err := PublicProbeSurface(tc.Kind)
+		if err != nil {
+			return fmt.Errorf("failure: probe case %q surface: %w", tc.Name, err)
+		}
+		if surface.HTTPStatus != firstSurface.HTTPStatus ||
+			surface.CloseCode != firstSurface.CloseCode ||
+			surface.TLSAlertClass != firstSurface.TLSAlertClass ||
+			surface.QUICCloseCode != firstSurface.QUICCloseCode ||
+			surface.WebSocketCloseCode != firstSurface.WebSocketCloseCode ||
+			surface.TimingClass != firstSurface.TimingClass ||
+			surface.ReflectedLog != firstSurface.ReflectedLog ||
+			!bytes.Equal(surface.Body, firstSurface.Body) {
 			return fmt.Errorf("failure: probe case %q has distinguishable public surface", tc.Name)
 		}
 	}

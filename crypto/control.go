@@ -58,6 +58,9 @@ func FirstHopRouteInstanceID(selectedSuite uint64, preludeTranscriptHash, relayD
 }
 
 func PacketAD(selectedSuite uint64, routeInstanceID uint64, hopLayer, direction, keyPhase uint8, packetNumber uint64) ([]byte, error) {
+	if direction > 1 {
+		return nil, fmt.Errorf("crypto: reserved packet direction 0x%x", direction)
+	}
 	e := wire.NewEncoder()
 	e.WriteBytes([]byte("aurora v2.0 packet"))
 	e.WriteVarint(routeInstanceID)

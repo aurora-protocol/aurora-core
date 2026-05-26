@@ -54,6 +54,12 @@ func TestControlAADAppendixB4(t *testing.T) {
 	}
 }
 
+func TestPacketADRejectsReservedDirection(t *testing.T) {
+	if _, err := PacketAD(registry.SuiteHybrid768AESGCM, 1, 0, 2, 0, 0); err == nil {
+		t.Fatalf("reserved packet direction accepted")
+	}
+}
+
 func TestRouteWrapAppendixB4(t *testing.T) {
 	in := RouteWrapInput{
 		RouteInstanceID:                0x01,

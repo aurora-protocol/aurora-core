@@ -21,6 +21,21 @@ func TestSanitizeMessageRemovesSensitiveFieldNames(t *testing.T) {
 	}
 }
 
+func TestSanitizeMessageRemovesOperationalSensitiveFieldNames(t *testing.T) {
+	got := SanitizeMessage("bridge_locator private_relay_ip cover_origin admission_key bucket_user_mapping")
+	for _, token := range []string{
+		"bridge_locator",
+		"private_relay_ip",
+		"cover_origin",
+		"admission_key",
+		"bucket_user_mapping",
+	} {
+		if strings.Contains(got, token) {
+			t.Fatalf("message still contained %q after sanitization: %s", token, got)
+		}
+	}
+}
+
 func TestLabStringRequiresExplicitLabMode(t *testing.T) {
 	secret := Secret{Kind: TokenAuthenticator, Data: []byte{0xde, 0xad, 0xbe, 0xef}}
 	if got := LabString(secret, false); strings.Contains(got, "deadbeef") || !strings.Contains(got, "[redacted:token-authenticator:4-bytes]") {

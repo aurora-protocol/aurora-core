@@ -58,6 +58,11 @@ func SanitizeMessage(msg string) string {
 		"ReplayProof",
 		"token_authenticator",
 		"hint_secret",
+		"bridge_locator",
+		"private_relay_ip",
+		"cover_origin",
+		"admission_key",
+		"bucket_user_mapping",
 		"CoverCapsule plaintext",
 		"route-wrap plaintext",
 	} {

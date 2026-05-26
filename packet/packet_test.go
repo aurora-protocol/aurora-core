@@ -306,6 +306,58 @@ func TestSplit2OnionEntrySeesOnlyOpaqueForwardFrame(t *testing.T) {
 	}
 }
 
+func TestSplit2BackwardOnionClientPeelsEntryThenExitLayers(t *testing.T) {
+	exitBlock := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{
+		FrameType: registry.FrameStreamData,
+		FlowID:    100,
+		Payload:   []byte("exit response payload"),
+	}}}
+	entryBackward := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 10,
+		HopLayer:        0,
+		Direction:       1,
+		Key:             bytesOf(0x91, 32),
+		StaticIV:        bytesOf(0x92, 12),
+	}
+	exitBackward := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 10,
+		HopLayer:        1,
+		Direction:       1,
+		Key:             bytesOf(0xa1, 32),
+		StaticIV:        bytesOf(0xa2, 12),
+	}
+	outer, err := SealSplit2BackwardOnion(exitBlock, entryBackward, exitBackward, routeForwardForPacketTest(t, 10, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entryBlock, err := entryBackward.Open(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entryBlock.Frames) != 1 || entryBlock.Frames[0].FrameType != registry.FrameRouteForward {
+		t.Fatalf("backward entry layer did not contain one opaque route frame: %+v", entryBlock)
+	}
+	if bytes.Contains(entryBlock.Frames[0].Payload, []byte("exit response payload")) {
+		t.Fatalf("backward entry-visible payload leaked exit response")
+	}
+	inner, err := DecodeForwardedPacket(entryBlock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inner.Direction != 1 || inner.HopLayer != 1 {
+		t.Fatalf("backward inner packet metadata = direction %d hop %d", inner.Direction, inner.HopLayer)
+	}
+	opened, err := exitBackward.Open(inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opened.Frames) != 1 || !bytes.Equal(opened.Frames[0].Payload, []byte("exit response payload")) {
+		t.Fatalf("client did not recover backward exit block: %+v", opened)
+	}
+}
+
 func TestSplit2OnionMaintainsIndependentHopCounters(t *testing.T) {
 	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
 	entry := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 8, HopLayer: 0, Key: bytesOf(0x51, 32), StaticIV: bytesOf(0x52, 12)}

@@ -95,6 +95,12 @@ type CoverPreludeVerificationInput struct {
 }
 
 func VerifyCoverPrelude1Signatures(in CoverPreludeVerificationInput) ([]byte, error) {
+	if err := in.Prelude0.ValidateStructural(); err != nil {
+		return nil, err
+	}
+	if err := in.Prelude1.ValidateStructural(); err != nil {
+		return nil, err
+	}
 	if in.Prelude0.MsgType != registry.MsgCoverPrelude0 || in.Prelude0.Version != registry.Version20 {
 		return nil, fmt.Errorf("handshake: invalid CoverPrelude0 header")
 	}

@@ -283,6 +283,9 @@ func (h ClientTransportHints) ValidatePrototype() error {
 	if len(h.NetworkCohortHint) > 16 {
 		return fmt.Errorf("protocol: network_cohort_hint length %d exceeds 16", len(h.NetworkCohortHint))
 	}
+	if err := ValidateExtensions(h.Extensions, nil); err != nil {
+		return err
+	}
 	return nil
 }
 

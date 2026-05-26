@@ -683,7 +683,7 @@ func fuzzSamplePolicyAccept() PolicyAccept {
 
 func fuzzSampleCoverPrelude0() CoverPrelude0 {
 	return CoverPrelude0{
-		MsgType:                     1,
+		MsgType:                     registry.MsgCoverPrelude0,
 		Version:                     registry.Version20,
 		SuiteOffers:                 []uint64{registry.SuiteHybrid768AESGCM},
 		ClientNonce:                 fb(0x66, 32),
@@ -704,7 +704,7 @@ func fuzzSampleCoverPrelude0() CoverPrelude0 {
 
 func fuzzSampleCoverPrelude1() CoverPrelude1 {
 	return CoverPrelude1{
-		MsgType:                         2,
+		MsgType:                         registry.MsgCoverPrelude1,
 		Version:                         registry.Version20,
 		SelectedSuite:                   registry.SuiteHybrid768AESGCM,
 		RelayDescriptorHash:             fb(0x71, 48),
@@ -723,7 +723,7 @@ func fuzzSampleCoverPrelude1() CoverPrelude1 {
 
 func fuzzSampleCoverCapsule1Plain() CoverCapsule1Plain {
 	return CoverCapsule1Plain{
-		MsgType:              3,
+		MsgType:              registry.MsgCoverCapsule1,
 		RouteInstanceID:      7,
 		AdmissionProof:       fuzzSampleAdmissionProof(),
 		ReplayProof:          fuzzSampleReplayProof(),
@@ -736,7 +736,7 @@ func fuzzSampleCoverCapsule1Plain() CoverCapsule1Plain {
 
 func fuzzSampleCoverCapsule2Plain() CoverCapsule2Plain {
 	return CoverCapsule2Plain{
-		MsgType:         4,
+		MsgType:         registry.MsgCoverCapsule2,
 		RouteInstanceID: 7,
 		PolicyAccept:    fuzzSamplePolicyAccept(),
 		ServerFinished:  fb(0x7d, 48),
@@ -746,7 +746,7 @@ func fuzzSampleCoverCapsule2Plain() CoverCapsule2Plain {
 
 func fuzzSampleRouteCapsule1Plain() RouteCapsule1Plain {
 	return RouteCapsule1Plain{
-		MsgType:         5,
+		MsgType:         registry.MsgRouteCapsule1,
 		RouteInstanceID: 7,
 		HopIndex:        1,
 		AdmissionProof:  fuzzSampleAdmissionProof(),
@@ -759,7 +759,7 @@ func fuzzSampleRouteCapsule1Plain() RouteCapsule1Plain {
 
 func fuzzSampleRouteCapsule2Plain() RouteCapsule2Plain {
 	return RouteCapsule2Plain{
-		MsgType:         6,
+		MsgType:         registry.MsgRouteCapsule2,
 		RouteInstanceID: 7,
 		HopIndex:        1,
 		PolicyAccept:    fuzzSamplePolicyAccept(),
@@ -770,7 +770,7 @@ func fuzzSampleRouteCapsule2Plain() RouteCapsule2Plain {
 
 func fuzzSampleRoutePrelude1() RoutePrelude1 {
 	return RoutePrelude1{
-		MsgType:                         7,
+		MsgType:                         registry.MsgRoutePrelude1,
 		Version:                         registry.Version20,
 		RouteInstanceID:                 7,
 		HopIndex:                        1,

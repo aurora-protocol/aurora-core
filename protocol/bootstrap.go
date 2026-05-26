@@ -1,6 +1,11 @@
 package protocol
 
-import "github.com/aurora-protocol/aurora-core/wire"
+import (
+	"fmt"
+
+	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/aurora-protocol/aurora-core/wire"
+)
 
 type CoverPrelude0 struct {
 	MsgType                     uint64
@@ -64,6 +69,24 @@ func DecodeCoverPrelude0(r *wire.Reader) CoverPrelude0 {
 	}
 }
 
+func (p CoverPrelude0) ValidateStructural() error {
+	if p.MsgType != registry.MsgCoverPrelude0 {
+		return fmt.Errorf("protocol: malformed CoverPrelude0 message type 0x%x", p.MsgType)
+	}
+	if err := validateVersionKnown(p.Version); err != nil {
+		return err
+	}
+	for _, suite := range p.SuiteOffers {
+		if err := validateSuiteKnown(suite); err != nil {
+			return err
+		}
+	}
+	if err := ValidateExtensions(p.Extensions, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
 type CoverPrelude1 struct {
 	MsgType                         uint64
 	Version                         uint64
@@ -120,6 +143,22 @@ func DecodeCoverPrelude1(r *wire.Reader) CoverPrelude1 {
 	}
 }
 
+func (p CoverPrelude1) ValidateStructural() error {
+	if p.MsgType != registry.MsgCoverPrelude1 {
+		return fmt.Errorf("protocol: malformed CoverPrelude1 message type 0x%x", p.MsgType)
+	}
+	if err := validateVersionKnown(p.Version); err != nil {
+		return err
+	}
+	if err := validateSuiteKnown(p.SelectedSuite); err != nil {
+		return err
+	}
+	if err := ValidateExtensions(p.Extensions, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (p CoverPrelude1) Unsigned() CoverPrelude1 {
 	p.ServerPreludeSignatureClassical = nil
 	p.ServerPreludeSignaturePQ = nil
@@ -164,6 +203,28 @@ func DecodeCoverCapsule1Plain(r *wire.Reader) CoverCapsule1Plain {
 	}
 }
 
+func (c CoverCapsule1Plain) ValidateStructural(now uint64, allowLab bool) error {
+	if c.MsgType != registry.MsgCoverCapsule1 {
+		return fmt.Errorf("protocol: malformed CoverCapsule1 message type 0x%x", c.MsgType)
+	}
+	if err := c.AdmissionProof.ValidateStructural(now, allowLab); err != nil {
+		return err
+	}
+	if err := c.ReplayProof.ValidateStructural(); err != nil {
+		return err
+	}
+	if err := c.PolicyOffer.ValidateStructural(); err != nil {
+		return err
+	}
+	if err := c.ClientTransportHints.ValidatePrototype(); err != nil {
+		return err
+	}
+	if err := ValidateExtensions(c.Extensions, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (c CoverCapsule1Plain) UnsignedClientFinished() CoverCapsule1Plain {
 	c.ClientFinished = nil
 	return c
@@ -196,6 +257,19 @@ func DecodeCoverCapsule2Plain(r *wire.Reader) CoverCapsule2Plain {
 		Padding:         r.ReadOpaque16(),
 		Extensions:      DecodeExtensions(r),
 	}
+}
+
+func (c CoverCapsule2Plain) ValidateStructural() error {
+	if c.MsgType != registry.MsgCoverCapsule2 {
+		return fmt.Errorf("protocol: malformed CoverCapsule2 message type 0x%x", c.MsgType)
+	}
+	if err := c.PolicyAccept.ValidateStructural(); err != nil {
+		return err
+	}
+	if err := ValidateExtensions(c.Extensions, nil); err != nil {
+		return err
+	}
+	return nil
 }
 
 type RouteCapsule1Plain struct {
@@ -236,6 +310,25 @@ func DecodeRouteCapsule1Plain(r *wire.Reader) RouteCapsule1Plain {
 	}
 }
 
+func (c RouteCapsule1Plain) ValidateStructural(now uint64, allowLab bool) error {
+	if c.MsgType != registry.MsgRouteCapsule1 {
+		return fmt.Errorf("protocol: malformed RouteCapsule1 message type 0x%x", c.MsgType)
+	}
+	if err := c.AdmissionProof.ValidateStructural(now, allowLab); err != nil {
+		return err
+	}
+	if err := c.ReplayProof.ValidateStructural(); err != nil {
+		return err
+	}
+	if err := c.PolicyOffer.ValidateStructural(); err != nil {
+		return err
+	}
+	if err := ValidateExtensions(c.Extensions, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (c RouteCapsule1Plain) UnsignedClientFinished() RouteCapsule1Plain {
 	c.ClientFinished = nil
 	return c
@@ -271,6 +364,19 @@ func DecodeRouteCapsule2Plain(r *wire.Reader) RouteCapsule2Plain {
 		Padding:         r.ReadOpaque16(),
 		Extensions:      DecodeExtensions(r),
 	}
+}
+
+func (c RouteCapsule2Plain) ValidateStructural() error {
+	if c.MsgType != registry.MsgRouteCapsule2 {
+		return fmt.Errorf("protocol: malformed RouteCapsule2 message type 0x%x", c.MsgType)
+	}
+	if err := c.PolicyAccept.ValidateStructural(); err != nil {
+		return err
+	}
+	if err := ValidateExtensions(c.Extensions, nil); err != nil {
+		return err
+	}
+	return nil
 }
 
 type RoutePrelude1 struct {
@@ -330,6 +436,25 @@ func DecodeRoutePrelude1(r *wire.Reader) RoutePrelude1 {
 		Padding:                         r.ReadOpaque16(),
 		Extensions:                      DecodeExtensions(r),
 	}
+}
+
+func (p RoutePrelude1) ValidateStructural() error {
+	if p.MsgType != registry.MsgRoutePrelude1 {
+		return fmt.Errorf("protocol: malformed RoutePrelude1 message type 0x%x", p.MsgType)
+	}
+	if err := validateVersionKnown(p.Version); err != nil {
+		return err
+	}
+	if err := validateSuiteKnown(p.SelectedSuite); err != nil {
+		return err
+	}
+	if err := validateShapeKnown(p.SelectedShapeID); err != nil {
+		return err
+	}
+	if err := ValidateExtensions(p.Extensions, nil); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (p RoutePrelude1) Unsigned() RoutePrelude1 {

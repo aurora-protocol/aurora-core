@@ -196,6 +196,16 @@ func TestOpenPrivatePreludeRejectsMalformedPrivateHeader(t *testing.T) {
 	}
 }
 
+func TestValidatePrivatePreludeHeaderRejectsUnknownCriticalExtension(t *testing.T) {
+	private := routeTestPrivatePrelude(t, routeTestEnvelope())
+	private.MsgType = registry.MsgRoutePrelude0
+	private.Version = registry.Version20
+	private.Extensions = []protocol.Extension{{ExtensionType: 0x4001, Critical: true, Body: []byte{0x01}}}
+	if err := ValidatePrivatePreludeHeader(private); err == nil {
+		t.Fatalf("unknown critical private prelude extension accepted")
+	}
+}
+
 func TestOpenAndVerifyPrivatePreludeSpendsAccessHintWithRouteHopBinding(t *testing.T) {
 	env := routeTestEnvelope()
 	cred := routeTestAccessHintCredential(env)

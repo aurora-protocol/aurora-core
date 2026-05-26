@@ -4,7 +4,7 @@ This repository is the portable Go monorepo for the Aurora prototype. It contain
 
 Implemented now:
 
-- canonical Section 9 wire encoding and decoding with opaque8/16/24, vector element-count, and reserved enum rejection coverage;
+- canonical Section 9 wire encoding and decoding with opaque8/16/24, vector element-count, reserved enum rejection, and bootstrap critical extension rejection coverage;
 - Appendix A registry constants;
 - `PublicKeyRecord`, `AuthorityKeyRecord`, `ObjectSignature`, admission, replay, policy, frame, flow, route-envelope, packet, and key-update structures;
 - `DirectoryConsensus`, `RelayDescriptor`, `CoverTemplate`, routing records, cover profiles, and canonical trust-chain hash/signature inputs;

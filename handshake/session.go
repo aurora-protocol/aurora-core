@@ -82,6 +82,10 @@ func (s *ClientSession) VerifyCoverCapsule2(c protocol.CoverCapsule2Plain, expec
 	if s.state != StateVerifyCoverCapsule2 {
 		return fmt.Errorf("handshake: cannot verify CoverCapsule2 from state %d", s.state)
 	}
+	if err := c.ValidateStructural(); err != nil {
+		s.state = StateAborted
+		return err
+	}
 	if len(c.ServerFinished) == 0 || subtle.ConstantTimeCompare(c.ServerFinished, expectedServerFinished) != 1 {
 		s.state = StateAborted
 		return fmt.Errorf("handshake: server finished mismatch")
@@ -106,6 +110,9 @@ func (s *RelaySession) AcceptCoverPrelude0(p0 protocol.CoverPrelude0, cred admis
 }
 
 func (s *RelaySession) AcceptCoverPrelude0At(p0 protocol.CoverPrelude0, cred admission.AccessHintCredential, bindingContext []byte, p1 protocol.CoverPrelude1, nowUnix uint64) (protocol.CoverPrelude1, error) {
+	if err := p0.ValidateStructural(); err != nil {
+		return protocol.CoverPrelude1{}, err
+	}
 	if err := ValidatePrelude0ClientHybridShares(p0); err != nil {
 		return protocol.CoverPrelude1{}, err
 	}

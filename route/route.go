@@ -366,6 +366,9 @@ func VerifyRoutePrelude1Signatures(in RoutePreludeVerificationInput) ([]byte, er
 	if err := ValidatePrivatePreludeHeader(in.Prelude0); err != nil {
 		return nil, err
 	}
+	if err := in.Prelude1.ValidateStructural(); err != nil {
+		return nil, err
+	}
 	if in.Prelude1.MsgType != registry.MsgRoutePrelude1 {
 		return nil, fmt.Errorf("route: malformed route prelude response message type 0x%x", in.Prelude1.MsgType)
 	}
@@ -471,6 +474,9 @@ func ValidatePrivatePreludeHeader(private PrivatePrelude) error {
 	}
 	if private.Version != registry.Version20 {
 		return fmt.Errorf("route: unsupported private prelude version 0x%x", private.Version)
+	}
+	if err := protocol.ValidateExtensions(private.Extensions, nil); err != nil {
+		return err
 	}
 	return nil
 }

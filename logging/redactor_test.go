@@ -45,3 +45,20 @@ func TestSafeFieldRedactsSensitiveRawValues(t *testing.T) {
 		t.Fatalf("ordinary field was unexpectedly changed: %+v", ordinary)
 	}
 }
+
+func TestSafeFieldRedactsPublicLogSensitiveOperationalFields(t *testing.T) {
+	for _, key := range []string{
+		"bridge_locator",
+		"private_relay_ip",
+		"cover_origin",
+		"admission_key",
+		"bucket_user_mapping",
+	} {
+		t.Run(key, func(t *testing.T) {
+			field := SafeField(key, "sensitive-value", false)
+			if field.Value != "[redacted-field]" {
+				t.Fatalf("public-log-sensitive field was not redacted: %+v", field)
+			}
+		})
+	}
+}

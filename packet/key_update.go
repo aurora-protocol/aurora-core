@@ -98,6 +98,9 @@ type DirectionState struct {
 	previousKeyPhase uint8
 	previousMaterial KeyMaterial
 
+	pendingSentUpdateActive bool
+	pendingSentUpdate       protocol.KeyUpdate
+
 	lastReceivedUpdate       []byte
 	lastReceivedUpdateResult KeyUpdateResult
 }
@@ -123,10 +126,17 @@ func (s *DirectionState) InitiateUpdate(suite uint64, updateNonce []byte, ackReq
 	s.Material = next
 	s.DrainUntil = time.Now().Add(MaxDrainWindow)
 	s.clearLastReceivedUpdate()
+	if frame.AckRequired {
+		s.pendingSentUpdate = cloneKeyUpdate(frame)
+		s.pendingSentUpdateActive = true
+	} else {
+		s.clearPendingSentUpdate()
+	}
 	return frame, nil
 }
 
 func (s *DirectionState) MaterialForPacket(pkt AuroraPacket, now time.Time) (KeyMaterial, error) {
+	s.expireDrain(now)
 	if pkt.RouteInstanceID != s.RouteInstanceID {
 		return KeyMaterial{}, fmt.Errorf("packet: packet route instance mismatch")
 	}
@@ -143,6 +153,38 @@ func (s *DirectionState) MaterialForPacket(pkt AuroraPacket, now time.Time) (Key
 		return cloneKeyMaterial(s.previousMaterial), nil
 	}
 	return KeyMaterial{}, fmt.Errorf("packet: key phase %d is not active", pkt.KeyPhase)
+}
+
+func (s *DirectionState) PendingKeyUpdateRetransmission(now time.Time) (protocol.KeyUpdate, KeyMaterial, bool) {
+	s.expireDrain(now)
+	if !s.pendingSentUpdateActive {
+		return protocol.KeyUpdate{}, KeyMaterial{}, false
+	}
+	return cloneKeyUpdate(s.pendingSentUpdate), cloneKeyMaterial(s.previousMaterial), true
+}
+
+func (s *DirectionState) ApplyKeyUpdateACK(ack protocol.KeyUpdateACK, now time.Time) error {
+	s.expireDrain(now)
+	if !s.pendingSentUpdateActive {
+		return fmt.Errorf("packet: no pending KEY_UPDATE_ACK")
+	}
+	if len(ack.AckNonce) != 16 {
+		return fmt.Errorf("packet: KEY_UPDATE_ACK nonce length %d, want 16", len(ack.AckNonce))
+	}
+	if ack.RouteInstanceID != s.RouteInstanceID {
+		return fmt.Errorf("packet: KEY_UPDATE_ACK route instance mismatch")
+	}
+	if ack.HopLayer != s.HopLayer {
+		return fmt.Errorf("packet: KEY_UPDATE_ACK hop layer mismatch")
+	}
+	if ack.AckedDirection != s.Direction {
+		return fmt.Errorf("packet: KEY_UPDATE_ACK direction mismatch")
+	}
+	if ack.AckedKeyPhase != s.KeyPhase {
+		return fmt.Errorf("packet: KEY_UPDATE_ACK phase %d does not match active phase %d", ack.AckedKeyPhase, s.KeyPhase)
+	}
+	s.clearDrainState()
+	return nil
 }
 
 func (s *DirectionState) ApplyReceivedUpdate(suite uint64, frame protocol.KeyUpdate, ackNonce []byte) (KeyUpdateResult, error) {
@@ -194,6 +236,25 @@ func (s *DirectionState) clearLastReceivedUpdate() {
 	s.lastReceivedUpdateResult = KeyUpdateResult{}
 }
 
+func (s *DirectionState) clearPendingSentUpdate() {
+	s.pendingSentUpdate = protocol.KeyUpdate{}
+	s.pendingSentUpdateActive = false
+}
+
+func (s *DirectionState) clearDrainState() {
+	s.previousKeyPhase = 0
+	s.previousMaterial = KeyMaterial{}
+	s.DrainUntil = time.Time{}
+	s.clearPendingSentUpdate()
+	s.clearLastReceivedUpdate()
+}
+
+func (s *DirectionState) expireDrain(now time.Time) {
+	if !s.DrainUntil.IsZero() && now.After(s.DrainUntil) {
+		s.clearDrainState()
+	}
+}
+
 func cloneKeyUpdateResult(in KeyUpdateResult) KeyUpdateResult {
 	out := KeyUpdateResult{
 		Next: cloneKeyMaterial(in.Next),
@@ -204,6 +265,19 @@ func cloneKeyUpdateResult(in KeyUpdateResult) KeyUpdateResult {
 		out.ACK = &ack
 	}
 	return out
+}
+
+func cloneKeyUpdate(in protocol.KeyUpdate) protocol.KeyUpdate {
+	return protocol.KeyUpdate{
+		RouteInstanceID: in.RouteInstanceID,
+		HopLayer:        in.HopLayer,
+		Direction:       in.Direction,
+		OldKeyPhase:     in.OldKeyPhase,
+		NewKeyPhase:     in.NewKeyPhase,
+		UpdateNonce:     append([]byte(nil), in.UpdateNonce...),
+		AckRequired:     in.AckRequired,
+		UpdateReason:    in.UpdateReason,
+	}
 }
 
 func cloneKeyMaterial(in KeyMaterial) KeyMaterial {

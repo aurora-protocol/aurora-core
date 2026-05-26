@@ -716,6 +716,71 @@ func TestDirectionStateKeepsOldReadMaterialOnlyUntilDrainExpiry(t *testing.T) {
 	}
 }
 
+func TestDirectionStateBoundsLostKeyUpdateACKRetransmission(t *testing.T) {
+	original := KeyMaterial{
+		AppSecret: bytesOf(0x81, 48),
+		Key:       bytesOf(0x82, 32),
+		IV:        bytesOf(0x83, 12),
+	}
+	state := DirectionState{
+		RouteInstanceID: 0x45,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        0,
+		Material:        original,
+	}
+	sent, err := state.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa5, 16), true, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retransmit, material, ok := state.PendingKeyUpdateRetransmission(time.Now())
+	if !ok {
+		t.Fatalf("lost-ACK KEY_UPDATE retransmission was unavailable during drain")
+	}
+	if retransmit.RouteInstanceID != sent.RouteInstanceID || retransmit.OldKeyPhase != sent.OldKeyPhase || retransmit.NewKeyPhase != sent.NewKeyPhase || !bytes.Equal(retransmit.UpdateNonce, sent.UpdateNonce) {
+		t.Fatalf("pending retransmission changed KEY_UPDATE: sent=%+v retransmit=%+v", sent, retransmit)
+	}
+	if !bytes.Equal(material.Key, original.Key) || !bytes.Equal(material.IV, original.IV) {
+		t.Fatalf("pending retransmission did not return old write material")
+	}
+	if err := state.ApplyKeyUpdateACK(protocol.KeyUpdateACK{
+		RouteInstanceID: 0x45,
+		HopLayer:        1,
+		AckedDirection:  0,
+		AckedKeyPhase:   1,
+		AckNonce:        bytesOf(0xb5, 16),
+	}, time.Now()); err != nil {
+		t.Fatalf("valid KEY_UPDATE_ACK rejected: %v", err)
+	}
+	if _, _, ok := state.PendingKeyUpdateRetransmission(time.Now()); ok {
+		t.Fatalf("KEY_UPDATE retransmission remained available after ACK")
+	}
+
+	state = DirectionState{
+		RouteInstanceID: 0x45,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        0,
+		Material:        original,
+	}
+	if _, err := state.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa6, 16), true, 1); err != nil {
+		t.Fatal(err)
+	}
+	state.DrainUntil = time.Now().Add(-time.Second)
+	if _, _, ok := state.PendingKeyUpdateRetransmission(time.Now()); ok {
+		t.Fatalf("lost-ACK KEY_UPDATE retransmission remained available after drain expiry")
+	}
+	if err := state.ApplyKeyUpdateACK(protocol.KeyUpdateACK{
+		RouteInstanceID: 0x45,
+		HopLayer:        1,
+		AckedDirection:  0,
+		AckedKeyPhase:   1,
+		AckNonce:        bytesOf(0xb6, 16),
+	}, time.Now()); err == nil {
+		t.Fatalf("stale KEY_UPDATE_ACK accepted after drain expiry")
+	}
+}
+
 func TestAuroraPacketEncodeDecode(t *testing.T) {
 	pkt := AuroraPacket{
 		RouteInstanceID: 9,

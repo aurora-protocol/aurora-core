@@ -76,5 +76,8 @@ jobs:
       - name: Check live server-client interop
         if: matrix.os == 'ubuntu-latest'
         run: go run ./cmd/auroractl client-check
+      - name: Check aggregate P0-P8 gates
+        if: matrix.os == 'ubuntu-latest'
+        run: go run ./cmd/auroractl p0-p8-check
       - name: Check cover-origin deployment harness
         run: go run ./cmd/auroractl cover-check

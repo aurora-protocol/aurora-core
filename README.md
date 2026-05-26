@@ -59,6 +59,7 @@ GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl issuerd-http-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl server-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl client-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl cover-check
+GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl p0-p8-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/aurorad --readiness-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/aurorad --listen 0.0.0.0:9443 --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem --cover-origin-url https://cover.example --spent-token-cache /var/lib/aurora/spent-token-cache.log --packet-mode tun
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl capabilities

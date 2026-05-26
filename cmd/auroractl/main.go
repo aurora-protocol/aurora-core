@@ -70,6 +70,8 @@ func main() {
 		err = serverCheck(os.Stdout)
 	case "client-check":
 		err = clientCheck(os.Stdout)
+	case "p0-p8-check":
+		err = p0P8Check(os.Stdout)
 	case "cover-check":
 		err = coverCheck(os.Stdout)
 	case "crypto-check":
@@ -100,7 +102,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|server-check|client-check|cover-check|crypto-check|wire-check|transport-check|flow-check|route-check|host-build-check [--portable|--apple-simulator|--all]|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|server-check|client-check|p0-p8-check|cover-check|crypto-check|wire-check|transport-check|flow-check|route-check|host-build-check [--portable|--apple-simulator|--all]|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -820,6 +822,82 @@ func clientCheck(w io.Writer) error {
 	}
 	if !report.Passed {
 		return fmt.Errorf("client-check failed live server-client interop")
+	}
+	return nil
+}
+
+type p0P8Gate struct {
+	Name string
+	Run  func(io.Writer) error
+}
+
+func p0P8Check(w io.Writer) error {
+	return runP0P8Check(w, defaultP0P8Gates())
+}
+
+func defaultP0P8Gates() []p0P8Gate {
+	return []p0P8Gate{
+		{Name: "host-build-portable", Run: func(w io.Writer) error { return hostBuildCheck([]string{"--portable"}, w) }},
+		{Name: "vectors-structural", Run: func(w io.Writer) error { return vectors([]string{"--check"}, w) }},
+		{Name: "vectors-real-crypto", Run: func(w io.Writer) error { return vectors([]string{"--real-crypto", "--check"}, w) }},
+		{Name: "vectors-negative", Run: func(w io.Writer) error { return vectors([]string{"--negative", "--check"}, w) }},
+		{Name: "negative-vectors", Run: negativeVectorsCheck},
+		{Name: "crypto", Run: cryptoCheck},
+		{Name: "wire", Run: wireCheck},
+		{Name: "transport", Run: transportCheck},
+		{Name: "flow", Run: flowCheck},
+		{Name: "route", Run: routeCheck},
+		{Name: "active-probes", Run: activeProbes},
+		{Name: "classifier", Run: classifierCheck},
+		{Name: "evaluation", Run: evaluationCheck},
+		{Name: "deployment-security", Run: deploymentSecurityCheck},
+		{Name: "platform", Run: platformCheck},
+		{Name: "packaging", Run: packagingCheck},
+		{Name: "release", Run: releaseCheck},
+		{Name: "proof", Run: proofCheck},
+		{Name: "issuer-ops", Run: issuerCheck},
+		{Name: "issuerd", Run: issuerDCheck},
+		{Name: "issuerd-http", Run: issuerDHTTPCheck},
+		{Name: "server", Run: serverCheck},
+		{Name: "client", Run: clientCheck},
+		{Name: "cover", Run: coverCheck},
+	}
+}
+
+func runP0P8Check(w io.Writer, gates []p0P8Gate) error {
+	failures := 0
+	for _, gate := range gates {
+		var output bytes.Buffer
+		err := gate.Run(&output)
+		passed := err == nil
+		if !passed {
+			failures++
+		}
+		if _, writeErr := fmt.Fprintf(w, "p0_p8_gate %s passed=%t\n", gate.Name, passed); writeErr != nil {
+			return writeErr
+		}
+		if output.Len() > 0 {
+			if _, writeErr := io.Copy(w, &output); writeErr != nil {
+				return writeErr
+			}
+			if !bytes.HasSuffix(output.Bytes(), []byte("\n")) {
+				if _, writeErr := fmt.Fprintln(w); writeErr != nil {
+					return writeErr
+				}
+			}
+		}
+		if err != nil {
+			if _, writeErr := fmt.Fprintf(w, "p0_p8_finding %s: %v\n", gate.Name, err); writeErr != nil {
+				return writeErr
+			}
+		}
+	}
+	passed := failures == 0
+	if _, err := fmt.Fprintf(w, "p0_p8_check passed=%t gates=%d failures=%d\n", passed, len(gates), failures); err != nil {
+		return err
+	}
+	if !passed {
+		return fmt.Errorf("p0-p8-check failed verification gates")
 	}
 	return nil
 }

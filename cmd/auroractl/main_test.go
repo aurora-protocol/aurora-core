@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -458,6 +460,66 @@ func TestCryptoCheckCommandPrintsProviderAgreement(t *testing.T) {
 	}
 }
 
+func TestP0P8CheckCommandAggregatesVerificationGates(t *testing.T) {
+	var out bytes.Buffer
+	checks := []p0P8Gate{
+		{
+			Name: "wire",
+			Run: func(w io.Writer) error {
+				fmt.Fprintln(w, "wire_check passed=true")
+				return nil
+			},
+		},
+		{
+			Name: "client",
+			Run: func(w io.Writer) error {
+				fmt.Fprintln(w, "client_check passed=true")
+				return nil
+			},
+		},
+	}
+
+	if err := runP0P8Check(&out, checks); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"p0_p8_gate wire passed=true",
+		"wire_check passed=true",
+		"p0_p8_gate client passed=true",
+		"client_check passed=true",
+		"p0_p8_check passed=true gates=2 failures=0",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("p0-p8-check output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestP0P8CheckCommandFailsWhenAnyGateFails(t *testing.T) {
+	var out bytes.Buffer
+	checks := []p0P8Gate{
+		{
+			Name: "wire",
+			Run: func(w io.Writer) error {
+				fmt.Fprintln(w, "wire_check passed=false")
+				return errors.New("wire failed")
+			},
+		},
+	}
+
+	err := runP0P8Check(&out, checks)
+	if err == nil {
+		t.Fatalf("p0-p8-check accepted failing gate")
+	}
+	text := out.String()
+	if !strings.Contains(text, "p0_p8_gate wire passed=false") ||
+		!strings.Contains(text, "p0_p8_finding wire: wire failed") ||
+		!strings.Contains(text, "p0_p8_check passed=false gates=1 failures=1") {
+		t.Fatalf("p0-p8-check failure output incomplete:\n%s", text)
+	}
+}
+
 func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	var out bytes.Buffer
 	capabilitiesReport(&out)
@@ -860,6 +922,7 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go run ./cmd/auroractl client-check",
 		"go run ./cmd/auroractl cover-check",
 		"go run ./cmd/auroractl packaging-check",
+		"go run ./cmd/auroractl p0-p8-check",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("CI workflow missing %q:\n%s", want, text)

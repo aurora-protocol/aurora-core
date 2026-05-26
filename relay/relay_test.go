@@ -1,7 +1,10 @@
 package relay
 
 import (
+	"bytes"
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -15,6 +18,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/failure"
 	coreflow "github.com/aurora-protocol/aurora-core/flow"
+	"github.com/aurora-protocol/aurora-core/ops"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	auroratrust "github.com/aurora-protocol/aurora-core/trust"
@@ -152,36 +156,82 @@ func TestAdmissionPolicyRejectsVOPRFWithoutVerifierService(t *testing.T) {
 	if err := (AdmissionPolicy{NowUnix: 20}).AllowsProof(proof); err == nil {
 		t.Fatalf("VOPRF proof accepted without verifier service")
 	}
-	service := protocol.IssuerVerifierServiceRecord{
-		ServiceID:             []byte("service-id-0001"),
-		ServiceKind:           registry.VerifierServiceKindVOPRF,
-		ServiceProtocolID:     registry.IssuerVerifierVOPRFMTLS13,
-		AllowedProofTypes:     []uint64{registry.ProofVOPRFP384SHA384},
-		AllowedRelayBucketIDs: [][]byte{proof.RelayBucketID},
-		RequestAuthPolicyID:   7,
-		ValidFromUnix:         10,
-		ValidUntilUnix:        30,
-		ServiceStatus:         registry.IssuerStatusActive,
-	}
+	service, _ := relayVerifierService(t, proof.RelayBucketID)
 	policy := AdmissionPolicy{
 		VerifierServices: []protocol.IssuerVerifierServiceRecord{service},
 		RequestAuth:      map[uint64]bool{7: true},
 		NowUnix:          20,
 	}
 	if err := policy.AllowsProof(proof); err == nil {
-		t.Fatalf("VOPRF proof accepted without verifier client")
+		t.Fatalf("proof-only VOPRF path accepted without replay-aware verifier service request")
 	}
-	verifier := &recordingVOPRFVerifier{}
-	policy.VOPRFVerifier = verifier
-	if err := policy.AllowsProof(proof); err != nil {
-		t.Fatalf("authorized VOPRF proof rejected: %v", err)
+}
+
+func TestAdmissionPolicyUsesVerifierServiceRequestForVOPRF(t *testing.T) {
+	admissionContextHash := bytesOf(0x14, 48)
+	issuerMetadataHash := bytesOf(0x91, 48)
+	proof := relayVOPRFAdmissionProof(t, issuerMetadataHash, admissionContextHash)
+	service, serviceSigner := relayVerifierService(t, proof.RelayBucketID)
+	transport := &recordingIssuerVerifierTransport{t: t, signer: serviceSigner}
+	tokenCache := admission.NewMemoryReplayCache()
+	policy := AdmissionPolicy{
+		VerifierServices: []protocol.IssuerVerifierServiceRecord{service},
+		RequestAuth:      map[uint64]bool{7: true},
+		NowUnix:          20,
+		VOPRFTransport:   transport,
 	}
-	if verifier.calls != 1 || string(verifier.serviceID) != string(service.ServiceID) {
-		t.Fatalf("VOPRF verifier was not called with matched service: %+v", verifier)
+	replay := relayReplayProof(t, proof, 77, 1, bytesOf(0x21, 48), admissionContextHash)
+	redemptionHash, err := admission.TokenRedemptionHash(proof)
+	if err != nil {
+		t.Fatal(err)
 	}
-	verifier.err = errors.New("bad token")
-	if err := policy.AllowsProof(proof); err == nil {
-		t.Fatalf("VOPRF verifier rejection was ignored")
+	err = policy.AllowsVerifierServiceAdmission(VerifierServiceAdmissionInput{
+		AdmissionProof:            proof,
+		ReplayProof:               replay,
+		IssuerMetadataHash:        issuerMetadataHash,
+		RelayDescriptorHash:       bytesOf(0x31, 48),
+		RouteInstanceID:           77,
+		HopIndex:                  1,
+		ReplayEpochValidUntilUnix: 800,
+		HandshakeBindingContext:   bytesOf(0x21, 48),
+		AdmissionContextHash:      admissionContextHash,
+		RequestNonce:              bytesOf(0x34, 32),
+		RequestTimeUnix:           20,
+		TokenSpentCache:           tokenCache,
+		BootstrapDedupCache:       admission.NewMemoryReplayCache(),
+	})
+	if err != nil {
+		t.Fatalf("verifier-service VOPRF admission rejected: %v", err)
+	}
+	if transport.calls != 1 {
+		t.Fatalf("verifier transport calls = %d, want 1", transport.calls)
+	}
+	if !bytes.Equal(transport.request.TokenSpentKey, transport.response.TokenSpentKey) {
+		t.Fatalf("verifier response token_spent_key did not use relayed request")
+	}
+	replay.ClientReplayNonce = bytesOf(0x42, 32)
+	replayHash, err := admission.ReplayContextHash(redemptionHash, replay, 77, 1, bytesOf(0x21, 48), admissionContextHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay.ReplayContextHash = replayHash
+	err = policy.AllowsVerifierServiceAdmission(VerifierServiceAdmissionInput{
+		AdmissionProof:            proof,
+		ReplayProof:               replay,
+		IssuerMetadataHash:        issuerMetadataHash,
+		RelayDescriptorHash:       bytesOf(0x31, 48),
+		RouteInstanceID:           77,
+		HopIndex:                  1,
+		ReplayEpochValidUntilUnix: 800,
+		HandshakeBindingContext:   bytesOf(0x21, 48),
+		AdmissionContextHash:      admissionContextHash,
+		RequestNonce:              bytesOf(0x35, 32),
+		RequestTimeUnix:           21,
+		TokenSpentCache:           tokenCache,
+		BootstrapDedupCache:       admission.NewMemoryReplayCache(),
+	})
+	if err == nil {
+		t.Fatalf("replayed VOPRF token with changed replay nonce accepted")
 	}
 }
 
@@ -283,16 +333,41 @@ func (v *recordingBlindRSAVerifier) VerifyBlindRSA2048(_ protocol.AdmissionProof
 	return v.err
 }
 
-type recordingVOPRFVerifier struct {
-	calls     int
-	serviceID []byte
-	err       error
+type recordingIssuerVerifierTransport struct {
+	t        *testing.T
+	signer   *ecdsa.PrivateKey
+	calls    int
+	request  protocol.IssuerVerifierRequest
+	response protocol.IssuerVerifierResponse
 }
 
-func (v *recordingVOPRFVerifier) VerifyVOPRF(_ protocol.AdmissionProof, service protocol.IssuerVerifierServiceRecord) error {
+func (v *recordingIssuerVerifierTransport) ExchangeIssuerVerifier(service protocol.IssuerVerifierServiceRecord, req protocol.IssuerVerifierRequest) (protocol.IssuerVerifierResponse, error) {
+	v.t.Helper()
 	v.calls++
-	v.serviceID = append([]byte(nil), service.ServiceID...)
-	return v.err
+	v.request = req
+	requestHash, err := ops.IssuerVerifierRequestHash(req)
+	if err != nil {
+		v.t.Fatal(err)
+	}
+	resp := protocol.IssuerVerifierResponse{
+		ResponseVersion: registry.Version20,
+		ServiceID:       append([]byte(nil), service.ServiceID...),
+		RequestHash:     requestHash,
+		Decision:        registry.VerifierDecisionAccept,
+		TokenSpentKey:   append([]byte(nil), req.TokenSpentKey...),
+		ValidUntilUnix:  req.RequestTimeUnix + 100,
+		ResponseNonce:   bytesOf(0x40, 32),
+	}
+	input, err := auroratrust.IssuerVerifierResponseSignatureInput(requestHash, resp)
+	if err != nil {
+		v.t.Fatal(err)
+	}
+	resp.ServiceSignature, err = ecdsa.SignASN1(rand.Reader, v.signer, input)
+	if err != nil {
+		v.t.Fatal(err)
+	}
+	v.response = resp
+	return resp, nil
 }
 
 func TestOriginPassThroughForwardsVerbatim(t *testing.T) {
@@ -444,6 +519,85 @@ func relayAdmissionProof(proofType uint64) protocol.AdmissionProof {
 		proof.TokenPublicMetadata = relayTokenMetadataForProof(proof)
 	}
 	return proof
+}
+
+func relayVOPRFAdmissionProof(t *testing.T, issuerMetadataHash, admissionContextHash []byte) protocol.AdmissionProof {
+	t.Helper()
+	proof := relayAdmissionProof(registry.ProofVOPRFP384SHA384)
+	proof.RedemptionContextHash = append([]byte(nil), admissionContextHash...)
+	issuerName := []byte("issuer.example")
+	originInfo := []byte("origin.example")
+	challengeDigest, err := admission.RFC9577TokenChallengeDigest(proof.ProofType, issuerName, originInfo, proof.RedemptionContextHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := protocol.AuroraTokenMetadata{
+		RFC9577TokenType:       uint16(proof.ProofType),
+		RFC9577ChallengeDigest: challengeDigest,
+		RFC9577TokenKeyID:      append([]byte(nil), proof.TokenKeyID...),
+		IssuerName:             issuerName,
+		OriginInfo:             originInfo,
+		IssuerMetadataHash:     append([]byte(nil), issuerMetadataHash...),
+	}
+	encoded, err := protocol.Encode(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof.TokenPublicMetadata = encoded
+	return proof
+}
+
+func relayReplayProof(t *testing.T, proof protocol.AdmissionProof, routeInstanceID uint64, hopIndex uint8, handshakeBinding, admissionContextHash []byte) protocol.ReplayProof {
+	t.Helper()
+	redemptionHash, err := admission.TokenRedemptionHash(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay := protocol.ReplayProof{
+		ProofVersion:        registry.Version20,
+		TokenRedemptionHash: redemptionHash,
+		ClientReplayNonce:   bytesOf(0x15, 32),
+		ReplayEpochID:       22,
+		ReplayWindowID:      bytesOf(0x16, 16),
+	}
+	replay.ReplayContextHash, err = admission.ReplayContextHash(redemptionHash, replay, routeInstanceID, hopIndex, handshakeBinding, admissionContextHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return replay
+}
+
+func relayVerifierService(t *testing.T, relayBucketID []byte) (protocol.IssuerVerifierServiceRecord, *ecdsa.PrivateKey) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return protocol.IssuerVerifierServiceRecord{
+		ServiceID:         []byte("service-id-00001"),
+		ServiceKind:       registry.VerifierServiceKindVOPRF,
+		ServiceProtocolID: registry.IssuerVerifierVOPRFMTLS13,
+		ServiceLocator: protocol.RoutingRecord{
+			RoutingRecordID:   bytesOf(0x70, 16),
+			TransportFamilyID: registry.IssuerVerifierVOPRFMTLS13,
+			LocatorType:       registry.LocatorAuthority,
+			LocatorBody:       []byte("verifier.example:443"),
+			Priority:          1,
+			NotBeforeUnix:     10,
+			NotAfterUnix:      900,
+		},
+		ServiceAuthKey: protocol.PublicKeyRecord{
+			SignatureScheme: registry.SigECDSAP256SHA384DER,
+			KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+			PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+		},
+		AllowedProofTypes:     []uint64{registry.ProofVOPRFP384SHA384},
+		AllowedRelayBucketIDs: [][]byte{append([]byte(nil), relayBucketID...)},
+		RequestAuthPolicyID:   7,
+		ValidFromUnix:         10,
+		ValidUntilUnix:        900,
+		ServiceStatus:         registry.IssuerStatusActive,
+	}, priv
 }
 
 func relayTokenMetadataForProof(proof protocol.AdmissionProof) []byte {

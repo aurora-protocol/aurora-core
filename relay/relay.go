@@ -7,6 +7,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/failure"
 	coreflow "github.com/aurora-protocol/aurora-core/flow"
+	"github.com/aurora-protocol/aurora-core/ops"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/wire"
@@ -386,7 +387,7 @@ func addrFromFlowTarget(kind uint8, host []byte) (netip.Addr, bool) {
 type AdmissionPolicy struct {
 	VerifierServices []protocol.IssuerVerifierServiceRecord
 	BlindRSAVerifier BlindRSAVerifier
-	VOPRFVerifier    VOPRFVerifier
+	VOPRFTransport   ops.IssuerVerifierTransport
 	RequestAuth      map[uint64]bool
 	NowUnix          uint64
 }
@@ -413,8 +414,22 @@ func (v MetadataBlindRSAVerifier) VerifyBlindRSA2048(proof protocol.AdmissionPro
 	return nil
 }
 
-type VOPRFVerifier interface {
-	VerifyVOPRF(protocol.AdmissionProof, protocol.IssuerVerifierServiceRecord) error
+type VerifierServiceAdmissionInput struct {
+	AdmissionProof            protocol.AdmissionProof
+	ReplayProof               protocol.ReplayProof
+	IssuerMetadataHash        []byte
+	RelayDescriptorHash       []byte
+	RouteInstanceID           uint64
+	HopIndex                  uint8
+	ReplayEpochValidUntilUnix uint64
+	HandshakeBindingContext   []byte
+	AdmissionContextHash      []byte
+	ChallengeDigest           []byte
+	AuthenticatorInputHash    []byte
+	RequestNonce              []byte
+	RequestTimeUnix           uint64
+	TokenSpentCache           *admission.MemoryReplayCache
+	BootstrapDedupCache       *admission.MemoryReplayCache
 }
 
 func (p AdmissionPolicy) AllowsProof(proof protocol.AdmissionProof) error {
@@ -428,24 +443,64 @@ func (p AdmissionPolicy) AllowsProof(proof protocol.AdmissionProof) error {
 		}
 		return p.BlindRSAVerifier.VerifyBlindRSA2048(proof)
 	case registry.ProofVOPRFP384SHA384:
-		matches := 0
-		var matched protocol.IssuerVerifierServiceRecord
-		for _, service := range p.VerifierServices {
-			if err := service.Allows(proof.ProofType, proof.RelayBucketID, p.NowUnix, p.RequestAuth[service.RequestAuthPolicyID]); err == nil {
-				matches++
-				matched = service
-			}
-		}
-		if matches != 1 {
-			return fmt.Errorf("relay: VOPRF proof requires exactly one authorized issuer verifier service")
-		}
-		if p.VOPRFVerifier == nil {
-			return fmt.Errorf("relay: VOPRF proof requires verifier client")
-		}
-		return p.VOPRFVerifier.VerifyVOPRF(proof, matched)
+		return fmt.Errorf("relay: VOPRF proof requires verifier-service replay context")
 	case registry.ProofLabStaticToken:
 		return fmt.Errorf("relay: lab admission proof disabled")
 	default:
 		return fmt.Errorf("relay: unsupported admission proof type 0x%x", proof.ProofType)
 	}
+}
+
+func (p AdmissionPolicy) AllowsVerifierServiceAdmission(in VerifierServiceAdmissionInput) error {
+	if err := in.AdmissionProof.ValidateStructural(p.NowUnix, false); err != nil {
+		return err
+	}
+	if in.AdmissionProof.ProofType != registry.ProofVOPRFP384SHA384 {
+		return fmt.Errorf("relay: verifier service admission requires VOPRF proof")
+	}
+	service, err := p.selectVOPRFVerifierService(in.AdmissionProof)
+	if err != nil {
+		return err
+	}
+	if p.VOPRFTransport == nil {
+		return failure.NewError(failure.VerifierUnavailable, "relay: VOPRF proof requires verifier service transport")
+	}
+	return ops.VerifyIssuerVerifierService(ops.IssuerVerifierServiceVerificationInput{
+		Request: ops.IssuerVerifierRequestInput{
+			Service:                   service,
+			AdmissionProof:            in.AdmissionProof,
+			ReplayProof:               in.ReplayProof,
+			IssuerMetadataHash:        append([]byte(nil), in.IssuerMetadataHash...),
+			RelayDescriptorHash:       append([]byte(nil), in.RelayDescriptorHash...),
+			RouteInstanceID:           in.RouteInstanceID,
+			HopIndex:                  in.HopIndex,
+			ReplayEpochValidUntilUnix: in.ReplayEpochValidUntilUnix,
+			HandshakeBindingContext:   append([]byte(nil), in.HandshakeBindingContext...),
+			AdmissionContextHash:      append([]byte(nil), in.AdmissionContextHash...),
+			ChallengeDigest:           append([]byte(nil), in.ChallengeDigest...),
+			AuthenticatorInputHash:    append([]byte(nil), in.AuthenticatorInputHash...),
+			TokenSpentCache:           in.TokenSpentCache,
+			BootstrapDedupCache:       in.BootstrapDedupCache,
+			RequestNonce:              append([]byte(nil), in.RequestNonce...),
+			RequestTimeUnix:           in.RequestTimeUnix,
+			NowUnix:                   p.NowUnix,
+			RequestAuthImplemented:    p.RequestAuth[service.RequestAuthPolicyID],
+		},
+		Transport: p.VOPRFTransport,
+	})
+}
+
+func (p AdmissionPolicy) selectVOPRFVerifierService(proof protocol.AdmissionProof) (protocol.IssuerVerifierServiceRecord, error) {
+	matches := 0
+	var matched protocol.IssuerVerifierServiceRecord
+	for _, service := range p.VerifierServices {
+		if err := service.Allows(proof.ProofType, proof.RelayBucketID, p.NowUnix, p.RequestAuth[service.RequestAuthPolicyID]); err == nil {
+			matches++
+			matched = service
+		}
+	}
+	if matches != 1 {
+		return protocol.IssuerVerifierServiceRecord{}, fmt.Errorf("relay: VOPRF proof requires exactly one authorized issuer verifier service")
+	}
+	return matched, nil
 }

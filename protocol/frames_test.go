@@ -136,6 +136,99 @@ func TestUDPTargetConfirmEncodesFullPayload(t *testing.T) {
 	}
 }
 
+func TestKeyUpdateControlPayloadsRoundTrip(t *testing.T) {
+	ack := KeyUpdateACK{
+		RouteInstanceID: 9,
+		HopLayer:        1,
+		AckedDirection:  0,
+		AckedKeyPhase:   2,
+		AckNonce:        bytes.Repeat([]byte{0x44}, 16),
+	}
+	encodedACK, err := Encode(ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotACK := DecodeKeyUpdateACK(bytesReader(encodedACK))
+	if gotACK.RouteInstanceID != ack.RouteInstanceID || gotACK.HopLayer != ack.HopLayer || gotACK.AckedDirection != ack.AckedDirection || gotACK.AckedKeyPhase != ack.AckedKeyPhase || !bytes.Equal(gotACK.AckNonce, ack.AckNonce) {
+		t.Fatalf("decoded KEY_UPDATE_ACK mismatch: %+v", gotACK)
+	}
+
+	req := KeyUpdateRequest{
+		RouteInstanceID:    10,
+		HopLayer:           2,
+		RequestedDirection: 1,
+		RequestNonce:       bytes.Repeat([]byte{0x55}, 16),
+		RequestReason:      3,
+	}
+	encodedReq, err := Encode(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotReq := DecodeKeyUpdateRequest(bytesReader(encodedReq))
+	if gotReq.RouteInstanceID != req.RouteInstanceID || gotReq.HopLayer != req.HopLayer || gotReq.RequestedDirection != req.RequestedDirection || gotReq.RequestReason != req.RequestReason || !bytes.Equal(gotReq.RequestNonce, req.RequestNonce) {
+		t.Fatalf("decoded KEY_UPDATE_REQUEST mismatch: %+v", gotReq)
+	}
+}
+
+func TestRouteControlPayloadsRoundTrip(t *testing.T) {
+	forward := RouteForwardFrame{
+		RouteInstanceID:                11,
+		HopIndex:                       1,
+		NextRelayDescriptorHash:        bytes.Repeat([]byte{0x66}, 48),
+		PreviousHopRelayDescriptorHash: bytes.Repeat([]byte{0x77}, 48),
+		NextRelayRoutingRecordID:       bytes.Repeat([]byte{0x88}, 16),
+		NextRelayLocatorType:           registry.LocatorAuthority,
+		NextRelayLocator:               []byte("next.example"),
+		OpaqueNextHopPrelude:           []byte("sealed"),
+	}
+	encodedForward, err := Encode(forward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotForward := DecodeRouteForwardFrame(bytesReader(encodedForward))
+	if gotForward.RouteInstanceID != forward.RouteInstanceID || gotForward.HopIndex != forward.HopIndex || gotForward.NextRelayLocatorType != forward.NextRelayLocatorType {
+		t.Fatalf("decoded route forward scalar mismatch: %+v", gotForward)
+	}
+	if !bytes.Equal(gotForward.NextRelayDescriptorHash, forward.NextRelayDescriptorHash) ||
+		!bytes.Equal(gotForward.PreviousHopRelayDescriptorHash, forward.PreviousHopRelayDescriptorHash) ||
+		!bytes.Equal(gotForward.NextRelayRoutingRecordID, forward.NextRelayRoutingRecordID) ||
+		!bytes.Equal(gotForward.NextRelayLocator, forward.NextRelayLocator) ||
+		!bytes.Equal(gotForward.OpaqueNextHopPrelude, forward.OpaqueNextHopPrelude) {
+		t.Fatalf("decoded route forward bytes mismatch: %+v", gotForward)
+	}
+
+	envelope := RoutePreludeEnvelope{
+		RouteInstanceID:                12,
+		HopIndex:                       2,
+		PreviousHopRelayDescriptorHash: bytes.Repeat([]byte{0x99}, 48),
+		NextRelayDescriptorHash:        bytes.Repeat([]byte{0xaa}, 48),
+		HintIssuerID:                   bytes.Repeat([]byte{0xbb}, 16),
+		RelayBucketID:                  bytes.Repeat([]byte{0xcc}, 16),
+		HintEpochID:                    1700000000,
+		HintSelector:                   bytes.Repeat([]byte{0xdd}, 16),
+		WrapSuiteID:                    registry.WrapSuiteRouteV1,
+		WrapNonce:                      bytes.Repeat([]byte{0xee}, 16),
+		SealedRoutePrelude0:            []byte("route-prelude"),
+	}
+	encodedEnvelope, err := Encode(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotEnvelope := DecodeRoutePreludeEnvelope(bytesReader(encodedEnvelope))
+	if gotEnvelope.RouteInstanceID != envelope.RouteInstanceID || gotEnvelope.HopIndex != envelope.HopIndex || gotEnvelope.HintEpochID != envelope.HintEpochID || gotEnvelope.WrapSuiteID != envelope.WrapSuiteID {
+		t.Fatalf("decoded route prelude envelope scalar mismatch: %+v", gotEnvelope)
+	}
+	if !bytes.Equal(gotEnvelope.PreviousHopRelayDescriptorHash, envelope.PreviousHopRelayDescriptorHash) ||
+		!bytes.Equal(gotEnvelope.NextRelayDescriptorHash, envelope.NextRelayDescriptorHash) ||
+		!bytes.Equal(gotEnvelope.HintIssuerID, envelope.HintIssuerID) ||
+		!bytes.Equal(gotEnvelope.RelayBucketID, envelope.RelayBucketID) ||
+		!bytes.Equal(gotEnvelope.HintSelector, envelope.HintSelector) ||
+		!bytes.Equal(gotEnvelope.WrapNonce, envelope.WrapNonce) ||
+		!bytes.Equal(gotEnvelope.SealedRoutePrelude0, envelope.SealedRoutePrelude0) {
+		t.Fatalf("decoded route prelude envelope bytes mismatch: %+v", gotEnvelope)
+	}
+}
+
 func TestNewUDPTargetConfirmFrameValidatesAndCopiesPayload(t *testing.T) {
 	selectedIP := []byte{203, 0, 113, 10}
 	hash := bytes.Repeat([]byte{0xbb}, 48)

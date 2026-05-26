@@ -195,6 +195,16 @@ func (a KeyUpdateACK) EncodeTo(e *wire.Encoder) {
 	e.WriteOpaque16(a.AckNonce)
 }
 
+func DecodeKeyUpdateACK(r *wire.Reader) KeyUpdateACK {
+	return KeyUpdateACK{
+		RouteInstanceID: r.ReadVarint(),
+		HopLayer:        r.ReadUint8(),
+		AckedDirection:  r.ReadUint8(),
+		AckedKeyPhase:   r.ReadUint8(),
+		AckNonce:        r.ReadOpaque16(),
+	}
+}
+
 type KeyUpdateRequest struct {
 	RouteInstanceID    uint64
 	HopLayer           uint8
@@ -209,6 +219,16 @@ func (r KeyUpdateRequest) EncodeTo(e *wire.Encoder) {
 	e.WriteUint8(r.RequestedDirection)
 	e.WriteOpaque16(r.RequestNonce)
 	e.WriteVarint(r.RequestReason)
+}
+
+func DecodeKeyUpdateRequest(r *wire.Reader) KeyUpdateRequest {
+	return KeyUpdateRequest{
+		RouteInstanceID:    r.ReadVarint(),
+		HopLayer:           r.ReadUint8(),
+		RequestedDirection: r.ReadUint8(),
+		RequestNonce:       r.ReadOpaque16(),
+		RequestReason:      r.ReadVarint(),
+	}
 }
 
 type FlowOpen struct {
@@ -504,6 +524,19 @@ func (f RouteForwardFrame) EncodeTo(e *wire.Encoder) {
 	e.WriteOpaque24(f.OpaqueNextHopPrelude)
 }
 
+func DecodeRouteForwardFrame(r *wire.Reader) RouteForwardFrame {
+	return RouteForwardFrame{
+		RouteInstanceID:                r.ReadVarint(),
+		HopIndex:                       r.ReadUint8(),
+		NextRelayDescriptorHash:        r.ReadPreHash(),
+		PreviousHopRelayDescriptorHash: r.ReadPreHash(),
+		NextRelayRoutingRecordID:       r.ReadOpaque16(),
+		NextRelayLocatorType:           r.ReadVarint(),
+		NextRelayLocator:               r.ReadOpaque16(),
+		OpaqueNextHopPrelude:           r.ReadOpaque24(),
+	}
+}
+
 type RoutePreludeEnvelope struct {
 	RouteInstanceID                uint64
 	HopIndex                       uint8
@@ -530,4 +563,20 @@ func (r RoutePreludeEnvelope) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(r.WrapSuiteID)
 	e.WriteOpaqueFixed(r.WrapNonce, 16)
 	e.WriteOpaque24(r.SealedRoutePrelude0)
+}
+
+func DecodeRoutePreludeEnvelope(r *wire.Reader) RoutePreludeEnvelope {
+	return RoutePreludeEnvelope{
+		RouteInstanceID:                r.ReadVarint(),
+		HopIndex:                       r.ReadUint8(),
+		PreviousHopRelayDescriptorHash: r.ReadPreHash(),
+		NextRelayDescriptorHash:        r.ReadPreHash(),
+		HintIssuerID:                   r.ReadOpaqueFixed(16),
+		RelayBucketID:                  r.ReadOpaqueFixed(16),
+		HintEpochID:                    r.ReadUint64(),
+		HintSelector:                   r.ReadOpaqueFixed(16),
+		WrapSuiteID:                    r.ReadVarint(),
+		WrapNonce:                      r.ReadOpaqueFixed(16),
+		SealedRoutePrelude0:            r.ReadOpaque24(),
+	}
 }

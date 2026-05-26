@@ -106,6 +106,11 @@ type DirectionState struct {
 }
 
 func (s *DirectionState) InitiateUpdate(suite uint64, updateNonce []byte, ackRequired bool, reason uint64) (protocol.KeyUpdate, error) {
+	now := time.Now()
+	s.expireDrain(now)
+	if s.drainActive(now) {
+		return protocol.KeyUpdate{}, fmt.Errorf("packet: KEY_UPDATE already in drain window")
+	}
 	frame := protocol.KeyUpdate{
 		RouteInstanceID: s.RouteInstanceID,
 		HopLayer:        s.HopLayer,
@@ -124,7 +129,7 @@ func (s *DirectionState) InitiateUpdate(suite uint64, updateNonce []byte, ackReq
 	s.previousMaterial = cloneKeyMaterial(s.Material)
 	s.KeyPhase = frame.NewKeyPhase
 	s.Material = next
-	s.DrainUntil = time.Now().Add(MaxDrainWindow)
+	s.DrainUntil = now.Add(MaxDrainWindow)
 	s.clearLastReceivedUpdate()
 	if frame.AckRequired {
 		s.pendingSentUpdate = cloneKeyUpdate(frame)
@@ -253,6 +258,10 @@ func (s *DirectionState) expireDrain(now time.Time) {
 	if !s.DrainUntil.IsZero() && now.After(s.DrainUntil) {
 		s.clearDrainState()
 	}
+}
+
+func (s *DirectionState) drainActive(now time.Time) bool {
+	return !s.DrainUntil.IsZero() && !now.After(s.DrainUntil)
 }
 
 func cloneKeyUpdateResult(in KeyUpdateResult) KeyUpdateResult {

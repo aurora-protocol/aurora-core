@@ -851,6 +851,43 @@ func TestDirectionStateBoundsLostKeyUpdateACKRetransmission(t *testing.T) {
 	}
 }
 
+func TestDirectionStateRejectsOverlappingWriteKeyUpdates(t *testing.T) {
+	original := KeyMaterial{
+		AppSecret: bytesOf(0x91, 48),
+		Key:       bytesOf(0x92, 32),
+		IV:        bytesOf(0x93, 12),
+	}
+	state := DirectionState{
+		RouteInstanceID: 0x46,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        0,
+		Material:        original,
+	}
+	first, err := state.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa7, 16), true, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	phase1Material := cloneKeyMaterial(state.Material)
+	if _, err := state.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa8, 16), true, 1); err == nil {
+		t.Fatalf("second KEY_UPDATE was initiated while phase %d was still draining", first.OldKeyPhase)
+	}
+	if state.KeyPhase != 1 || !bytes.Equal(state.Material.AppSecret, phase1Material.AppSecret) {
+		t.Fatalf("rejected overlapping update mutated active state: %+v", state)
+	}
+	if retransmit, _, ok := state.PendingKeyUpdateRetransmission(time.Now()); !ok || !bytes.Equal(retransmit.UpdateNonce, first.UpdateNonce) {
+		t.Fatalf("rejected overlapping update replaced pending retransmission: %+v ok=%v", retransmit, ok)
+	}
+	state.DrainUntil = time.Now().Add(-time.Second)
+	second, err := state.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa9, 16), false, 1)
+	if err != nil {
+		t.Fatalf("second KEY_UPDATE after drain expiry was rejected: %v", err)
+	}
+	if second.OldKeyPhase != 1 || second.NewKeyPhase != 2 || state.KeyPhase != 2 {
+		t.Fatalf("second KEY_UPDATE used wrong phases: frame=%+v state=%+v", second, state)
+	}
+}
+
 func TestAuroraPacketEncodeDecode(t *testing.T) {
 	pkt := AuroraPacket{
 		RouteInstanceID: 9,

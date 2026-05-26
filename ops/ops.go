@@ -103,6 +103,9 @@ type IssuerVerifierRequestInput struct {
 }
 
 func BuildIssuerVerifierRequest(in IssuerVerifierRequestInput) (protocol.IssuerVerifierRequest, []byte, error) {
+	if err := in.AdmissionProof.ValidateStructural(in.NowUnix, false); err != nil {
+		return protocol.IssuerVerifierRequest{}, nil, err
+	}
 	if err := in.Service.Allows(in.AdmissionProof.ProofType, in.AdmissionProof.RelayBucketID, in.NowUnix, in.RequestAuthImplemented); err != nil {
 		return protocol.IssuerVerifierRequest{}, nil, err
 	}

@@ -119,6 +119,50 @@ func TestBuildIssuerVerifierRequestRecomputesTokenSpentKey(t *testing.T) {
 	}
 }
 
+func TestBuildIssuerVerifierRequestRejectsStructurallyInvalidAdmissionProof(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mutate func(*protocol.AdmissionProof)
+		now    uint64
+	}{
+		"expired": {
+			mutate: func(*protocol.AdmissionProof) {},
+			now:    500,
+		},
+		"unsupported version": {
+			mutate: func(proof *protocol.AdmissionProof) {
+				proof.ProofVersion = 0
+			},
+			now: 100,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			service := verifierServiceRecord()
+			proof, replay, admissionContextHash, handshakeBinding := verifierProofReplay(t)
+			tc.mutate(&proof)
+			if _, _, err := BuildIssuerVerifierRequest(IssuerVerifierRequestInput{
+				Service:                   service,
+				AdmissionProof:            proof,
+				ReplayProof:               replay,
+				IssuerMetadataHash:        rb(0x30, 48),
+				RelayDescriptorHash:       rb(0x31, 48),
+				RouteInstanceID:           77,
+				HopIndex:                  1,
+				ReplayEpochValidUntilUnix: 800,
+				HandshakeBindingContext:   handshakeBinding,
+				AdmissionContextHash:      admissionContextHash,
+				ChallengeDigest:           rb(0x32, 32),
+				AuthenticatorInputHash:    rb(0x33, 48),
+				RequestNonce:              rb(0x34, 32),
+				RequestTimeUnix:           tc.now,
+				NowUnix:                   tc.now,
+				RequestAuthImplemented:    true,
+			}); err == nil {
+				t.Fatalf("verifier request built from structurally invalid admission proof")
+			}
+		})
+	}
+}
+
 func TestValidateIssuerVerifierResponseRequiresFreshMatchingAccept(t *testing.T) {
 	service := verifierServiceRecord()
 	proof, replay, admissionContextHash, handshakeBinding := verifierProofReplay(t)
@@ -201,6 +245,7 @@ func verifierProofReplay(t *testing.T) (protocol.AdmissionProof, protocol.Replay
 	admissionContextHash := rb(0x20, 48)
 	handshakeBinding := rb(0x21, 48)
 	proof := protocol.AdmissionProof{
+		ProofVersion:          registry.Version20,
 		ProofType:             registry.ProofVOPRFP384SHA384,
 		IssuerID:              rb(0x10, 16),
 		TokenKeyID:            rb(0x11, 32),

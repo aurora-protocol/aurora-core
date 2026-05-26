@@ -150,6 +150,12 @@ func (f *DNSForwarder) AnswerLocalAQuery(flowID uint64, query []byte, answers []
 	}
 	answer, err := f.ResolveFakeA(domain, answers, now)
 	if err != nil {
+		if errors.Is(err, ErrNegativeCached) {
+			return LocalDNSResult{
+				Response: negativeDNSResponse(query, questionEnd),
+				Answer:   SyntheticAnswer{Domain: domain},
+			}, nil
+		}
 		return LocalDNSResult{}, err
 	}
 	frame, err := f.EncryptedDNSFrame(flowID, query)
@@ -254,6 +260,17 @@ func syntheticAResponse(query []byte, questionEnd int, fakeIP string) ([]byte, e
 	out = binary.BigEndian.AppendUint16(out, 4)
 	out = append(out, ip...)
 	return out, nil
+}
+
+func negativeDNSResponse(query []byte, questionEnd int) []byte {
+	out := make([]byte, questionEnd)
+	copy(out, query[:questionEnd])
+	binary.BigEndian.PutUint16(out[2:4], 0x8183)
+	binary.BigEndian.PutUint16(out[4:6], 1)
+	binary.BigEndian.PutUint16(out[6:8], 0)
+	binary.BigEndian.PutUint16(out[8:10], 0)
+	binary.BigEndian.PutUint16(out[10:12], 0)
+	return out
 }
 
 func joinDNSLabels(labels []string) string {

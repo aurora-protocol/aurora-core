@@ -172,6 +172,65 @@ func TestDNSForwarderAnswersLocalAQueryWithFakeIPAndEncryptedFrame(t *testing.T)
 	}
 }
 
+func TestDNSForwarderAnswersNegativeCachedLocalAQueryWithoutFrame(t *testing.T) {
+	f := NewDNSForwarder(DNSForwarderOptions{FakeIPCIDR: "198.18.0.0/15"})
+	f.AddNegative("Missing.Example.", 100, 30)
+	query := dnsQuestion(0x1237, "Missing.Example", 1)
+
+	result, err := f.AnswerLocalAQuery(94, query, []string{"93.184.216.34"}, 110)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Frame.FrameType != 0 || result.Frame.FlowID != 0 || len(result.Frame.Payload) != 0 {
+		t.Fatalf("negative-cache DNS query emitted an Aurora frame: %+v", result.Frame)
+	}
+	if result.Answer.Domain != "missing.example" || result.Answer.FakeIP != "" {
+		t.Fatalf("negative-cache DNS result allocated a fake IP: %+v", result.Answer)
+	}
+	response := result.Response
+	if len(response) != len(query) {
+		t.Fatalf("negative-cache response length = %d, want original question length %d: %x", len(response), len(query), response)
+	}
+	if binary.BigEndian.Uint16(response[0:2]) != 0x1237 {
+		t.Fatalf("negative-cache response changed query id: %x", response[:2])
+	}
+	if flags := binary.BigEndian.Uint16(response[2:4]); flags != 0x8183 {
+		t.Fatalf("negative-cache response flags = 0x%x, want NXDOMAIN response", flags)
+	}
+	if qd, an := binary.BigEndian.Uint16(response[4:6]), binary.BigEndian.Uint16(response[6:8]); qd != 1 || an != 0 {
+		t.Fatalf("negative-cache response counts qd=%d an=%d", qd, an)
+	}
+	if ns, ar := binary.BigEndian.Uint16(response[8:10]), binary.BigEndian.Uint16(response[10:12]); ns != 0 || ar != 0 {
+		t.Fatalf("negative-cache response leaked authority/additional records ns=%d ar=%d", ns, ar)
+	}
+	if !bytes.Equal(response[12:], query[12:]) {
+		t.Fatalf("negative-cache response did not preserve the original question")
+	}
+}
+
+func TestDNSForwarderExpiresNegativeCachedLocalAQuery(t *testing.T) {
+	f := NewDNSForwarder(DNSForwarderOptions{FakeIPCIDR: "198.18.0.0/15"})
+	f.AddNegative("Missing.Example.", 100, 30)
+	query := dnsQuestion(0x1238, "Missing.Example", 1)
+
+	result, err := f.AnswerLocalAQuery(95, query, []string{"93.184.216.34"}, 131)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Frame.FrameType != registry.FrameDNSMessage || result.Frame.FlowID != 95 || !bytes.Equal(result.Frame.Payload, query) {
+		t.Fatalf("expired negative-cache query was not forwarded in a DNS frame: %+v", result.Frame)
+	}
+	if result.Answer.Domain != "missing.example" || result.Answer.FakeIP == "" {
+		t.Fatalf("expired negative-cache query did not allocate a fake IP: %+v", result.Answer)
+	}
+	if flags := binary.BigEndian.Uint16(result.Response[2:4]); flags != 0x8180 {
+		t.Fatalf("expired negative-cache response flags = 0x%x, want standard no-error response", flags)
+	}
+	if qd, an := binary.BigEndian.Uint16(result.Response[4:6]), binary.BigEndian.Uint16(result.Response[6:8]); qd != 1 || an != 1 {
+		t.Fatalf("expired negative-cache response counts qd=%d an=%d", qd, an)
+	}
+}
+
 func TestDNSForwarderRejectsUnsupportedLocalDNSQuestion(t *testing.T) {
 	f := NewDNSForwarder(DNSForwarderOptions{})
 	if _, err := f.AnswerLocalAQuery(92, dnsQuestion(0x1235, "example.com", 28), []string{"93.184.216.34"}, 100); err == nil {

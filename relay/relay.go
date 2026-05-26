@@ -228,6 +228,8 @@ type ExitFlowHandler struct {
 	flows *coreflow.Manager
 }
 
+const maxUDPConfirmTTLSeconds uint32 = 86400
+
 func NewExitFlowHandler(policy ExitPolicy) *ExitFlowHandler {
 	return &ExitFlowHandler{
 		Policy:               policy,
@@ -252,9 +254,10 @@ func (h *ExitFlowHandler) HandleFlowOpenFrame(frame protocol.AuroraFrame, now ui
 	if err != nil {
 		return nil, err
 	}
+	ttl := h.effectiveUDPConfirmTTLSeconds()
 	if err := h.flows.OpenWithOptions(open, coreflow.FlowOptions{
 		NowUnix:            now,
-		TTLSeconds:         uint64(h.UDPConfirmTTLSeconds),
+		TTLSeconds:         uint64(ttl),
 		IdleTimeoutSeconds: 30,
 	}); err != nil {
 		return nil, err
@@ -303,13 +306,24 @@ func (h *ExitFlowHandler) confirmFramesForOpen(open protocol.FlowOpen) ([]protoc
 		SelectedIP:       append([]byte(nil), open.TargetHost...),
 		SelectedPort:     open.TargetPort,
 		DNSAnswerSetHash: append([]byte(nil), open.DNSAnswerSetHash...),
-		TTLSeconds:       h.UDPConfirmTTLSeconds,
+		TTLSeconds:       h.effectiveUDPConfirmTTLSeconds(),
 		ResolutionSource: protocol.UDPResolutionClientSuppliedIP,
 	})
 	if err != nil {
 		return nil, err
 	}
 	return []protocol.AuroraFrame{frame}, nil
+}
+
+func (h *ExitFlowHandler) effectiveUDPConfirmTTLSeconds() uint32 {
+	ttl := h.UDPConfirmTTLSeconds
+	if ttl == 0 {
+		ttl = 300
+	}
+	if ttl > maxUDPConfirmTTLSeconds {
+		return maxUDPConfirmTTLSeconds
+	}
+	return ttl
 }
 
 func addrFromFlowTarget(kind uint8, host []byte) (netip.Addr, bool) {

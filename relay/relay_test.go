@@ -101,6 +101,27 @@ func TestExitFlowHandlerEmitsUDPTargetConfirmForClientSuppliedIP(t *testing.T) {
 	}
 }
 
+func TestExitFlowHandlerCapsUDPTargetConfirmTTL(t *testing.T) {
+	handler := NewExitFlowHandler(DefaultExitPolicy())
+	handler.UDPConfirmTTLSeconds = 90000
+	open := relayUDPFlowOpen(22, []byte{93, 184, 216, 35})
+	frames, err := handler.HandleFlowOpenFrame(flowOpenFrame(t, open), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirm := protocol.DecodeUDPTargetConfirm(wire.NewReader(frames[0].Payload))
+	if confirm.TTLSeconds != 86400 {
+		t.Fatalf("UDP target confirm TTL was not capped: %d", confirm.TTLSeconds)
+	}
+	state, ok := handler.FlowState(22)
+	if !ok {
+		t.Fatalf("accepted UDP flow was not tracked")
+	}
+	if state.TTLSeconds != 86400 {
+		t.Fatalf("flow TTL was not capped: %d", state.TTLSeconds)
+	}
+}
+
 func TestExitFlowHandlerRejectsMismatchedFlowIDBeforeOpen(t *testing.T) {
 	handler := NewExitFlowHandler(DefaultExitPolicy())
 	open := relayUDPFlowOpen(30, []byte{93, 184, 216, 34})

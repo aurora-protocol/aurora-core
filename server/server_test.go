@@ -55,6 +55,89 @@ func TestHarnessHandlerServesCoverAndIssuerEndpoints(t *testing.T) {
 	}
 }
 
+func TestPacketBatchCodecMatchesInteroperabilityVector(t *testing.T) {
+	batch := PacketBatch{
+		Packets:         [][]byte{{0x45, 0x00, 0x00, 0x14}},
+		ProtocolNumbers: []uint16{2},
+	}
+
+	encoded, err := EncodePacketBatch(batch)
+	if err != nil {
+		t.Fatalf("EncodePacketBatch failed: %v", err)
+	}
+	if got, want := hex.EncodeToString(encoded), "000100020000000445000014"; got != want {
+		t.Fatalf("packet batch vector = %s, want %s", got, want)
+	}
+	decoded, err := DecodePacketBatch(encoded)
+	if err != nil {
+		t.Fatalf("DecodePacketBatch failed: %v", err)
+	}
+	if len(decoded.Packets) != 1 || !bytes.Equal(decoded.Packets[0], batch.Packets[0]) || decoded.ProtocolNumbers[0] != 2 {
+		t.Fatalf("decoded packet batch mismatch: %+v", decoded)
+	}
+}
+
+func TestPacketBatchCodecRejectsEmptyPacketEntry(t *testing.T) {
+	encodedEmptyPacket := []byte{
+		0x00, 0x01,
+		0x00, 0x02,
+		0x00, 0x00, 0x00, 0x00,
+	}
+
+	if _, err := DecodePacketBatch(encodedEmptyPacket); err == nil {
+		t.Fatal("DecodePacketBatch accepted an empty packet entry")
+	}
+}
+
+func TestHarnessHandlerExchangesPacketBatchesThroughPrivateCarrierSlot(t *testing.T) {
+	handler, err := NewHarnessHandler(HarnessOptions{
+		NowUnix:   200,
+		CoverBody: []byte("<html>cover</html>"),
+	})
+	if err != nil {
+		t.Fatalf("NewHarnessHandler failed: %v", err)
+	}
+	inbound, err := EncodePacketBatch(PacketBatch{
+		Packets:         [][]byte{{0x45, 0x00, 0x00, 0x14}},
+		ProtocolNumbers: []uint16{2},
+	})
+	if err != nil {
+		t.Fatalf("EncodePacketBatch failed: %v", err)
+	}
+
+	exchanged := serveRequestWithContentType(handler, http.MethodPost, DefaultPacketExchangePath, inbound, "application/octet-stream")
+
+	if exchanged.status != http.StatusOK {
+		t.Fatalf("packet exchange status = %d body=%q", exchanged.status, exchanged.body)
+	}
+	if got := exchanged.header.Get("Content-Type"); got != "application/octet-stream" {
+		t.Fatalf("packet exchange content type = %q", got)
+	}
+	outbound, err := DecodePacketBatch(exchanged.body)
+	if err != nil {
+		t.Fatalf("DecodePacketBatch response failed: %v", err)
+	}
+	if len(outbound.Packets) != 1 || !bytes.Equal(outbound.Packets[0], []byte{0x45, 0x00, 0x00, 0x14}) || outbound.ProtocolNumbers[0] != 2 {
+		t.Fatalf("packet exchange response mismatch: %+v", outbound)
+	}
+}
+
+func TestPacketExchangeInvalidProbeFallsBackToCover(t *testing.T) {
+	handler, err := NewHarnessHandler(HarnessOptions{
+		NowUnix:   200,
+		CoverBody: []byte("<html>cover</html>"),
+	})
+	if err != nil {
+		t.Fatalf("NewHarnessHandler failed: %v", err)
+	}
+
+	probe := serveRequestWithContentType(handler, http.MethodPost, DefaultPacketExchangePath, []byte("not a packet batch"), "application/octet-stream")
+
+	if probe.status != http.StatusOK || string(probe.body) != "<html>cover</html>" {
+		t.Fatalf("invalid packet exchange did not fall back to cover: status=%d body=%q", probe.status, probe.body)
+	}
+}
+
 func TestRunReadinessHarnessCoversLinuxServerSurface(t *testing.T) {
 	report, err := RunReadinessHarness(200)
 	if err != nil {
@@ -65,6 +148,9 @@ func TestRunReadinessHarnessCoversLinuxServerSurface(t *testing.T) {
 	}
 	if !report.HealthEndpoint || !report.CoverEndpoint || !report.IssuerMetadataEndpoint || !report.BlindRSAIssueEndpoint {
 		t.Fatalf("server readiness report missing coverage: %+v", report)
+	}
+	if !report.PacketExchangeEndpoint {
+		t.Fatalf("server readiness report did not cover packet exchange: %+v", report)
 	}
 }
 
@@ -80,17 +166,22 @@ func TestRunReadinessHarnessUsesValidDefaultClock(t *testing.T) {
 
 type servedResponse struct {
 	status int
+	header http.Header
 	body   []byte
 }
 
 func serveRequest(handler http.Handler, method, path string, body []byte) servedResponse {
+	return serveRequestWithContentType(handler, method, path, body, "application/json")
+}
+
+func serveRequestWithContentType(handler http.Handler, method, path string, body []byte, contentType string) servedResponse {
 	req := httptest.NewRequest(method, path, bytes.NewReader(body))
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", contentType)
 	}
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	return servedResponse{status: rec.Code, body: rec.Body.Bytes()}
+	return servedResponse{status: rec.Code, header: rec.Result().Header, body: rec.Body.Bytes()}
 }
 
 func mustJSON(t *testing.T, v any) []byte {

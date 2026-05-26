@@ -378,6 +378,7 @@ func TestServerCheckCommandReportsRunnableLinuxServerSurface(t *testing.T) {
 		"cover=true",
 		"issuer_metadata=true",
 		"blind_rsa_issue=true",
+		"packet_exchange=true",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("server-check output missing %q:\n%s", want, text)

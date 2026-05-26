@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"time"
@@ -15,13 +16,16 @@ import (
 )
 
 type HarnessOptions struct {
-	NowUnix   uint64
-	CoverBody []byte
+	NowUnix         uint64
+	CoverBody       []byte
+	PacketExchanger PacketExchanger
 }
 
 type Options struct {
-	Issuer *issuerd.Service
-	Origin relay.Origin
+	Issuer             *issuerd.Service
+	Origin             relay.Origin
+	PacketExchanger    PacketExchanger
+	PacketExchangePath string
 }
 
 type ReadinessReport struct {
@@ -30,6 +34,7 @@ type ReadinessReport struct {
 	CoverEndpoint           bool
 	IssuerMetadataEndpoint  bool
 	BlindRSAIssueEndpoint   bool
+	PacketExchangeEndpoint  bool
 	CoverNeutralUnknownPath bool
 	Findings                []string
 }
@@ -44,8 +49,13 @@ func NewHarnessHandler(opts HarnessOptions) (http.Handler, error) {
 	if len(coverBody) == 0 {
 		coverBody = []byte("<html><body>ok</body></html>")
 	}
+	packetExchanger := opts.PacketExchanger
+	if packetExchanger == nil {
+		packetExchanger = LoopbackPacketExchanger{}
+	}
 	return NewHandler(Options{
-		Issuer: service,
+		Issuer:          service,
+		PacketExchanger: packetExchanger,
 		Origin: relay.StaticOrigin{
 			Status: http.StatusOK,
 			Body:   coverBody,
@@ -57,6 +67,19 @@ func NewHandler(opts Options) http.Handler {
 	mux := http.NewServeMux()
 	issuerHandler := issuerd.NewHTTPHandler(opts.Issuer)
 	mux.Handle("/issuer/", http.StripPrefix("/issuer", issuerHandler))
+	if opts.PacketExchanger != nil {
+		packetPath := opts.PacketExchangePath
+		if packetPath == "" {
+			packetPath = DefaultPacketExchangePath
+		}
+		mux.HandleFunc(packetPath, func(w http.ResponseWriter, r *http.Request) {
+			if !isPacketExchangeRequest(r) {
+				serveCoverOrigin(w, opts.Origin)
+				return
+			}
+			servePacketExchange(w, r, opts.Origin, opts.PacketExchanger)
+		})
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -114,6 +137,24 @@ func RunReadinessHarness(nowUnix uint64) (ReadinessReport, error) {
 	}
 	report.require(report.BlindRSAIssueEndpoint, "Blind RSA issue endpoint failed")
 
+	packetRequest, err := EncodePacketBatch(PacketBatch{
+		Packets:         [][]byte{{0x45, 0x00, 0x00, 0x14}},
+		ProtocolNumbers: []uint16{2},
+	})
+	if err != nil {
+		return ReadinessReport{}, err
+	}
+	packetExchange := serveHarnessRequestWithContentType(handler, http.MethodPost, DefaultPacketExchangePath, packetRequest, "application/octet-stream")
+	if packetExchange.status == http.StatusOK && bytes.Equal(packetExchange.contentType(), []byte("application/octet-stream")) {
+		if packetResponse, err := DecodePacketBatch(packetExchange.body); err == nil &&
+			len(packetResponse.Packets) == 1 &&
+			bytes.Equal(packetResponse.Packets[0], []byte{0x45, 0x00, 0x00, 0x14}) &&
+			packetResponse.ProtocolNumbers[0] == 2 {
+			report.PacketExchangeEndpoint = true
+		}
+	}
+	report.require(report.PacketExchangeEndpoint, "packet exchange endpoint failed")
+
 	return report, nil
 }
 
@@ -167,20 +208,65 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+const packetExchangeMaxBodyBytes = 1 << 20
+
+func isPacketExchangeRequest(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && mediaType == "application/octet-stream"
+}
+
+func servePacketExchange(w http.ResponseWriter, r *http.Request, origin relay.Origin, exchanger PacketExchanger) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, packetExchangeMaxBodyBytes+1))
+	if err != nil || len(body) > packetExchangeMaxBodyBytes {
+		serveCoverOrigin(w, origin)
+		return
+	}
+	inbound, err := DecodePacketBatch(body)
+	if err != nil {
+		serveCoverOrigin(w, origin)
+		return
+	}
+	outbound, err := exchanger.ExchangePacketBatch(inbound)
+	if err != nil {
+		serveCoverOrigin(w, origin)
+		return
+	}
+	encoded, err := EncodePacketBatch(outbound)
+	if err != nil {
+		serveCoverOrigin(w, origin)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(encoded)
+}
+
 type harnessResponse struct {
 	status int
+	header http.Header
 	body   []byte
 }
 
+func (r harnessResponse) contentType() []byte {
+	return []byte(r.header.Get("Content-Type"))
+}
+
 func serveHarnessRequest(handler http.Handler, method, path string, body []byte) harnessResponse {
+	return serveHarnessRequestWithContentType(handler, method, path, body, "application/json")
+}
+
+func serveHarnessRequestWithContentType(handler http.Handler, method, path string, body []byte, contentType string) harnessResponse {
 	req := httptest.NewRequest(method, path, bytes.NewReader(body))
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", contentType)
 	}
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	out, _ := io.ReadAll(rec.Result().Body)
-	return harnessResponse{status: rec.Code, body: out}
+	return harnessResponse{status: rec.Code, header: rec.Result().Header, body: out}
 }
 
 func mustMarshalJSON(v any) []byte {

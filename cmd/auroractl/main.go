@@ -786,12 +786,13 @@ func serverCheck(w io.Writer) error {
 	}
 	fmt.Fprintf(
 		w,
-		"server_check passed=%t health=%t cover=%t issuer_metadata=%t blind_rsa_issue=%t cover_neutral_unknown=%t findings=%d\n",
+		"server_check passed=%t health=%t cover=%t issuer_metadata=%t blind_rsa_issue=%t packet_exchange=%t cover_neutral_unknown=%t findings=%d\n",
 		report.Passed,
 		report.HealthEndpoint,
 		report.CoverEndpoint,
 		report.IssuerMetadataEndpoint,
 		report.BlindRSAIssueEndpoint,
+		report.PacketExchangeEndpoint,
 		report.CoverNeutralUnknownPath,
 		len(report.Findings),
 	)

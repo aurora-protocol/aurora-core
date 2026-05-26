@@ -1,6 +1,7 @@
 package cover
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aurora-protocol/aurora-core/protocol"
@@ -184,6 +185,62 @@ func TestValidateTemplateRejectsOriginCommitmentMismatch(t *testing.T) {
 	tpl.CoverOriginCommitment = cb(0xee, 48)
 	if err := ValidateTemplate(tpl, ValidationOptions{NowUnix: 150, MaxFutureSkew: 120}); err == nil {
 		t.Fatalf("cover origin commitment mismatch accepted")
+	}
+}
+
+func TestClassifierBaselineAcceptsIndistinguishableCoverSamples(t *testing.T) {
+	samples, err := DefaultClassifierBaseline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := EvaluateClassifierBaseline(samples)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Passed {
+		t.Fatalf("classifier baseline failed: %+v", report)
+	}
+	if report.FeatureCount != 21 {
+		t.Fatalf("classifier feature count = %d, want 21", report.FeatureCount)
+	}
+	if len(report.Samples) != 5 || len(report.Distinguishers) != 0 || len(report.ForbiddenMarkers) != 0 {
+		t.Fatalf("unexpected classifier report shape: %+v", report)
+	}
+}
+
+func TestClassifierBaselineRejectsSeparableFeature(t *testing.T) {
+	samples, err := DefaultClassifierBaseline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	samples[0].Candidate.H2SettingsID = "distinct-h2-settings"
+	report, err := EvaluateClassifierBaseline(samples)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatalf("classifier baseline accepted a separable feature: %+v", report)
+	}
+	if len(report.Distinguishers) != 1 || report.Distinguishers[0].Feature != "h2_settings" {
+		t.Fatalf("unexpected distinguisher report: %+v", report.Distinguishers)
+	}
+}
+
+func TestClassifierBaselineRejectsForbiddenPublicMarkers(t *testing.T) {
+	samples, err := DefaultClassifierBaseline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	samples[0].Candidate.PublicLabels = append(samples[0].Candidate.PublicLabels, "x-aurora-token")
+	report, err := EvaluateClassifierBaseline(samples)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatalf("classifier baseline accepted a forbidden public marker: %+v", report)
+	}
+	if len(report.ForbiddenMarkers) != 1 || !strings.Contains(report.ForbiddenMarkers[0].Label, "aurora") {
+		t.Fatalf("unexpected forbidden marker report: %+v", report.ForbiddenMarkers)
 	}
 }
 

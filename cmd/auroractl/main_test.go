@@ -52,6 +52,26 @@ func TestWireCheckCommandPrintsPublicWireReport(t *testing.T) {
 	}
 }
 
+func TestClassifierCheckCommandPrintsBaselineReport(t *testing.T) {
+	var out bytes.Buffer
+	if err := classifierCheck(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"classifier_baseline passed=true samples=5 features=21 distinguishers=0 forbidden_markers=0\n",
+		"classifier_sample web.h2.stream passed=true distinguishers=0 forbidden_markers=0\n",
+		"classifier_sample web.h3.ext-dgram passed=true distinguishers=0 forbidden_markers=0\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("classifier-check output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "passed=false") {
+		t.Fatalf("classifier-check output contains failing sample:\n%s", text)
+	}
+}
+
 func TestCryptoCheckCommandPrintsProviderAgreement(t *testing.T) {
 	var out bytes.Buffer
 	if err := cryptoCheck(&out); err != nil {
@@ -91,13 +111,16 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "gateway-backed active-probe harness") {
 		t.Fatalf("capabilities output missing gateway-backed active-probe harness:\n%s", text)
 	}
+	if !strings.Contains(text, "DPI/classifier baseline harness") {
+		t.Fatalf("capabilities output missing classifier baseline harness:\n%s", text)
+	}
 	if strings.Contains(text, "not production-complete:\n- ML-DSA") {
 		t.Fatalf("capabilities output still reports ML-DSA work as the first missing item:\n%s", text)
 	}
 	if strings.Contains(text, "full real-crypto vector package") {
 		t.Fatalf("capabilities output still lists the real-crypto vector package as remaining:\n%s", text)
 	}
-	if !strings.Contains(text, "Privacy Pass production proof verification, cover-origin gateway, platform adapters, DPI/classifier evaluation, external active-probe evaluation") {
+	if !strings.Contains(text, "Privacy Pass production proof verification, cover-origin gateway, platform adapters, external DPI/classifier evaluation, external active-probe evaluation") {
 		t.Fatalf("capabilities output stopped tracking remaining production work:\n%s", text)
 	}
 }
@@ -275,6 +298,7 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go run ./cmd/auroractl crypto-check",
 		"go run ./cmd/auroractl wire-check",
 		"go run ./cmd/auroractl active-probes",
+		"go run ./cmd/auroractl classifier-check",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("CI workflow missing %q:\n%s", want, text)

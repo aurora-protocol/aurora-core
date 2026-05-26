@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/aurora-protocol/aurora-core/config"
+	auroracover "github.com/aurora-protocol/aurora-core/cover"
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/protocol"
@@ -33,6 +34,8 @@ func main() {
 		capabilities()
 	case "active-probes":
 		err = activeProbes(os.Stdout)
+	case "classifier-check":
+		err = classifierCheck(os.Stdout)
 	case "crypto-check":
 		err = cryptoCheck(os.Stdout)
 	case "wire-check":
@@ -53,7 +56,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|crypto-check|wire-check|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]]|capabilities|active-probes|classifier-check|crypto-check|wire-check|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -318,9 +321,9 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- signed directory, relay descriptor, and cover-template real-crypto vectors")
 	fmt.Fprintln(w, "- first-hop prelude, first-hop control/application packets, split-2 route-prelude, exit-layer packet, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, ML-DSA, AEAD, and packet artifacts")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
-	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, gateway-backed active-probe harness")
+	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing, gateway-backed active-probe harness, DPI/classifier baseline harness")
 	fmt.Fprintln(w, "not production-complete:")
-	fmt.Fprintln(w, "- Privacy Pass production proof verification, cover-origin gateway, platform adapters, DPI/classifier evaluation, external active-probe evaluation")
+	fmt.Fprintln(w, "- Privacy Pass production proof verification, cover-origin gateway, platform adapters, external DPI/classifier evaluation, external active-probe evaluation")
 }
 
 func cryptoCheck(w io.Writer) error {
@@ -379,6 +382,40 @@ func activeProbes(w io.Writer) error {
 	}
 	if !report.Passed || !gatewayReport.Passed {
 		return fmt.Errorf("active-probes failed neutrality check")
+	}
+	return nil
+}
+
+func classifierCheck(w io.Writer) error {
+	samples, err := auroracover.DefaultClassifierBaseline()
+	if err != nil {
+		return err
+	}
+	report, err := auroracover.EvaluateClassifierBaseline(samples)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(
+		w,
+		"classifier_baseline passed=%t samples=%d features=%d distinguishers=%d forbidden_markers=%d\n",
+		report.Passed,
+		len(report.Samples),
+		report.FeatureCount,
+		len(report.Distinguishers),
+		len(report.ForbiddenMarkers),
+	)
+	for _, sample := range report.Samples {
+		fmt.Fprintf(
+			w,
+			"classifier_sample %s passed=%t distinguishers=%d forbidden_markers=%d\n",
+			sample.Name,
+			sample.Passed,
+			len(sample.Distinguishers),
+			len(sample.ForbiddenMarkers),
+		)
+	}
+	if !report.Passed {
+		return fmt.Errorf("classifier-check failed cover indistinguishability baseline")
 	}
 	return nil
 }

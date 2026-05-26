@@ -13,7 +13,7 @@ Implemented now:
 - AccessHint computation, spent-hint cache, token redemption hash, token spent key, replay context hash, and bootstrap dedup key;
 - first-hop and split-route prelude transcript hashing, sealed control capsules, Finished messages, application traffic secret derivation, first application packet vectors, and exit-layer packet vectors;
 - signed real-crypto metadata vectors for directory consensus, relay descriptors, and cover templates;
-- policy profiles, PAL scoring, PACE reference behavior, local config parsing, threat-safe logging wrappers, `auroractl`, the local proxy client, cover-template-validated H2/H1/shadow-origin/H3 datagram and explicitly gated MASQUE carrier request builders, relay admission/exit gates, gateway-backed active-probe harness, vector drift tests, and ops helpers.
+- policy profiles, PAL scoring, PACE reference behavior, local config parsing, threat-safe logging wrappers, `auroractl`, the local proxy client, cover-template-validated H2/H1/shadow-origin/H3 datagram and explicitly gated MASQUE carrier request builders, relay admission/exit gates, gateway-backed active-probe harness, deterministic DPI/classifier baseline harness, vector drift tests, and ops helpers.
 
 ## Layout
 
@@ -27,7 +27,7 @@ Implemented now:
 
 Native app or driver repositories should be split out only when they need their own platform build systems.
 
-This is not a production VPN or circumvention client. The spec still requires independent cryptographic review, production Privacy Pass verification, cover-origin gateway behavior, platform adapters, external active-probe evaluation, and DPI/classifier evaluation before production use.
+This is not a production VPN or circumvention client. The spec still requires independent cryptographic review, production Privacy Pass verification, cover-origin gateway behavior, platform adapters, external active-probe evaluation, and external DPI/classifier evaluation before production use.
 
 ## Commands
 
@@ -38,6 +38,7 @@ GOCACHE=/private/tmp/aurora-gocache go test ./...
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl vectors
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl vectors --check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl wire-check
+GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl classifier-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl capabilities
 ```
 

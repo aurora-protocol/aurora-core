@@ -403,7 +403,10 @@ func (m IssuerMetadata) ValidateStructural(now uint64, allowLab bool) error {
 	if len(m.MetadataSigningKeyID) != 16 {
 		return fmt.Errorf("protocol: metadata signing key id must be 16 bytes")
 	}
-	if err := validateIssuerPublicKeyCompatibility(PublicKeyRecord{SignatureScheme: m.SignatureScheme, KeyEncoding: m.KeyEncoding}, allowLab); err != nil {
+	if !allowLab && m.SignatureScheme == registry.SigEd25519Lab {
+		return fmt.Errorf("protocol: lab signature scheme disabled")
+	}
+	if err := validateSignatureKeyEncodingCompatibility(m.SignatureScheme, m.KeyEncoding); err != nil {
 		return err
 	}
 	for _, proofType := range m.SupportedProofTypes {

@@ -94,6 +94,35 @@ func TestPublicKeyCompatibilityRejectsMismatches(t *testing.T) {
 	}
 }
 
+func TestPublicKeyCompatibilityRejectsFixedLengthMismatches(t *testing.T) {
+	cases := []PublicKeyRecord{{
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+		PublicKey:       fill(0x04, 64),
+	}, {
+		SignatureScheme: registry.SigECDSAP384SHA384DER,
+		KeyEncoding:     registry.KeyP384SEC1Uncompressed,
+		PublicKey:       fill(0x04, 96),
+	}, {
+		SignatureScheme: registry.SigMLDSA65,
+		KeyEncoding:     registry.KeyMLDSA65RawPublic,
+		PublicKey:       fill(0x11, 1),
+	}, {
+		SignatureScheme: registry.SigMLDSA87,
+		KeyEncoding:     registry.KeyMLDSA87RawPublic,
+		PublicKey:       fill(0x12, 1),
+	}, {
+		SignatureScheme: registry.SigEd25519Lab,
+		KeyEncoding:     registry.KeyEd25519RawPublic,
+		PublicKey:       fill(0x13, 31),
+	}}
+	for _, record := range cases {
+		if err := record.ValidateCompatibility(); err == nil {
+			t.Fatalf("fixed-length public key accepted with %d bytes: %+v", len(record.PublicKey), record)
+		}
+	}
+}
+
 func TestAuthorityKeyValidateRequiresAllRequestedUsageBits(t *testing.T) {
 	key := AuthorityKeyRecord{
 		AuthorityID:    fill(0x01, 16),

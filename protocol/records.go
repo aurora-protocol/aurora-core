@@ -2,10 +2,13 @@ package protocol
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"fmt"
 
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/wire"
+	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
+	"github.com/cloudflare/circl/sign/mldsa/mldsa87"
 )
 
 type PublicKeyRecord struct {
@@ -29,29 +32,62 @@ func DecodePublicKeyRecord(r *wire.Reader) PublicKeyRecord {
 }
 
 func (r PublicKeyRecord) ValidateCompatibility() error {
+	if err := validateSignatureKeyEncodingCompatibility(r.SignatureScheme, r.KeyEncoding); err != nil {
+		return err
+	}
 	switch r.SignatureScheme {
 	case registry.SigECDSAP256SHA256DER, registry.SigECDSAP256SHA384DER:
-		if r.KeyEncoding != registry.KeyP256SEC1Uncompressed && r.KeyEncoding != registry.KeyP256SPKI {
-			return fmt.Errorf("protocol: ECDSA P-256 signature incompatible with key encoding 0x%x", r.KeyEncoding)
+		if r.KeyEncoding == registry.KeyP256SEC1Uncompressed {
+			return validatePublicKeyLength(r.PublicKey, 65, "P-256 SEC1 public key")
 		}
 	case registry.SigECDSAP384SHA384DER:
-		if r.KeyEncoding != registry.KeyP384SEC1Uncompressed && r.KeyEncoding != registry.KeyP384SPKI {
-			return fmt.Errorf("protocol: ECDSA P-384 signature incompatible with key encoding 0x%x", r.KeyEncoding)
+		if r.KeyEncoding == registry.KeyP384SEC1Uncompressed {
+			return validatePublicKeyLength(r.PublicKey, 97, "P-384 SEC1 public key")
 		}
 	case registry.SigMLDSA65:
-		if r.KeyEncoding != registry.KeyMLDSA65RawPublic {
-			return fmt.Errorf("protocol: ML-DSA-65 signature incompatible with key encoding 0x%x", r.KeyEncoding)
+		return validatePublicKeyLength(r.PublicKey, mldsa65.PublicKeySize, "ML-DSA-65 public key")
+	case registry.SigMLDSA87:
+		return validatePublicKeyLength(r.PublicKey, mldsa87.PublicKeySize, "ML-DSA-87 public key")
+	case registry.SigEd25519Lab:
+		return validatePublicKeyLength(r.PublicKey, ed25519.PublicKeySize, "Ed25519 public key")
+	}
+	if len(r.PublicKey) == 0 {
+		return fmt.Errorf("protocol: public key is empty")
+	}
+	return nil
+}
+
+func validateSignatureKeyEncodingCompatibility(signatureScheme, keyEncoding uint64) error {
+	switch signatureScheme {
+	case registry.SigECDSAP256SHA256DER, registry.SigECDSAP256SHA384DER:
+		if keyEncoding != registry.KeyP256SEC1Uncompressed && keyEncoding != registry.KeyP256SPKI {
+			return fmt.Errorf("protocol: ECDSA P-256 signature incompatible with key encoding 0x%x", keyEncoding)
+		}
+	case registry.SigECDSAP384SHA384DER:
+		if keyEncoding != registry.KeyP384SEC1Uncompressed && keyEncoding != registry.KeyP384SPKI {
+			return fmt.Errorf("protocol: ECDSA P-384 signature incompatible with key encoding 0x%x", keyEncoding)
+		}
+	case registry.SigMLDSA65:
+		if keyEncoding != registry.KeyMLDSA65RawPublic {
+			return fmt.Errorf("protocol: ML-DSA-65 signature incompatible with key encoding 0x%x", keyEncoding)
 		}
 	case registry.SigMLDSA87:
-		if r.KeyEncoding != registry.KeyMLDSA87RawPublic {
-			return fmt.Errorf("protocol: ML-DSA-87 signature incompatible with key encoding 0x%x", r.KeyEncoding)
+		if keyEncoding != registry.KeyMLDSA87RawPublic {
+			return fmt.Errorf("protocol: ML-DSA-87 signature incompatible with key encoding 0x%x", keyEncoding)
 		}
 	case registry.SigEd25519Lab:
-		if r.KeyEncoding != registry.KeyEd25519RawPublic {
-			return fmt.Errorf("protocol: Ed25519 lab signature incompatible with key encoding 0x%x", r.KeyEncoding)
+		if keyEncoding != registry.KeyEd25519RawPublic {
+			return fmt.Errorf("protocol: Ed25519 lab signature incompatible with key encoding 0x%x", keyEncoding)
 		}
 	default:
-		return fmt.Errorf("protocol: unknown signature scheme 0x%x", r.SignatureScheme)
+		return fmt.Errorf("protocol: unknown signature scheme 0x%x", signatureScheme)
+	}
+	return nil
+}
+
+func validatePublicKeyLength(publicKey []byte, want int, label string) error {
+	if len(publicKey) != want {
+		return fmt.Errorf("protocol: %s length %d, want %d", label, len(publicKey), want)
 	}
 	return nil
 }

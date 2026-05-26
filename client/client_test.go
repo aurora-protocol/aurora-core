@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 
 	"github.com/aurora-protocol/aurora-core/flow"
@@ -192,6 +193,25 @@ func TestLocalProxyOpensTransparentUDPFromFakeIPMap(t *testing.T) {
 	}
 	if !bytes.Equal(state.NameBindingID, answer.NameBindingID) || !bytes.Equal(state.DNSAnswerSetHash, answer.DNSAnswerSetHash) {
 		t.Fatalf("mapped fake-IP UDP flow leaked or lost DNS binding: %+v", state)
+	}
+}
+
+func TestLocalProxyAnswersLocalDNSQueryThroughForwarder(t *testing.T) {
+	p := NewLocalProxy()
+	query := clientDNSQuestion(0x2222, "Example.COM", 1)
+
+	result, err := p.AnswerLocalDNSQuery(58, query, []string{"93.184.216.34"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Frame.FrameType != registry.FrameDNSMessage || result.Frame.FlowID != 58 || !bytes.Equal(result.Frame.Payload, query) {
+		t.Fatalf("local DNS query was not forwarded as DNS frame: %+v", result.Frame)
+	}
+	if result.Answer.Domain != "example.com" || result.Answer.FakeIP == "" || result.Answer.FakeIP == "93.184.216.34" {
+		t.Fatalf("local DNS query did not synthesize fake-IP answer: %+v", result.Answer)
+	}
+	if binary.BigEndian.Uint16(result.Response[0:2]) != 0x2222 || binary.BigEndian.Uint16(result.Response[6:8]) != 1 {
+		t.Fatalf("local DNS response did not preserve id and answer count: %x", result.Response[:12])
 	}
 }
 
@@ -490,4 +510,19 @@ func TestLocalProxyReceiveFlowCloseFrameRejectsMismatchBeforeMutation(t *testing
 	if state.PeerClosed || state.LocalClosed || state.DrainUntilUnix != 0 {
 		t.Fatalf("mismatched close frame mutated local flow state: %+v", state)
 	}
+}
+
+func clientDNSQuestion(id uint16, domain string, qtype uint16) []byte {
+	out := make([]byte, 12)
+	binary.BigEndian.PutUint16(out[0:2], id)
+	binary.BigEndian.PutUint16(out[2:4], 0x0100)
+	binary.BigEndian.PutUint16(out[4:6], 1)
+	for _, label := range bytes.Split([]byte(domain), []byte(".")) {
+		out = append(out, byte(len(label)))
+		out = append(out, label...)
+	}
+	out = append(out, 0)
+	out = binary.BigEndian.AppendUint16(out, qtype)
+	out = binary.BigEndian.AppendUint16(out, 1)
+	return out
 }

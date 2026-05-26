@@ -157,6 +157,10 @@ func (p *LocalProxy) ResolveFakeDNS(host string, answers []string, now uint64) (
 	return p.dns.ResolveFakeA(host, answers, now)
 }
 
+func (p *LocalProxy) AnswerLocalDNSQuery(flowID uint64, query []byte, answers []string, now uint64) (flow.LocalDNSResult, error) {
+	return p.dns.AnswerLocalAQuery(flowID, query, answers, now)
+}
+
 func (p *LocalProxy) OpenUDPWithFakeDNS(flowID uint64, host string, answers []string, port uint16, now uint64) (flow.SyntheticAnswer, error) {
 	open, answer, err := p.dns.OpenFakeIPUDPFlow(flowID, host, answers, port, now)
 	if err != nil {

@@ -2,6 +2,7 @@ package flow
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"net"
 	"testing"
@@ -121,4 +122,83 @@ func TestDNSForwarderUsesDNSMessageFramesForEncryptedForwarding(t *testing.T) {
 	if !bytes.Equal(frame.Payload, []byte{0x12, 0x34, 0x01, 0x00}) {
 		t.Fatalf("DNS payload changed: %x", frame.Payload)
 	}
+}
+
+func TestDNSForwarderAnswersLocalAQueryWithFakeIPAndEncryptedFrame(t *testing.T) {
+	f := NewDNSForwarder(DNSForwarderOptions{FakeIPCIDR: "198.18.0.0/15"})
+	query := dnsQuestion(0x1234, "Example.COM", 1)
+
+	result, err := f.AnswerLocalAQuery(91, query, []string{"93.184.216.34"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Frame.FrameType != registry.FrameDNSMessage || result.Frame.FlowID != 91 || !bytes.Equal(result.Frame.Payload, query) {
+		t.Fatalf("local DNS query was not carried inside a DNS frame: %+v", result.Frame)
+	}
+	if result.Answer.Domain != "example.com" || result.Answer.FakeIP == "" {
+		t.Fatalf("local DNS answer did not record canonical fake-IP mapping: %+v", result.Answer)
+	}
+	if result.Answer.FakeIP == "93.184.216.34" {
+		t.Fatalf("local DNS response exposed the real answer as the synthetic address")
+	}
+	response := result.Response
+	if len(response) < len(query)+16 {
+		t.Fatalf("local DNS response too short: %x", response)
+	}
+	if binary.BigEndian.Uint16(response[0:2]) != 0x1234 {
+		t.Fatalf("local DNS response changed query id: %x", response[:2])
+	}
+	if flags := binary.BigEndian.Uint16(response[2:4]); flags != 0x8180 {
+		t.Fatalf("local DNS response flags = 0x%x, want standard no-error response", flags)
+	}
+	if qd, an := binary.BigEndian.Uint16(response[4:6]), binary.BigEndian.Uint16(response[6:8]); qd != 1 || an != 1 {
+		t.Fatalf("local DNS response counts qd=%d an=%d", qd, an)
+	}
+	if !bytes.Equal(response[12:len(query)], query[12:]) {
+		t.Fatalf("local DNS response did not preserve the original question")
+	}
+	answer := response[len(query):]
+	if !bytes.Equal(answer[:2], []byte{0xc0, 0x0c}) || binary.BigEndian.Uint16(answer[2:4]) != 1 || binary.BigEndian.Uint16(answer[4:6]) != 1 {
+		t.Fatalf("local DNS response answer header was not A/IN with question pointer: %x", answer[:6])
+	}
+	if ttl := binary.BigEndian.Uint32(answer[6:10]); ttl == 0 || ttl > 300 {
+		t.Fatalf("local DNS response TTL out of bounds: %d", ttl)
+	}
+	if rdlen := binary.BigEndian.Uint16(answer[10:12]); rdlen != 4 {
+		t.Fatalf("local DNS response A record rdlength = %d", rdlen)
+	}
+	if got := net.IP(answer[12:16]).String(); got != result.Answer.FakeIP {
+		t.Fatalf("local DNS response address = %s, want fake IP %s", got, result.Answer.FakeIP)
+	}
+}
+
+func TestDNSForwarderRejectsUnsupportedLocalDNSQuestion(t *testing.T) {
+	f := NewDNSForwarder(DNSForwarderOptions{})
+	if _, err := f.AnswerLocalAQuery(92, dnsQuestion(0x1235, "example.com", 28), []string{"93.184.216.34"}, 100); err == nil {
+		t.Fatalf("local DNS forwarder accepted non-A question")
+	}
+}
+
+func TestDNSForwarderRejectsLocalDNSQueryWithAdditionalRecords(t *testing.T) {
+	f := NewDNSForwarder(DNSForwarderOptions{})
+	query := dnsQuestion(0x1236, "example.com", 1)
+	binary.BigEndian.PutUint16(query[10:12], 1)
+	if _, err := f.AnswerLocalAQuery(93, query, []string{"93.184.216.34"}, 100); err == nil {
+		t.Fatalf("local DNS forwarder accepted nonzero additional-record count")
+	}
+}
+
+func dnsQuestion(id uint16, domain string, qtype uint16) []byte {
+	out := make([]byte, 12)
+	binary.BigEndian.PutUint16(out[0:2], id)
+	binary.BigEndian.PutUint16(out[2:4], 0x0100)
+	binary.BigEndian.PutUint16(out[4:6], 1)
+	for _, label := range bytes.Split([]byte(domain), []byte(".")) {
+		out = append(out, byte(len(label)))
+		out = append(out, label...)
+	}
+	out = append(out, 0)
+	out = binary.BigEndian.AppendUint16(out, qtype)
+	out = binary.BigEndian.AppendUint16(out, 1)
+	return out
 }

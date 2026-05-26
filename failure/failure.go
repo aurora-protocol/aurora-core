@@ -25,6 +25,7 @@ const (
 	ReplayCacheFailure
 	WrongH3Settings
 	UnsupportedVersion
+	MalformedHybridShare
 )
 
 type Action uint8
@@ -49,7 +50,7 @@ type ProbeCase struct {
 }
 
 func (k Kind) Code() uint16 {
-	if k < BadAccessHint || k > UnsupportedVersion {
+	if k < BadAccessHint || k > MalformedHybridShare {
 		return uint16(Unknown)
 	}
 	return uint16(k)
@@ -80,6 +81,7 @@ func ActiveProbeCases() []ProbeCase {
 		{Name: "bad-aead-tag", Kind: BadAEADTag},
 		{Name: "replayed-admission-proof", Kind: ReplayedAdmission},
 		{Name: "unsupported-version", Kind: UnsupportedVersion},
+		{Name: "malformed-hybrid-share", Kind: MalformedHybridShare},
 		{Name: "unsupported-method", Kind: UnsupportedMethod},
 		{Name: "wrong-h3-settings", Kind: WrongH3Settings},
 		{Name: "malformed-flow-open", Kind: MalformedFlowOpen},

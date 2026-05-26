@@ -14,15 +14,16 @@ import (
 type FailureKind = failure.Kind
 
 const (
-	FailureBadAccessHint       = failure.BadAccessHint
-	FailureReplayedHint        = failure.ReplayedAccessHint
-	FailureBadAEADTag          = failure.BadAEADTag
-	FailureWrongSuite          = failure.WrongSuite
-	FailureMalformedFlowOpen   = failure.MalformedFlowOpen
-	FailureMalformedKeyUpdate  = failure.MalformedKeyUpdate
-	FailureInvalidCoverSlot    = failure.InvalidCoverSlot
-	FailureUnsupportedMethod   = failure.UnsupportedMethod
-	FailureVerifierUnavailable = failure.VerifierUnavailable
+	FailureBadAccessHint        = failure.BadAccessHint
+	FailureReplayedHint         = failure.ReplayedAccessHint
+	FailureBadAEADTag           = failure.BadAEADTag
+	FailureWrongSuite           = failure.WrongSuite
+	FailureMalformedFlowOpen    = failure.MalformedFlowOpen
+	FailureMalformedKeyUpdate   = failure.MalformedKeyUpdate
+	FailureMalformedHybridShare = failure.MalformedHybridShare
+	FailureInvalidCoverSlot     = failure.InvalidCoverSlot
+	FailureUnsupportedMethod    = failure.UnsupportedMethod
+	FailureVerifierUnavailable  = failure.VerifierUnavailable
 )
 
 type Response struct {

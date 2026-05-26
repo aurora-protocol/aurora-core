@@ -27,6 +27,7 @@ func TestKindsHaveStableInternalCodes(t *testing.T) {
 		{ReplayCacheFailure, 0x000e, "f000e"},
 		{WrongH3Settings, 0x000f, "f000f"},
 		{UnsupportedVersion, 0x0010, "f0010"},
+		{MalformedHybridShare, 0x0011, "f0011"},
 	}
 	seen := make(map[uint16]bool, len(cases))
 	for _, tc := range cases {
@@ -58,6 +59,7 @@ func TestProbeSensitiveFailuresUseCoverOriginAction(t *testing.T) {
 		UnsupportedMethod,
 		WrongH3Settings,
 		UnsupportedVersion,
+		MalformedHybridShare,
 		PolicyGate,
 		VerifierUnavailable,
 		ReplayCacheFailure,
@@ -94,6 +96,7 @@ func TestActiveProbeCasesCoverSpecChecklist(t *testing.T) {
 		"replayed-admission-proof":  ReplayedAdmission,
 		"unsupported-method":        UnsupportedMethod,
 		"unsupported-version":       UnsupportedVersion,
+		"malformed-hybrid-share":    MalformedHybridShare,
 		"wrong-h3-settings":         WrongH3Settings,
 		"malformed-flow-open":       MalformedFlowOpen,
 		"malformed-key-update":      MalformedKeyUpdate,

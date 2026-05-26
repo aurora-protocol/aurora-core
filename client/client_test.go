@@ -167,6 +167,34 @@ func TestLocalProxySOCKS5UDPDatagramOpensRelayResolvedFlow(t *testing.T) {
 	}
 }
 
+func TestLocalProxyOpensTransparentUDPFromFakeIPMap(t *testing.T) {
+	p := NewLocalProxy()
+	answer, err := p.ResolveFakeDNS("Example.COM.", []string{"93.184.216.34"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapped, err := p.OpenUDPFromFakeIP(57, answer.FakeIP, 443, 101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapped.Domain != "example.com" || mapped.FakeIP != answer.FakeIP {
+		t.Fatalf("unexpected mapped fake-IP answer: %+v", mapped)
+	}
+	state, ok := p.FlowState(57)
+	if !ok {
+		t.Fatalf("mapped fake-IP UDP flow was not opened")
+	}
+	if state.Kind != flow.FlowKindUDPAssociation || state.TargetKind != flow.TargetKindIPv4 || !bytes.Equal(state.TargetHost, []byte{93, 184, 216, 34}) {
+		t.Fatalf("mapped fake-IP UDP flow did not target the real IP answer: %+v", state)
+	}
+	if state.UDPFQDNMode != flow.UDPFQDNClientResolvedNameBinding || state.LocalBindingMode != flow.LocalBindingTransparentFakeIP {
+		t.Fatalf("mapped fake-IP UDP flow used wrong binding semantics: %+v", state)
+	}
+	if !bytes.Equal(state.NameBindingID, answer.NameBindingID) || !bytes.Equal(state.DNSAnswerSetHash, answer.DNSAnswerSetHash) {
+		t.Fatalf("mapped fake-IP UDP flow leaked or lost DNS binding: %+v", state)
+	}
+}
+
 func TestLocalProxySOCKS5UDPDatagramRejectsFragments(t *testing.T) {
 	p := NewLocalProxy()
 	packet := append([]byte{0x00, 0x00, 0x01, 0x03, 0x0b}, []byte("example.com")...)

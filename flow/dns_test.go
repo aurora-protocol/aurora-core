@@ -67,6 +67,40 @@ func TestDNSForwarderBuildsFakeIPUDPFlowWithIPv6Target(t *testing.T) {
 	}
 }
 
+func TestDNSForwarderOpensUDPFlowFromFakeIPMap(t *testing.T) {
+	f := NewDNSForwarder(DNSForwarderOptions{FakeIPCIDR: "198.18.0.0/15"})
+	answer, err := f.ResolveFakeA("Example.COM.", []string{"93.184.216.34"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	open, mapped, err := f.OpenMappedFakeIPUDPFlow(79, answer.FakeIP, 443, 101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapped.Domain != "example.com" || mapped.FakeIP != answer.FakeIP {
+		t.Fatalf("fake-IP mapping metadata changed: %+v", mapped)
+	}
+	if open.FlowID != 79 || open.FlowKind != FlowKindUDPAssociation || open.TargetKind != TargetKindIPv4 {
+		t.Fatalf("unexpected mapped fake-IP UDP flow: %+v", open)
+	}
+	if net.IP(open.TargetHost).String() != "93.184.216.34" {
+		t.Fatalf("mapped fake-IP flow target = %s, want real answer", net.IP(open.TargetHost))
+	}
+	if net.IP(open.TargetHost).String() == answer.FakeIP || len(open.OriginalDomainHint) != 0 {
+		t.Fatalf("mapped fake-IP flow leaked fake IP or raw domain hint: %+v", open)
+	}
+	if !bytes.Equal(open.NameBindingID, answer.NameBindingID) || !bytes.Equal(open.DNSAnswerSetHash, answer.DNSAnswerSetHash) {
+		t.Fatalf("mapped fake-IP flow did not preserve answer binding")
+	}
+}
+
+func TestDNSForwarderRejectsUnknownFakeIPMap(t *testing.T) {
+	f := NewDNSForwarder(DNSForwarderOptions{FakeIPCIDR: "198.18.0.0/15"})
+	if _, _, err := f.OpenMappedFakeIPUDPFlow(80, "198.18.0.99", 443, 100); err == nil {
+		t.Fatalf("unknown fake-IP mapping was accepted")
+	}
+}
+
 func TestDNSAnswerSetHashIsOrderIndependent(t *testing.T) {
 	first := DNSAnswerSetHash([]string{"93.184.216.34", "2001:4860:4860::8888"})
 	second := DNSAnswerSetHash([]string{"2001:4860:4860::8888", "93.184.216.34"})

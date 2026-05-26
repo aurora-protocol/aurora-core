@@ -153,8 +153,23 @@ func (p *LocalProxy) FlowState(flowID uint64) (flow.FlowState, bool) {
 	return p.flows.DemuxInbound(flowID)
 }
 
+func (p *LocalProxy) ResolveFakeDNS(host string, answers []string, now uint64) (flow.SyntheticAnswer, error) {
+	return p.dns.ResolveFakeA(host, answers, now)
+}
+
 func (p *LocalProxy) OpenUDPWithFakeDNS(flowID uint64, host string, answers []string, port uint16, now uint64) (flow.SyntheticAnswer, error) {
 	open, answer, err := p.dns.OpenFakeIPUDPFlow(flowID, host, answers, port, now)
+	if err != nil {
+		return flow.SyntheticAnswer{}, err
+	}
+	if err := p.flows.OpenWithOptions(open, flow.FlowOptions{NowUnix: now, TTLSeconds: 300, IdleTimeoutSeconds: 30}); err != nil {
+		return flow.SyntheticAnswer{}, err
+	}
+	return answer, nil
+}
+
+func (p *LocalProxy) OpenUDPFromFakeIP(flowID uint64, fakeIP string, port uint16, now uint64) (flow.SyntheticAnswer, error) {
+	open, answer, err := p.dns.OpenMappedFakeIPUDPFlow(flowID, fakeIP, port, now)
 	if err != nil {
 		return flow.SyntheticAnswer{}, err
 	}

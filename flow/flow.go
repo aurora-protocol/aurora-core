@@ -385,7 +385,12 @@ type FakeIPAllocator struct {
 	network *net.IPNet
 	mu      sync.Mutex
 	byName  map[string]string
-	byIP    map[string][]string
+	byIP    map[string]FakeIPMapping
+}
+
+type FakeIPMapping struct {
+	Domain  string
+	Answers []string
 }
 
 func NewFakeIPAllocator(cidr string) *FakeIPAllocator {
@@ -393,7 +398,7 @@ func NewFakeIPAllocator(cidr string) *FakeIPAllocator {
 	if err != nil {
 		_, network, _ = net.ParseCIDR("198.18.0.0/15")
 	}
-	return &FakeIPAllocator{network: network, byName: make(map[string]string), byIP: make(map[string][]string)}
+	return &FakeIPAllocator{network: network, byName: make(map[string]string), byIP: make(map[string]FakeIPMapping)}
 }
 
 func (a *FakeIPAllocator) Assign(domain string, answers []string) (fakeIP string, nameBindingID []byte, err error) {
@@ -404,7 +409,7 @@ func (a *FakeIPAllocator) Assign(domain string, answers []string) (fakeIP string
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if ip, ok := a.byName[name]; ok {
-		a.byIP[ip] = append([]string(nil), answers...)
+		a.byIP[ip] = newFakeIPMapping(name, answers)
 		return ip, bindingID(name, answers), nil
 	}
 	fakeIP, err = a.nextAvailableIPLocked(name)
@@ -412,22 +417,30 @@ func (a *FakeIPAllocator) Assign(domain string, answers []string) (fakeIP string
 		return "", nil, err
 	}
 	a.byName[name] = fakeIP
-	a.byIP[fakeIP] = append([]string(nil), answers...)
+	a.byIP[fakeIP] = newFakeIPMapping(name, answers)
 	return fakeIP, bindingID(name, answers), nil
 }
 
 func (a *FakeIPAllocator) AnswersForFakeIP(fakeIP string) ([]string, bool) {
-	ip := net.ParseIP(fakeIP).To4()
-	if ip == nil {
-		return nil, false
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	answers, ok := a.byIP[ip.String()]
+	mapping, ok := a.MappingForFakeIP(fakeIP)
 	if !ok {
 		return nil, false
 	}
-	return append([]string(nil), answers...), true
+	return append([]string(nil), mapping.Answers...), true
+}
+
+func (a *FakeIPAllocator) MappingForFakeIP(fakeIP string) (FakeIPMapping, bool) {
+	ip := net.ParseIP(fakeIP).To4()
+	if ip == nil {
+		return FakeIPMapping{}, false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	mapping, ok := a.byIP[ip.String()]
+	if !ok {
+		return FakeIPMapping{}, false
+	}
+	return cloneFakeIPMapping(mapping), true
 }
 
 func (a *FakeIPAllocator) nextAvailableIPLocked(name string) (string, error) {
@@ -482,6 +495,20 @@ func bindingID(domain string, answers []string) []byte {
 func DNSAnswerSetHash(answers []string) []byte {
 	h := sha256.Sum256([]byte(strings.Join(canonicalAnswers(answers), "\x00")))
 	return auroracrypto.PreHash([]byte(hex.EncodeToString(h[:])))
+}
+
+func newFakeIPMapping(domain string, answers []string) FakeIPMapping {
+	return FakeIPMapping{
+		Domain:  canonicalDomain(domain),
+		Answers: append([]string(nil), answers...),
+	}
+}
+
+func cloneFakeIPMapping(mapping FakeIPMapping) FakeIPMapping {
+	return FakeIPMapping{
+		Domain:  mapping.Domain,
+		Answers: append([]string(nil), mapping.Answers...),
+	}
 }
 
 func canonicalAnswers(answers []string) []string {

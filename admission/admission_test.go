@@ -72,6 +72,24 @@ func TestAccessHintRejectsExpiredCredentialBeforeSpend(t *testing.T) {
 	}
 }
 
+func TestAccessHintRequiresOneMaxUse(t *testing.T) {
+	cred := AccessHintCredential{
+		HintIssuerID:  rep(0x21, 16),
+		RelayBucketID: rep(0x22, 16),
+		HintEpochID:   9,
+		HintSelector:  rep(0x23, 16),
+		HintSecret:    rep(0x24, 32),
+		MaxUses:       0,
+	}
+	if _, err := ComputeAccessHint(cred, rep(0x25, 48), rep(0x26, 32)); err == nil {
+		t.Fatalf("AccessHint credential accepted max_uses = 0")
+	}
+	cred.MaxUses = 1
+	if _, err := ComputeAccessHint(cred, rep(0x25, 48), rep(0x26, 32)); err != nil {
+		t.Fatalf("AccessHint credential rejected max_uses = 1: %v", err)
+	}
+}
+
 func TestReplayTokenSpentKeyIgnoresReplayProofNonce(t *testing.T) {
 	admissionContext := rep(0x20, 48)
 	proof := protocol.AdmissionProof{

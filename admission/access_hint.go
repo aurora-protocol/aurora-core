@@ -111,7 +111,7 @@ func (c AccessHintCredential) validate() error {
 	if len(c.HintSecret) != 32 {
 		return fmt.Errorf("admission: hint secret length %d, want 32", len(c.HintSecret))
 	}
-	if c.MaxUses != 0 && c.MaxUses != 1 {
+	if c.MaxUses != 1 {
 		return fmt.Errorf("admission: AccessHint max_uses must be 1")
 	}
 	return nil

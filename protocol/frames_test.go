@@ -487,6 +487,7 @@ func TestValidateUDPTargetConfirmRejectsMalformedTarget(t *testing.T) {
 		{FlowID: base.FlowID, TargetKind: 0x03, SelectedIP: []byte("example.com"), SelectedPort: base.SelectedPort, DNSAnswerSetHash: base.DNSAnswerSetHash, TTLSeconds: base.TTLSeconds, ResolutionSource: base.ResolutionSource},
 		{FlowID: base.FlowID, TargetKind: base.TargetKind, SelectedIP: []byte{203, 0, 113}, SelectedPort: base.SelectedPort, DNSAnswerSetHash: base.DNSAnswerSetHash, TTLSeconds: base.TTLSeconds, ResolutionSource: base.ResolutionSource},
 		{FlowID: base.FlowID, TargetKind: base.TargetKind, SelectedIP: base.SelectedIP, SelectedPort: base.SelectedPort, DNSAnswerSetHash: []byte{0xcc}, TTLSeconds: base.TTLSeconds, ResolutionSource: base.ResolutionSource},
+		{FlowID: base.FlowID, TargetKind: base.TargetKind, SelectedIP: base.SelectedIP, SelectedPort: base.SelectedPort, DNSAnswerSetHash: base.DNSAnswerSetHash, TTLSeconds: 86401, ResolutionSource: base.ResolutionSource},
 		{FlowID: base.FlowID, TargetKind: base.TargetKind, SelectedIP: base.SelectedIP, SelectedPort: base.SelectedPort, DNSAnswerSetHash: base.DNSAnswerSetHash, TTLSeconds: base.TTLSeconds, ResolutionSource: 0xff},
 	}
 	for _, confirm := range cases {

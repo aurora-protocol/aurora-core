@@ -572,6 +572,9 @@ func ValidateUDPTargetConfirm(confirm UDPTargetConfirm) error {
 	if len(confirm.DNSAnswerSetHash) != 48 {
 		return fmt.Errorf("protocol: UDP target confirm DNS answer hash must be 48 bytes")
 	}
+	if confirm.TTLSeconds > 86400 {
+		return fmt.Errorf("protocol: UDP target confirm ttl_seconds %d exceeds 86400", confirm.TTLSeconds)
+	}
 	switch confirm.ResolutionSource {
 	case UDPResolutionNotResolvedByRelay,
 		UDPResolutionClientSuppliedIP,

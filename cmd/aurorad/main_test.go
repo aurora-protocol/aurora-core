@@ -81,6 +81,16 @@ func TestRunTunPacketModeOpensLinuxTUNDevice(t *testing.T) {
 func TestRunTLSModeServesHTTPSForAppleClients(t *testing.T) {
 	spentTokenCachePath := filepath.Join(t.TempDir(), "spent-token-cache.log")
 	var gotAddr, gotCert, gotKey string
+	restoreCover := setNewCoverOriginForTest(func(raw string) (http.Handler, error) {
+		if raw != "https://cover.example" {
+			t.Fatalf("cover origin URL = %s", raw)
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("cover"))
+		}), nil
+	})
+	defer restoreCover()
 	restoreListen := setListenAndServeTLSForTest(func(addr string, handler http.Handler, certFile, keyFile string) error {
 		gotAddr = addr
 		gotCert = certFile
@@ -100,6 +110,7 @@ func TestRunTLSModeServesHTTPSForAppleClients(t *testing.T) {
 		"--listen", "0.0.0.0:9443",
 		"--tls-cert", "/tmp/aurora-cert.pem",
 		"--tls-key", "/tmp/aurora-key.pem",
+		"--cover-origin-url", "https://cover.example",
 		"--spent-token-cache", spentTokenCachePath,
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -130,6 +141,28 @@ func TestRunRejectsNonLoopbackTLSWithoutPersistentSpentTokenCache(t *testing.T) 
 	}
 	if !strings.Contains(stderr.String(), "persistent spent-token") || !strings.Contains(stderr.String(), "non-loopback") {
 		t.Fatalf("stderr missing persistent replay-cache requirement: %s", stderr.String())
+	}
+}
+
+func TestRunRejectsNonLoopbackTLSWithoutCoverOriginURL(t *testing.T) {
+	spentTokenCachePath := filepath.Join(t.TempDir(), "spent-token-cache.log")
+	restoreListen := setListenAndServeTLSForTest(func(addr string, handler http.Handler, certFile, keyFile string) error {
+		return http.ErrServerClosed
+	})
+	defer restoreListen()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--listen", "0.0.0.0:9443",
+		"--tls-cert", "/tmp/aurora-cert.pem",
+		"--tls-key", "/tmp/aurora-key.pem",
+		"--spent-token-cache", spentTokenCachePath,
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("run accepted public TLS without cover origin URL stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "cover origin") || !strings.Contains(stderr.String(), "non-loopback") {
+		t.Fatalf("stderr missing cover-origin requirement: %s", stderr.String())
 	}
 }
 

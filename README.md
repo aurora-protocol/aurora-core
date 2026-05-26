@@ -18,12 +18,13 @@ Implemented now:
 
 - `admission`, `crypto`, `flow`, `handshake`, `packet`, `policy`, `protocol`, `route`, `transport`, `trust`, and `wire`: portable protocol implementation.
 - `client`: local-interface-neutral client engine.
+- `platform`: thin platform adapter contracts for local proxy and packet interfaces.
 - `relay`: relay-side cover, admission, and exit-policy gates.
 - `ops`: operational verifier and directory helper logic.
 - `vectors`: generated structural vector bundle and drift tests.
 - `cmd/auroractl`: local vector, config, and capability diagnostics.
 
-Platform-specific adapters remain in `aurora-platforms` until a native platform repo needs its own build system.
+Native app or driver repositories should be split out only when they need their own platform build systems.
 
 This is not a production VPN or circumvention client. The spec still requires independent cryptographic review, real ML-DSA support, production Privacy Pass verification, cover-origin gateway behavior, active-probe testing, platform adapters, and DPI/classifier evaluation before production use.
 

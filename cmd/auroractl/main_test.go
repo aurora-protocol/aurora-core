@@ -398,6 +398,7 @@ func TestClientCheckCommandReportsLiveServerClientInterop(t *testing.T) {
 	for _, want := range []string{
 		"client_check passed=true",
 		"health=true",
+		"https_health=true",
 		"packet_exchange=true",
 		"cover_neutral_invalid_packet=true",
 	} {
@@ -565,6 +566,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	}
 	if !strings.Contains(text, "issuer HTTP daemon readiness harness") {
 		t.Fatalf("capabilities output missing issuer HTTP daemon harness:\n%s", text)
+	}
+	if !strings.Contains(text, "live HTTP/HTTPS server-client interop harness") {
+		t.Fatalf("capabilities output missing HTTP/HTTPS interop harness:\n%s", text)
 	}
 	if !strings.Contains(text, "binary issuer verifier mTLS handler") {
 		t.Fatalf("capabilities output missing binary issuer verifier mTLS handler:\n%s", text)

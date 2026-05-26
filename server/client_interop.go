@@ -15,6 +15,7 @@ import (
 type ClientInteropReport struct {
 	Passed                    bool
 	HealthEndpoint            bool
+	HTTPSHealthEndpoint       bool
 	PacketExchangeEndpoint    bool
 	CoverNeutralInvalidPacket bool
 	Findings                  []string
@@ -56,6 +57,25 @@ func RunClientInteropHarness(nowUnix uint64) (ClientInteropReport, error) {
 		}
 	}
 	report.require(report.HealthEndpoint, "live health request failed")
+
+	tlsServer := httptest.NewTLSServer(handler)
+	defer tlsServer.Close()
+	tlsClient := tlsServer.Client()
+	tlsClient.Timeout = 2 * time.Second
+	tlsHealth, err := tlsClient.Get(tlsServer.URL + "/healthz")
+	if err == nil {
+		defer tlsHealth.Body.Close()
+		var status struct {
+			Ready  bool `json:"ready"`
+			Issuer bool `json:"issuer"`
+			Cover  bool `json:"cover"`
+		}
+		body, readErr := io.ReadAll(tlsHealth.Body)
+		if readErr == nil && json.Unmarshal(body, &status) == nil {
+			report.HTTPSHealthEndpoint = tlsHealth.StatusCode == http.StatusOK && status.Ready && status.Issuer && status.Cover
+		}
+	}
+	report.require(report.HTTPSHealthEndpoint, "live HTTPS health request failed")
 
 	inbound, err := EncodePacketBatch(PacketBatch{
 		Packets:         [][]byte{{0x45, 0x00, 0x00, 0x14}},
@@ -102,9 +122,10 @@ func (r *ClientInteropReport) require(ok bool, finding string) {
 
 func FormatClientInteropReport(report ClientInteropReport) string {
 	return fmt.Sprintf(
-		"client_check passed=%t health=%t packet_exchange=%t cover_neutral_invalid_packet=%t findings=%d\n",
+		"client_check passed=%t health=%t https_health=%t packet_exchange=%t cover_neutral_invalid_packet=%t findings=%d\n",
 		report.Passed,
 		report.HealthEndpoint,
+		report.HTTPSHealthEndpoint,
 		report.PacketExchangeEndpoint,
 		report.CoverNeutralInvalidPacket,
 		len(report.Findings),

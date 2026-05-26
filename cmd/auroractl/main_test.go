@@ -401,6 +401,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "append-only file replay cache") {
 		t.Fatalf("capabilities output missing persistent replay cache support:\n%s", text)
 	}
+	if !strings.Contains(text, "protocol decode fuzz harness") {
+		t.Fatalf("capabilities output missing decode fuzz harness:\n%s", text)
+	}
 	if !strings.Contains(text, "issuer operations conformance harness") {
 		t.Fatalf("capabilities output missing issuer operations harness:\n%s", text)
 	}

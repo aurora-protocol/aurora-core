@@ -400,6 +400,7 @@ func TestClientCheckCommandReportsLiveServerClientInterop(t *testing.T) {
 		"health=true",
 		"https_health=true",
 		"packet_exchange=true",
+		"https_packet_exchange=true",
 		"cover_neutral_invalid_packet=true",
 	} {
 		if !strings.Contains(text, want) {

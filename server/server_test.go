@@ -386,6 +386,10 @@ func TestRunClientInteropHarnessExercisesLiveHTTPAndHTTPSBoundary(t *testing.T) 
 	if !report.HTTPSHealthEndpoint {
 		t.Fatalf("client interop report missing live HTTPS coverage: %+v", report)
 	}
+	formatted := FormatClientInteropReport(report)
+	if !strings.Contains(formatted, "https_packet_exchange=true") {
+		t.Fatalf("client interop report missing live HTTPS packet coverage:\n%s", formatted)
+	}
 }
 
 type servedResponse struct {

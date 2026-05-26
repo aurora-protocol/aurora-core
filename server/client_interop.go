@@ -13,12 +13,13 @@ import (
 )
 
 type ClientInteropReport struct {
-	Passed                    bool
-	HealthEndpoint            bool
-	HTTPSHealthEndpoint       bool
-	PacketExchangeEndpoint    bool
-	CoverNeutralInvalidPacket bool
-	Findings                  []string
+	Passed                      bool
+	HealthEndpoint              bool
+	HTTPSHealthEndpoint         bool
+	PacketExchangeEndpoint      bool
+	HTTPSPacketExchangeEndpoint bool
+	CoverNeutralInvalidPacket   bool
+	Findings                    []string
 }
 
 func RunClientInteropHarness(nowUnix uint64) (ClientInteropReport, error) {
@@ -99,6 +100,21 @@ func RunClientInteropHarness(nowUnix uint64) (ClientInteropReport, error) {
 	}
 	report.require(report.PacketExchangeEndpoint, "live packet exchange failed")
 
+	tlsPacketResp, err := tlsClient.Post(tlsServer.URL+DefaultPacketExchangePath, "application/octet-stream", bytes.NewReader(inbound))
+	if err == nil {
+		defer tlsPacketResp.Body.Close()
+		body, readErr := io.ReadAll(tlsPacketResp.Body)
+		mediaType, _, mediaErr := mime.ParseMediaType(tlsPacketResp.Header.Get("Content-Type"))
+		if readErr == nil && mediaErr == nil && tlsPacketResp.StatusCode == http.StatusOK && mediaType == "application/octet-stream" {
+			outbound, decodeErr := DecodePacketBatch(body)
+			report.HTTPSPacketExchangeEndpoint = decodeErr == nil &&
+				len(outbound.Packets) == 1 &&
+				bytes.Equal(outbound.Packets[0], []byte{0x45, 0x00, 0x00, 0x14}) &&
+				outbound.ProtocolNumbers[0] == 2
+		}
+	}
+	report.require(report.HTTPSPacketExchangeEndpoint, "live HTTPS packet exchange failed")
+
 	invalidResp, err := client.Post(server.URL+DefaultPacketExchangePath, "application/octet-stream", bytes.NewReader([]byte("not a packet batch")))
 	if err == nil {
 		defer invalidResp.Body.Close()
@@ -122,11 +138,12 @@ func (r *ClientInteropReport) require(ok bool, finding string) {
 
 func FormatClientInteropReport(report ClientInteropReport) string {
 	return fmt.Sprintf(
-		"client_check passed=%t health=%t https_health=%t packet_exchange=%t cover_neutral_invalid_packet=%t findings=%d\n",
+		"client_check passed=%t health=%t https_health=%t packet_exchange=%t https_packet_exchange=%t cover_neutral_invalid_packet=%t findings=%d\n",
 		report.Passed,
 		report.HealthEndpoint,
 		report.HTTPSHealthEndpoint,
 		report.PacketExchangeEndpoint,
+		report.HTTPSPacketExchangeEndpoint,
 		report.CoverNeutralInvalidPacket,
 		len(report.Findings),
 	)

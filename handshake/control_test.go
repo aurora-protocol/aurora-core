@@ -2,9 +2,11 @@ package handshake
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
+	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 )
@@ -52,6 +54,8 @@ func TestCoverCapsuleControlAEADRoundTripUsesDirectionalKeys(t *testing.T) {
 	}
 	if _, err := OpenCoverCapsule1(ctx, sealed2); err == nil {
 		t.Fatalf("CoverCapsule2 opened with CoverCapsule1 direction/AAD")
+	} else {
+		assertControlFailureKind(t, err, failure.BadAEADTag)
 	}
 }
 
@@ -87,6 +91,8 @@ func TestOpenCoverCapsuleRejectsPlainRouteInstanceMismatch(t *testing.T) {
 	}
 	if _, err := OpenCoverCapsule1(ctx, sealed); err == nil {
 		t.Fatalf("CoverCapsule1 with mismatched plaintext route_instance_id was accepted")
+	} else {
+		assertControlFailureKind(t, err, failure.MalformedCapsule)
 	}
 }
 
@@ -116,6 +122,8 @@ func TestRouteCapsuleControlAEADRoundTripBindsHopContext(t *testing.T) {
 	changedCtx.HandshakeBindingContext = repeatedByte(0x94, 48)
 	if _, err := OpenRouteCapsule1(changedCtx, sealed1); err == nil {
 		t.Fatalf("RouteCapsule1 opened with wrong hop binding context")
+	} else {
+		assertControlFailureKind(t, err, failure.BadAEADTag)
 	}
 
 	capsule2 := protocol.RouteCapsule2Plain{
@@ -135,6 +143,19 @@ func TestRouteCapsuleControlAEADRoundTripBindsHopContext(t *testing.T) {
 	}
 	if _, err := OpenRouteCapsule1(ctx, sealed2); err == nil {
 		t.Fatalf("RouteCapsule2 opened with RouteCapsule1 direction/AAD")
+	} else {
+		assertControlFailureKind(t, err, failure.BadAEADTag)
+	}
+}
+
+func assertControlFailureKind(t *testing.T, err error, kind failure.Kind) {
+	t.Helper()
+	var failureErr *failure.Error
+	if !errors.As(err, &failureErr) || failureErr.Kind != kind {
+		t.Fatalf("control capsule error = %T %[1]v, want failure kind %v", err, kind)
+	}
+	if got := failure.Classify(failureErr.Kind); got.Action != failure.CoverOrigin {
+		t.Fatalf("control capsule failure kind %v maps to public action %v", failureErr.Kind, got.Action)
 	}
 }
 

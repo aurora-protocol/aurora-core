@@ -450,6 +450,11 @@ func TestAdmissionPolicyRequiresBlindRSAVerifier(t *testing.T) {
 	verifier.err = errors.New("bad token")
 	if err := (AdmissionPolicy{BlindRSAVerifier: verifier}).AllowsProof(proof); err == nil {
 		t.Fatalf("Blind RSA verifier rejection was ignored")
+	} else {
+		var failureErr *failure.Error
+		if !errors.As(err, &failureErr) || failureErr.Kind != failure.WrongToken {
+			t.Fatalf("Blind RSA verifier rejection = %T %[1]v, want wrong-token failure", err)
+		}
 	}
 }
 
@@ -462,10 +467,20 @@ func TestAdmissionPolicyBlindRSAUsesIssuerMetadataVerifier(t *testing.T) {
 	verifier.IssuerMetadata = nil
 	if err := (AdmissionPolicy{BlindRSAVerifier: verifier, NowUnix: 100}).AllowsProof(proof); err == nil {
 		t.Fatalf("Blind RSA proof accepted without issuer metadata")
+	} else {
+		var failureErr *failure.Error
+		if !errors.As(err, &failureErr) || failureErr.Kind != failure.WrongToken {
+			t.Fatalf("missing issuer metadata rejection = %T %[1]v, want wrong-token failure", err)
+		}
 	}
 	verifier.IssuerMetadata = []protocol.IssuerMetadata{metadata, metadata}
 	if err := (AdmissionPolicy{BlindRSAVerifier: verifier, NowUnix: 100}).AllowsProof(proof); err == nil {
 		t.Fatalf("Blind RSA proof accepted with ambiguous issuer metadata")
+	} else {
+		var failureErr *failure.Error
+		if !errors.As(err, &failureErr) || failureErr.Kind != failure.WrongToken {
+			t.Fatalf("ambiguous issuer metadata rejection = %T %[1]v, want wrong-token failure", err)
+		}
 	}
 }
 

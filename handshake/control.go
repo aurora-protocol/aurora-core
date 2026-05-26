@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
+	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/wire"
@@ -40,14 +41,14 @@ func SealCoverCapsule1(ctx ControlCapsuleContext, plain protocol.CoverCapsule1Pl
 func OpenCoverCapsule1(ctx ControlCapsuleContext, sealed []byte) (protocol.CoverCapsule1Plain, error) {
 	plaintext, err := openControl(ctx, registry.MsgCoverCapsule1, ControlDirectionClientToHop, ctx.ClientHSKey, ctx.ClientHSIV, sealed)
 	if err != nil {
-		return protocol.CoverCapsule1Plain{}, err
+		return protocol.CoverCapsule1Plain{}, failure.NewError(failure.BadAEADTag, "handshake: CoverCapsule1 AEAD open failed: %w", err)
 	}
 	plain, err := decodeCoverCapsule1Plain(plaintext)
 	if err != nil {
-		return protocol.CoverCapsule1Plain{}, err
+		return protocol.CoverCapsule1Plain{}, failure.NewError(failure.MalformedCapsule, "handshake: malformed CoverCapsule1 plaintext: %w", err)
 	}
 	if plain.MsgType != registry.MsgCoverCapsule1 || plain.RouteInstanceID != ctx.RouteInstanceID {
-		return protocol.CoverCapsule1Plain{}, fmt.Errorf("handshake: CoverCapsule1 plaintext header mismatch")
+		return protocol.CoverCapsule1Plain{}, failure.NewError(failure.MalformedCapsule, "handshake: CoverCapsule1 plaintext header mismatch")
 	}
 	return plain, nil
 }
@@ -65,14 +66,14 @@ func SealCoverCapsule2(ctx ControlCapsuleContext, plain protocol.CoverCapsule2Pl
 func OpenCoverCapsule2(ctx ControlCapsuleContext, sealed []byte) (protocol.CoverCapsule2Plain, error) {
 	plaintext, err := openControl(ctx, registry.MsgCoverCapsule2, ControlDirectionHopToClient, ctx.ServerHSKey, ctx.ServerHSIV, sealed)
 	if err != nil {
-		return protocol.CoverCapsule2Plain{}, err
+		return protocol.CoverCapsule2Plain{}, failure.NewError(failure.BadAEADTag, "handshake: CoverCapsule2 AEAD open failed: %w", err)
 	}
 	plain, err := decodeCoverCapsule2Plain(plaintext)
 	if err != nil {
-		return protocol.CoverCapsule2Plain{}, err
+		return protocol.CoverCapsule2Plain{}, failure.NewError(failure.MalformedCapsule, "handshake: malformed CoverCapsule2 plaintext: %w", err)
 	}
 	if plain.MsgType != registry.MsgCoverCapsule2 || plain.RouteInstanceID != ctx.RouteInstanceID {
-		return protocol.CoverCapsule2Plain{}, fmt.Errorf("handshake: CoverCapsule2 plaintext header mismatch")
+		return protocol.CoverCapsule2Plain{}, failure.NewError(failure.MalformedCapsule, "handshake: CoverCapsule2 plaintext header mismatch")
 	}
 	return plain, nil
 }
@@ -91,14 +92,14 @@ func SealRouteCapsule1(ctx ControlCapsuleContext, plain protocol.RouteCapsule1Pl
 func OpenRouteCapsule1(ctx ControlCapsuleContext, sealed []byte) (protocol.RouteCapsule1Plain, error) {
 	plaintext, err := openControl(ctx, registry.MsgRouteCapsule1, ControlDirectionClientToHop, ctx.ClientHSKey, ctx.ClientHSIV, sealed)
 	if err != nil {
-		return protocol.RouteCapsule1Plain{}, err
+		return protocol.RouteCapsule1Plain{}, failure.NewError(failure.BadAEADTag, "handshake: RouteCapsule1 AEAD open failed: %w", err)
 	}
 	plain, err := decodeRouteCapsule1Plain(plaintext)
 	if err != nil {
-		return protocol.RouteCapsule1Plain{}, err
+		return protocol.RouteCapsule1Plain{}, failure.NewError(failure.MalformedCapsule, "handshake: malformed RouteCapsule1 plaintext: %w", err)
 	}
 	if plain.MsgType != registry.MsgRouteCapsule1 || plain.RouteInstanceID != ctx.RouteInstanceID || plain.HopIndex != ctx.HopIndex {
-		return protocol.RouteCapsule1Plain{}, fmt.Errorf("handshake: RouteCapsule1 plaintext header mismatch")
+		return protocol.RouteCapsule1Plain{}, failure.NewError(failure.MalformedCapsule, "handshake: RouteCapsule1 plaintext header mismatch")
 	}
 	return plain, nil
 }
@@ -117,14 +118,14 @@ func SealRouteCapsule2(ctx ControlCapsuleContext, plain protocol.RouteCapsule2Pl
 func OpenRouteCapsule2(ctx ControlCapsuleContext, sealed []byte) (protocol.RouteCapsule2Plain, error) {
 	plaintext, err := openControl(ctx, registry.MsgRouteCapsule2, ControlDirectionHopToClient, ctx.ServerHSKey, ctx.ServerHSIV, sealed)
 	if err != nil {
-		return protocol.RouteCapsule2Plain{}, err
+		return protocol.RouteCapsule2Plain{}, failure.NewError(failure.BadAEADTag, "handshake: RouteCapsule2 AEAD open failed: %w", err)
 	}
 	plain, err := decodeRouteCapsule2Plain(plaintext)
 	if err != nil {
-		return protocol.RouteCapsule2Plain{}, err
+		return protocol.RouteCapsule2Plain{}, failure.NewError(failure.MalformedCapsule, "handshake: malformed RouteCapsule2 plaintext: %w", err)
 	}
 	if plain.MsgType != registry.MsgRouteCapsule2 || plain.RouteInstanceID != ctx.RouteInstanceID || plain.HopIndex != ctx.HopIndex {
-		return protocol.RouteCapsule2Plain{}, fmt.Errorf("handshake: RouteCapsule2 plaintext header mismatch")
+		return protocol.RouteCapsule2Plain{}, failure.NewError(failure.MalformedCapsule, "handshake: RouteCapsule2 plaintext header mismatch")
 	}
 	return plain, nil
 }

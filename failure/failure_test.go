@@ -30,6 +30,8 @@ func TestKindsHaveStableInternalCodes(t *testing.T) {
 		{UnsupportedVersion, 0x0010, "f0010"},
 		{MalformedHybridShare, 0x0011, "f0011"},
 		{RateLimited, 0x0012, "f0012"},
+		{WrongToken, 0x0013, "f0013"},
+		{MalformedCapsule, 0x0014, "f0014"},
 	}
 	seen := make(map[uint16]bool, len(cases))
 	for _, tc := range cases {
@@ -66,6 +68,8 @@ func TestProbeSensitiveFailuresUseCoverOriginAction(t *testing.T) {
 		VerifierUnavailable,
 		ReplayCacheFailure,
 		RateLimited,
+		WrongToken,
+		MalformedCapsule,
 	}
 	first := Classify(kinds[0])
 	for _, kind := range kinds {
@@ -105,6 +109,8 @@ func TestActiveProbeCasesCoverSpecChecklist(t *testing.T) {
 		"malformed-flow-open":       MalformedFlowOpen,
 		"malformed-key-update":      MalformedKeyUpdate,
 		"rate-limited":              RateLimited,
+		"wrong-token":               WrongToken,
+		"malformed-capsule":         MalformedCapsule,
 	}
 	got := ActiveProbeCases()
 	if len(got) != len(want) {

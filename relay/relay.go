@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/netip"
 	"strings"
@@ -28,6 +29,8 @@ const (
 	FailureInvalidCoverSlot     = failure.InvalidCoverSlot
 	FailureUnsupportedMethod    = failure.UnsupportedMethod
 	FailureVerifierUnavailable  = failure.VerifierUnavailable
+	FailureWrongToken           = failure.WrongToken
+	FailureMalformedCapsule     = failure.MalformedCapsule
 )
 
 type Response struct {
@@ -788,7 +791,7 @@ func (v MetadataBlindRSAVerifier) VerifyBlindRSA2048(proof protocol.AdmissionPro
 		}
 	}
 	if matches != 1 {
-		return fmt.Errorf("relay: Blind RSA issuer metadata lookup returned %d matches", matches)
+		return failure.NewError(failure.WrongToken, "relay: Blind RSA issuer metadata lookup returned %d matches", matches)
 	}
 	return nil
 }
@@ -820,7 +823,14 @@ func (p AdmissionPolicy) AllowsProof(proof protocol.AdmissionProof) error {
 		if p.BlindRSAVerifier == nil {
 			return fmt.Errorf("relay: Blind RSA proof requires local verifier")
 		}
-		return p.BlindRSAVerifier.VerifyBlindRSA2048(proof)
+		if err := p.BlindRSAVerifier.VerifyBlindRSA2048(proof); err != nil {
+			var failureErr *failure.Error
+			if errors.As(err, &failureErr) {
+				return err
+			}
+			return failure.NewError(failure.WrongToken, "relay: Blind RSA proof rejected: %w", err)
+		}
+		return nil
 	case registry.ProofVOPRFP384SHA384:
 		return fmt.Errorf("relay: VOPRF proof requires verifier-service replay context")
 	case registry.ProofLabStaticToken:

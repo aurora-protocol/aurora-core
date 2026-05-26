@@ -19,10 +19,12 @@ func TestActiveProbesCommandPrintsBaselineReport(t *testing.T) {
 	}
 	text := out.String()
 	for _, want := range []string{
-		"active_probe_baseline passed=true cases=15\n",
-		"gateway_active_probe passed=true cases=15 normal_responses=15 forwarded=0 sidecar_forwarded=0 failure_logs=0\n",
+		"active_probe_baseline passed=true cases=17\n",
+		"gateway_active_probe passed=true cases=17 normal_responses=17 forwarded=0 sidecar_forwarded=0 failure_logs=0\n",
 		"canonical http_status=0 close_code=0 tls_alert=0 quic_close=0 websocket_close=0 timing_class= reflected_log=\n",
 		"case bad-access-hint passed=true http_status=0 close_code=0 tls_alert=0 quic_close=0 websocket_close=0 timing_class= reflected_log=\n",
+		"case wrong-token passed=true http_status=0 close_code=0 tls_alert=0 quic_close=0 websocket_close=0 timing_class= reflected_log=\n",
+		"case malformed-capsule passed=true http_status=0 close_code=0 tls_alert=0 quic_close=0 websocket_close=0 timing_class= reflected_log=\n",
 		"case verifier-unavailable passed=true http_status=0 close_code=0 tls_alert=0 quic_close=0 websocket_close=0 timing_class= reflected_log=\n",
 		"case rate-limited passed=true http_status=0 close_code=0 tls_alert=0 quic_close=0 websocket_close=0 timing_class= reflected_log=\n",
 		"case malformed-key-update passed=true http_status=0 close_code=0 tls_alert=0 quic_close=0 websocket_close=0 timing_class= reflected_log=\n",

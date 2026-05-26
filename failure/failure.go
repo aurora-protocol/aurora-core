@@ -27,6 +27,8 @@ const (
 	UnsupportedVersion
 	MalformedHybridShare
 	RateLimited
+	WrongToken
+	MalformedCapsule
 )
 
 type Action uint8
@@ -75,7 +77,7 @@ type ProbeFinding struct {
 }
 
 func (k Kind) Code() uint16 {
-	if k < BadAccessHint || k > RateLimited {
+	if k < BadAccessHint || k > MalformedCapsule {
 		return uint16(Unknown)
 	}
 	return uint16(k)
@@ -147,6 +149,8 @@ func ActiveProbeCases() []ProbeCase {
 		{Name: "wrong-suite", Kind: WrongSuite},
 		{Name: "bad-aead-tag", Kind: BadAEADTag},
 		{Name: "replayed-admission-proof", Kind: ReplayedAdmission},
+		{Name: "wrong-token", Kind: WrongToken},
+		{Name: "malformed-capsule", Kind: MalformedCapsule},
 		{Name: "verifier-unavailable", Kind: VerifierUnavailable},
 		{Name: "unsupported-version", Kind: UnsupportedVersion},
 		{Name: "malformed-hybrid-share", Kind: MalformedHybridShare},

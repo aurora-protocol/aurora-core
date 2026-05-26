@@ -100,3 +100,34 @@ func TestRoutePreludeRealCryptoBundleIsDeterministicAndVerifiable(t *testing.T) 
 		t.Fatalf("route-prelude real crypto vector omitted required fields: %+v", first)
 	}
 }
+
+func TestKeyUpdateRealCryptoBundleIsDeterministicAndVerifiable(t *testing.T) {
+	first, err := GenerateKeyUpdateRealCryptoBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := GenerateKeyUpdateRealCryptoBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("KEY_UPDATE real crypto vector is not deterministic:\nfirst=%+v\nsecond=%+v", first, second)
+	}
+	assertHexLen := func(name, value string, wantBytes int) {
+		t.Helper()
+		decoded, err := hex.DecodeString(value)
+		if err != nil {
+			t.Fatalf("%s is not hex: %v", name, err)
+		}
+		if len(decoded) != wantBytes {
+			t.Fatalf("%s length = %d, want %d", name, len(decoded), wantBytes)
+		}
+	}
+	assertHexLen("key_update_current_app_secret", first.CurrentAppSecret, 48)
+	assertHexLen("key_update_next_app_secret", first.NextAppSecret, 48)
+	assertHexLen("key_update_next_key", first.NextKey, 32)
+	assertHexLen("key_update_next_iv", first.NextIV, 12)
+	if first.KeyUpdateFrame == "" || first.KeyUpdateFrameBlock == "" || first.KeyUpdateACK == "" || first.KeyUpdateACKFrameBlock == "" || first.KeyUpdateContext == "" {
+		t.Fatalf("KEY_UPDATE vector omitted required fields: %+v", first)
+	}
+}

@@ -116,6 +116,10 @@ func writeRealCryptoVectors(w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	keyUpdate, err := corevectors.GenerateKeyUpdateRealCryptoBundle()
+	if err != nil {
+		return err
+	}
 	fmt.Fprintln(w, "first_hop_client_classical_eph_pub:", firstHop.ClientClassicalEphPub)
 	fmt.Fprintln(w, "first_hop_server_classical_eph_pub:", firstHop.ServerClassicalEphPub)
 	fmt.Fprintln(w, "first_hop_classical_shared_secret:", firstHop.ClassicalSharedSecret)
@@ -142,6 +146,15 @@ func writeRealCryptoVectors(w io.Writer) error {
 	fmt.Fprintln(w, "split2_route_server_pq_public_key:", routePrelude.RouteServerPQPublicKey)
 	fmt.Fprintln(w, "split2_route_server_prelude_signature_classical:", routePrelude.RouteServerPreludeSignatureClassical)
 	fmt.Fprintln(w, "split2_route_server_prelude_signature_pq:", routePrelude.RouteServerPreludeSignaturePQ)
+	fmt.Fprintln(w, "key_update_frame:", keyUpdate.KeyUpdateFrame)
+	fmt.Fprintln(w, "key_update_frame_block:", keyUpdate.KeyUpdateFrameBlock)
+	fmt.Fprintln(w, "key_update_ack:", keyUpdate.KeyUpdateACK)
+	fmt.Fprintln(w, "key_update_ack_frame_block:", keyUpdate.KeyUpdateACKFrameBlock)
+	fmt.Fprintln(w, "key_update_context:", keyUpdate.KeyUpdateContext)
+	fmt.Fprintln(w, "key_update_current_app_secret:", keyUpdate.CurrentAppSecret)
+	fmt.Fprintln(w, "key_update_next_app_secret:", keyUpdate.NextAppSecret)
+	fmt.Fprintln(w, "key_update_next_key:", keyUpdate.NextKey)
+	fmt.Fprintln(w, "key_update_next_iv:", keyUpdate.NextIV)
 	return nil
 }
 
@@ -243,7 +256,7 @@ func capabilitiesReport(w io.Writer) {
 	fmt.Fprintln(w, "- DirectoryConsensus, RelayDescriptor, CoverTemplate trust hashes, signature inputs, and strict ML-DSA authority quorum")
 	fmt.Fprintln(w, "- AES-256-GCM, HKDF labels, SHA-384/SHA-512 suite hashes, ML-KEM wrappers, and ML-DSA verification")
 	fmt.Fprintln(w, "- first-hop prelude transcript hashing, Finished messages, and application secret derivation")
-	fmt.Fprintln(w, "- first-hop and split-2 route-prelude real-crypto vectors with ECDH, ML-KEM, ECDSA, and ML-DSA artifacts")
+	fmt.Fprintln(w, "- first-hop, split-2 route-prelude, and KEY_UPDATE / KEY_UPDATE_ACK real-crypto vectors with ECDH, ML-KEM, ECDSA, and ML-DSA artifacts")
 	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
 	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing")
 	fmt.Fprintln(w, "not production-complete:")

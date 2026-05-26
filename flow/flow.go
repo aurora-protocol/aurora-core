@@ -272,10 +272,17 @@ func validateOpen(open protocol.FlowOpen) error {
 	if len(open.NameBindingID) != 16 || len(open.DNSAnswerSetHash) != 48 {
 		return fmt.Errorf("flow: binding ID and DNS answer hash have invalid lengths")
 	}
-	if open.FlowKind == FlowKindUDPAssociation &&
-		open.LocalBindingMode == LocalBindingTransparentFakeIP &&
-		open.UDPFQDNMode == UDPFQDNRelayResolvedFlowBound {
-		return fmt.Errorf("flow: relay-resolved UDP disabled by default for transparent fake-IP mode")
+	if open.FlowKind == FlowKindUDPAssociation {
+		if open.TargetKind == TargetKindDomainName && open.UDPFQDNMode != UDPFQDNRelayResolvedFlowBound {
+			return fmt.Errorf("flow: UDP domain targets require relay-resolved FQDN mode")
+		}
+		if len(open.OriginalDomainHint) != 0 && (open.TargetKind != TargetKindDomainName || open.UDPFQDNMode != UDPFQDNRelayResolvedFlowBound) {
+			return fmt.Errorf("flow: raw UDP domain hints require explicit relay-resolved FQDN mode")
+		}
+		if open.LocalBindingMode == LocalBindingTransparentFakeIP &&
+			open.UDPFQDNMode == UDPFQDNRelayResolvedFlowBound {
+			return fmt.Errorf("flow: relay-resolved UDP disabled by default for transparent fake-IP mode")
+		}
 	}
 	return nil
 }

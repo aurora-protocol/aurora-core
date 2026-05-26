@@ -150,6 +150,51 @@ func TestTransparentUDPRejectsRelayResolvedByDefault(t *testing.T) {
 	}
 }
 
+func TestUDPFQDNTargetRequiresExplicitRelayResolvedMode(t *testing.T) {
+	m := NewManager()
+	open := protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           18,
+		FlowKind:         FlowKindUDPAssociation,
+		TargetKind:       TargetKindDomainName,
+		TargetHost:       []byte("example.com"),
+		TargetPort:       443,
+		UDPFQDNMode:      UDPFQDNClientResolvedNameBinding,
+		NameBindingID:    fb(0xaa, 16),
+		DNSAnswerSetHash: fb(0xbb, 48),
+		LocalBindingMode: LocalBindingExplicitProxyAPI,
+		PriorityClass:    PriorityRealtime,
+	}
+	if err := m.Open(open); err == nil {
+		t.Fatalf("UDP domain target accepted without relay-resolved mode")
+	}
+	open.UDPFQDNMode = UDPFQDNRelayResolvedFlowBound
+	if err := m.Open(open); err != nil {
+		t.Fatalf("explicit relay-resolved UDP domain target rejected: %v", err)
+	}
+}
+
+func TestTransparentUDPRejectsRawOriginalDomainHint(t *testing.T) {
+	m := NewManager()
+	err := m.Open(protocol.FlowOpen{
+		FlowOpenVersion:    registry.Version20,
+		FlowID:             19,
+		FlowKind:           FlowKindUDPAssociation,
+		TargetKind:         TargetKindIPv4,
+		TargetHost:         []byte{93, 184, 216, 34},
+		TargetPort:         443,
+		UDPFQDNMode:        UDPFQDNClientResolvedNameBinding,
+		NameBindingID:      fb(0xaa, 16),
+		OriginalDomainHint: []byte("example.com"),
+		DNSAnswerSetHash:   fb(0xbb, 48),
+		LocalBindingMode:   LocalBindingTransparentFakeIP,
+		PriorityClass:      PriorityRealtime,
+	})
+	if err == nil {
+		t.Fatalf("transparent UDP flow accepted raw original domain hint")
+	}
+}
+
 func TestFakeIPAllocatorIsStableAndPrivate(t *testing.T) {
 	a := NewFakeIPAllocator("198.18.0.0/15")
 	ip1, id1, err := a.Assign("Example.COM", []string{"93.184.216.34"})

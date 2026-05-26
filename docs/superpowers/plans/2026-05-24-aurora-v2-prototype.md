@@ -103,9 +103,9 @@ Reproduce Appendix B.4 control preimage and SHA-384 AAD.
 
 Reproduce Appendix B.4 route-wrap context, key, IV, AAD, and ciphertext/tag.
 
-- [x] **Step 4: Add ML-KEM-768 and ML-KEM-1024 wrappers**
+- [x] **Step 4: Add ML-KEM-768 and ML-KEM-1024 wrappers plus ML-DSA verification**
 
-Expose standard-library generation, encapsulation, and decapsulation helpers while leaving ML-DSA unsupported and explicit.
+Expose standard-library generation, encapsulation, decapsulation helpers, and CIRCL-backed ML-DSA verification.
 
 ### Task 5: Admission and Replay
 
@@ -192,4 +192,4 @@ Check for fake production claims, unsafe logging, missing vector coverage, repla
 
 - [x] **Step 3: Document unsupported production requirements**
 
-Explicitly list ML-DSA verification, Privacy Pass production proof verification, real cover-origin gateway, active-probe harness, platform adapters, and DPI evaluation as future production work.
+Explicitly list the full real-crypto vector package, Privacy Pass production proof verification, real cover-origin gateway, active-probe harness, platform adapters, and DPI evaluation as future production work.

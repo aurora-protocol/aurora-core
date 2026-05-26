@@ -175,17 +175,21 @@ func writeVectors(w io.Writer) error {
 }
 
 func capabilities() {
-	fmt.Println("implemented:")
-	fmt.Println("- Section 9 wire scalar, opaque, vector, and struct encoding")
-	fmt.Println("- Appendix A registries")
-	fmt.Println("- Appendix B.4 and B.5 structural vectors")
-	fmt.Println("- DirectoryConsensus, RelayDescriptor, CoverTemplate trust hashes and signature inputs")
-	fmt.Println("- AES-256-GCM, HKDF labels, SHA-384/SHA-512 suite hashes, ML-KEM wrappers")
-	fmt.Println("- first-hop prelude transcript hashing, Finished messages, and application secret derivation")
-	fmt.Println("- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
-	fmt.Println("- policy profiles, PAL scoring, PACE reference behavior, local config parsing")
-	fmt.Println("not production-complete:")
-	fmt.Println("- ML-DSA signatures, Privacy Pass production proof verification, cover-origin gateway, active-probe harness, platform adapters, DPI evaluation")
+	capabilitiesReport(os.Stdout)
+}
+
+func capabilitiesReport(w io.Writer) {
+	fmt.Fprintln(w, "implemented:")
+	fmt.Fprintln(w, "- Section 9 wire scalar, opaque, vector, and struct encoding")
+	fmt.Fprintln(w, "- Appendix A registries")
+	fmt.Fprintln(w, "- Appendix B.4 and B.5 structural vectors")
+	fmt.Fprintln(w, "- DirectoryConsensus, RelayDescriptor, CoverTemplate trust hashes, signature inputs, and strict ML-DSA authority quorum")
+	fmt.Fprintln(w, "- AES-256-GCM, HKDF labels, SHA-384/SHA-512 suite hashes, ML-KEM wrappers, and ML-DSA verification")
+	fmt.Fprintln(w, "- first-hop prelude transcript hashing, Finished messages, and application secret derivation")
+	fmt.Fprintln(w, "- AccessHint, replay keys, packet protection, FrameBlock, FLOW_* validation, KEY_UPDATE")
+	fmt.Fprintln(w, "- policy profiles, PAL scoring, PACE reference behavior, local config parsing")
+	fmt.Fprintln(w, "not production-complete:")
+	fmt.Fprintln(w, "- full real-crypto vector package, Privacy Pass production proof verification, cover-origin gateway, active-probe harness, platform adapters, DPI evaluation")
 }
 
 func activeProbes(w io.Writer) error {

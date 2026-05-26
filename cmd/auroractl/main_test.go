@@ -51,6 +51,18 @@ func TestWireCheckCommandPrintsPublicWireReport(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
+	var out bytes.Buffer
+	capabilitiesReport(&out)
+	text := out.String()
+	if !strings.Contains(text, "ML-DSA verification") {
+		t.Fatalf("capabilities output missing ML-DSA verification:\n%s", text)
+	}
+	if strings.Contains(text, "not production-complete:\n- ML-DSA") {
+		t.Fatalf("capabilities output still reports ML-DSA work as the first missing item:\n%s", text)
+	}
+}
+
 func TestVectorsCommandPrintsFlowManagementVectors(t *testing.T) {
 	var out bytes.Buffer
 	if err := vectors(nil, &out); err != nil {

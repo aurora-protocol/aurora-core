@@ -397,3 +397,22 @@ func DecodePolicyAccept(r *wire.Reader) PolicyAccept {
 	out.Extensions = DecodeExtensions(r)
 	return out
 }
+
+func (p PolicyAccept) ValidateStructural() error {
+	switch p.SelectedTunnelPersonality {
+	case registry.PersonalityProxyFlow:
+		if p.VirtualAddressAssignment != nil {
+			return fmt.Errorf("protocol: proxy-flow policy accept must not carry virtual address assignment")
+		}
+	case registry.PersonalityIPLite, registry.PersonalityFullIP:
+		if p.VirtualAddressAssignment == nil {
+			return fmt.Errorf("protocol: IP policy accept requires virtual address assignment")
+		}
+	default:
+		return fmt.Errorf("protocol: reserved tunnel personality 0x%x", p.SelectedTunnelPersonality)
+	}
+	if err := ValidateExtensions(p.Extensions, nil); err != nil {
+		return err
+	}
+	return nil
+}

@@ -194,6 +194,56 @@ func TestFinishedAndApplicationSecrets(t *testing.T) {
 	}
 }
 
+func TestComputeServerFinishedRejectsPolicyAcceptVirtualAddressMismatch(t *testing.T) {
+	capsule1 := protocol.CoverCapsule1Plain{
+		MsgType:         registry.MsgCoverCapsule1,
+		RouteInstanceID: 5,
+		AdmissionProof: protocol.AdmissionProof{
+			ProofVersion:          registry.Version20,
+			ProofType:             registry.ProofLabStaticToken,
+			IssuerID:              hx(1, 16),
+			TokenKeyID:            hx(2, 32),
+			RelayBucketID:         hx(3, 16),
+			TokenScopeID:          hx(4, 16),
+			ExpiryUnix:            2000000000,
+			TokenNonce:            hx(5, 32),
+			RedemptionContextHash: hx(6, 48),
+			TokenAuthenticator:    []byte("token"),
+		},
+		ReplayProof: protocol.ReplayProof{
+			ProofVersion:        registry.Version20,
+			ReplayEpochID:       1,
+			TokenRedemptionHash: hx(7, 48),
+			ClientReplayNonce:   hx(8, 32),
+			ReplayContextHash:   hx(9, 48),
+			ReplayWindowID:      hx(10, 16),
+		},
+	}
+	accept := protocol.PolicyAccept{
+		SelectedVersion:           registry.Version20,
+		SelectedSuite:             registry.SuiteHybrid768AESGCM,
+		SelectedMethod:            registry.MethodWebH2Stream,
+		SelectedPolicy:            registry.PolicyBalancedWeb,
+		SelectedRouteModeID:       registry.RouteFast1,
+		SelectedShape:             registry.ShapeNormal,
+		SelectedTunnelPersonality: registry.PersonalityProxyFlow,
+		VirtualAddressAssignment: &protocol.VirtualAddressAssignment{
+			AddressFamily: 1,
+			Address:       []byte{10, 0, 0, 2},
+			PrefixLength:  24,
+		},
+	}
+	if _, _, _, err := ComputeServerFinished(registry.SuiteHybrid768AESGCM, hx(0x33, 48), hx(0x44, 48), capsule1, accept); err == nil {
+		t.Fatalf("proxy-flow PolicyAccept with virtual address assignment was signed")
+	}
+
+	accept.SelectedTunnelPersonality = registry.PersonalityIPLite
+	accept.VirtualAddressAssignment = nil
+	if _, _, _, err := ComputeServerFinished(registry.SuiteHybrid768AESGCM, hx(0x33, 48), hx(0x44, 48), capsule1, accept); err == nil {
+		t.Fatalf("ip-lite PolicyAccept without virtual address assignment was signed")
+	}
+}
+
 func TestRouteCapsuleFinishedUsesHopTranscript(t *testing.T) {
 	hopTranscript := hx(0x44, 48)
 	secrets, err := DeriveHandshakeSecrets(registry.SuiteHybrid768AESGCM, hx(1, 32), hx(2, 32), hx(0x43, 48), hopTranscript)

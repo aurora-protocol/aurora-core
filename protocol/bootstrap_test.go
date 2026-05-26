@@ -203,12 +203,6 @@ func samplePolicyAccept() PolicyAccept {
 		FallbackMethods:           []uint64{registry.MethodWebH1WS},
 		RetryPolicyID:             4,
 		PathValidationPolicyID:    5,
-		VirtualAddressAssignment: &VirtualAddressAssignment{
-			AddressFamily: 1,
-			Address:       []byte{10, 0, 0, 2},
-			PrefixLength:  24,
-			DNSResolvers:  [][]byte{{10, 0, 0, 53}},
-		},
-		Extensions: []Extension{{ExtensionType: 0x7009, Body: []byte("accept")}},
+		Extensions:                []Extension{{ExtensionType: 0x7009, Body: []byte("accept")}},
 	}
 }

@@ -279,6 +279,9 @@ func ComputeRouteServerFinished(suite uint64, serverFinishedKey, hopPreludeTrans
 }
 
 func computeServerFinished(suite uint64, serverFinishedKey, transcriptHashForHop, encodedCapsule1 []byte, accept protocol.PolicyAccept) ([]byte, []byte, []byte, error) {
+	if err := accept.ValidateStructural(); err != nil {
+		return nil, nil, nil, err
+	}
 	capsule1Hash, err := auroracrypto.SuiteHash(suite, encodedCapsule1)
 	if err != nil {
 		return nil, nil, nil, err

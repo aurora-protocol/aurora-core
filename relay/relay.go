@@ -373,12 +373,78 @@ type ExitFlowHandler struct {
 
 const maxUDPConfirmTTLSeconds uint32 = 86400
 
+type ExitEventKind uint8
+
+const (
+	ExitEventFlowOpened ExitEventKind = iota + 1
+	ExitEventStreamData
+	ExitEventDatagramData
+	ExitEventDNSMessage
+	ExitEventFlowClosed
+)
+
+type ExitFrameResult struct {
+	OutboundFrames []protocol.AuroraFrame
+	Events         []ExitFrameEvent
+}
+
+type ExitFrameEvent struct {
+	Kind      ExitEventKind
+	FlowID    uint64
+	FrameType uint64
+	Flow      coreflow.FlowState
+	Data      []byte
+	Close     protocol.FlowClose
+}
+
 func NewExitFlowHandler(policy ExitPolicy) *ExitFlowHandler {
 	return &ExitFlowHandler{
 		Policy:               policy,
 		UDPConfirmTTLSeconds: 300,
 		flows:                coreflow.NewManager(),
 	}
+}
+
+func (h *ExitFlowHandler) HandleFrameBlock(block protocol.FrameBlock, now uint64) (ExitFrameResult, error) {
+	h.ensure()
+	if err := protocol.ValidateFrameBlock(block); err != nil {
+		return ExitFrameResult{}, err
+	}
+	var result ExitFrameResult
+	for _, frame := range block.Frames {
+		switch frame.FrameType {
+		case registry.FrameFlowOpen:
+			out, err := h.HandleFlowOpenFrame(frame, now)
+			if err != nil {
+				return ExitFrameResult{}, err
+			}
+			result.OutboundFrames = appendAuroraFrames(result.OutboundFrames, out)
+			state, _ := h.FlowState(frame.FlowID)
+			result.Events = append(result.Events, ExitFrameEvent{
+				Kind:      ExitEventFlowOpened,
+				FlowID:    frame.FlowID,
+				FrameType: frame.FrameType,
+				Flow:      cloneFlowState(state),
+			})
+		case registry.FrameStreamData, registry.FrameDatagramData, registry.FrameDNSMessage:
+			event, err := h.handleDataFrame(frame, now)
+			if err != nil {
+				return ExitFrameResult{}, err
+			}
+			result.Events = append(result.Events, event)
+		case registry.FrameFlowClose:
+			event, err := h.handleFlowCloseFrame(frame, now)
+			if err != nil {
+				return ExitFrameResult{}, err
+			}
+			result.Events = append(result.Events, event)
+		case registry.FramePadding:
+			continue
+		default:
+			return ExitFrameResult{}, fmt.Errorf("relay: unsupported exit frame type 0x%x", frame.FrameType)
+		}
+	}
+	return result, nil
 }
 
 func (h *ExitFlowHandler) HandleFlowOpenFrame(frame protocol.AuroraFrame, now uint64) ([]protocol.AuroraFrame, error) {
@@ -406,6 +472,88 @@ func (h *ExitFlowHandler) HandleFlowOpenFrame(frame protocol.AuroraFrame, now ui
 		return nil, err
 	}
 	return out, nil
+}
+
+func (h *ExitFlowHandler) handleDataFrame(frame protocol.AuroraFrame, now uint64) (ExitFrameEvent, error) {
+	if frame.FrameType == registry.FrameDNSMessage {
+		state, _ := h.FlowState(frame.FlowID)
+		return ExitFrameEvent{
+			Kind:      ExitEventDNSMessage,
+			FlowID:    frame.FlowID,
+			FrameType: frame.FrameType,
+			Flow:      cloneFlowState(state),
+			Data:      append([]byte(nil), frame.Payload...),
+		}, nil
+	}
+	state, ok := h.flows.DemuxInbound(frame.FlowID)
+	if !ok {
+		return ExitFrameEvent{}, fmt.Errorf("relay: data for unknown flow_id %d", frame.FlowID)
+	}
+	if state.LocalClosed || state.PeerClosed {
+		return ExitFrameEvent{}, fmt.Errorf("relay: data for closed flow_id %d", frame.FlowID)
+	}
+	switch frame.FrameType {
+	case registry.FrameStreamData:
+		if state.Kind == coreflow.FlowKindUDPAssociation {
+			var accepted bool
+			state, accepted = h.flows.AcceptDatagramWithOptions(frame.FlowID, coreflow.DatagramOptions{NowUnix: now})
+			if !accepted {
+				return ExitFrameEvent{}, fmt.Errorf("relay: UDP stream-fallback data for unavailable flow_id %d", frame.FlowID)
+			}
+		} else if state.Kind != coreflow.FlowKindTCPStream {
+			return ExitFrameEvent{}, fmt.Errorf("relay: STREAM_DATA for non-stream flow_id %d", frame.FlowID)
+		}
+		return ExitFrameEvent{
+			Kind:      ExitEventStreamData,
+			FlowID:    frame.FlowID,
+			FrameType: frame.FrameType,
+			Flow:      cloneFlowState(state),
+			Data:      append([]byte(nil), frame.Payload...),
+		}, nil
+	case registry.FrameDatagramData:
+		var accepted bool
+		state, accepted = h.flows.AcceptDatagramWithOptions(frame.FlowID, coreflow.DatagramOptions{NowUnix: now})
+		if !accepted {
+			return ExitFrameEvent{}, fmt.Errorf("relay: DATAGRAM_DATA for unavailable flow_id %d", frame.FlowID)
+		}
+		return ExitFrameEvent{
+			Kind:      ExitEventDatagramData,
+			FlowID:    frame.FlowID,
+			FrameType: frame.FrameType,
+			Flow:      cloneFlowState(state),
+			Data:      append([]byte(nil), frame.Payload...),
+		}, nil
+	default:
+		return ExitFrameEvent{}, fmt.Errorf("relay: unsupported data frame type 0x%x", frame.FrameType)
+	}
+}
+
+func (h *ExitFlowHandler) handleFlowCloseFrame(frame protocol.AuroraFrame, now uint64) (ExitFrameEvent, error) {
+	if frame.FrameType != registry.FrameFlowClose {
+		return ExitFrameEvent{}, fmt.Errorf("relay: expected FLOW_CLOSE frame, got 0x%x", frame.FrameType)
+	}
+	if err := protocol.ValidateFlowManagementFrame(frame); err != nil {
+		return ExitFrameEvent{}, err
+	}
+	r := wire.NewReader(frame.Payload)
+	close := protocol.DecodeFlowClose(r)
+	if r.Err() != nil {
+		return ExitFrameEvent{}, r.Err()
+	}
+	if !r.EOF() {
+		return ExitFrameEvent{}, fmt.Errorf("relay: trailing FLOW_CLOSE payload bytes")
+	}
+	if err := h.flows.MarkPeerClose(close, coreflow.CloseOptions{NowUnix: now, DrainSeconds: 30}); err != nil {
+		return ExitFrameEvent{}, err
+	}
+	state, _ := h.FlowState(frame.FlowID)
+	return ExitFrameEvent{
+		Kind:      ExitEventFlowClosed,
+		FlowID:    frame.FlowID,
+		FrameType: frame.FrameType,
+		Flow:      cloneFlowState(state),
+		Close:     cloneFlowClose(close),
+	}, nil
 }
 
 func (h *ExitFlowHandler) FlowState(flowID uint64) (coreflow.FlowState, bool) {
@@ -467,6 +615,45 @@ func (h *ExitFlowHandler) effectiveUDPConfirmTTLSeconds() uint32 {
 		return maxUDPConfirmTTLSeconds
 	}
 	return ttl
+}
+
+func appendAuroraFrames(out []protocol.AuroraFrame, frames []protocol.AuroraFrame) []protocol.AuroraFrame {
+	for _, frame := range frames {
+		out = append(out, cloneAuroraFrame(frame))
+	}
+	return out
+}
+
+func cloneAuroraFrame(frame protocol.AuroraFrame) protocol.AuroraFrame {
+	frame.Payload = append([]byte(nil), frame.Payload...)
+	return frame
+}
+
+func cloneFlowState(state coreflow.FlowState) coreflow.FlowState {
+	state.TargetHost = append([]byte(nil), state.TargetHost...)
+	state.NameBindingID = append([]byte(nil), state.NameBindingID...)
+	state.DNSAnswerSetHash = append([]byte(nil), state.DNSAnswerSetHash...)
+	state.ConfirmedHost = append([]byte(nil), state.ConfirmedHost...)
+	state.ConfirmedDNSAnswerSetHash = append([]byte(nil), state.ConfirmedDNSAnswerSetHash...)
+	return state
+}
+
+func cloneFlowClose(close protocol.FlowClose) protocol.FlowClose {
+	close.Reason = append([]byte(nil), close.Reason...)
+	close.Extensions = cloneProtocolExtensions(close.Extensions)
+	return close
+}
+
+func cloneProtocolExtensions(in []protocol.Extension) []protocol.Extension {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]protocol.Extension, len(in))
+	for i, ext := range in {
+		out[i] = ext
+		out[i].Body = append([]byte(nil), ext.Body...)
+	}
+	return out
 }
 
 func addrFromFlowTarget(kind uint8, host []byte) (netip.Addr, bool) {

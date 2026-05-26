@@ -355,6 +355,9 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "client FLOW_OPEN frame emission") {
 		t.Fatalf("capabilities output missing client FLOW_OPEN frame emission:\n%s", text)
 	}
+	if !strings.Contains(text, "relay frame-block flow demux") {
+		t.Fatalf("capabilities output missing relay frame-block flow demux:\n%s", text)
+	}
 	if !strings.Contains(text, "fake-IP mapped UDP flow integration") {
 		t.Fatalf("capabilities output missing fake-IP mapped UDP flow integration:\n%s", text)
 	}

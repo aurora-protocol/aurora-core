@@ -158,6 +158,101 @@ func TestExitFlowHandlerCapsUDPTargetConfirmTTL(t *testing.T) {
 	}
 }
 
+func TestExitFlowHandlerProcessesFrameBlockOpenThenStreamData(t *testing.T) {
+	handler := NewExitFlowHandler(DefaultExitPolicy())
+	open := relayTCPFlowOpen(40, "example.com")
+	data, err := protocol.NewStreamDataFrame(40, []byte("GET / HTTP/2\r\n\r\n"), 0x01)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := handler.HandleFrameBlock(protocol.FrameBlock{Frames: []protocol.AuroraFrame{
+		flowOpenFrame(t, open),
+		data,
+	}}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.OutboundFrames) != 0 {
+		t.Fatalf("TCP frame block emitted unexpected response frames: %+v", result.OutboundFrames)
+	}
+	if len(result.Events) != 2 {
+		t.Fatalf("expected open and stream events, got %+v", result.Events)
+	}
+	if result.Events[0].Kind != ExitEventFlowOpened || result.Events[0].FlowID != 40 || result.Events[0].Flow.Kind != coreflow.FlowKindTCPStream {
+		t.Fatalf("unexpected flow-open event: %+v", result.Events[0])
+	}
+	if result.Events[1].Kind != ExitEventStreamData || result.Events[1].FlowID != 40 || !bytes.Equal(result.Events[1].Data, []byte("GET / HTTP/2\r\n\r\n")) {
+		t.Fatalf("unexpected stream-data event: %+v", result.Events[1])
+	}
+	result.Events[1].Data[0] = 'X'
+	if bytes.Equal(data.Payload, result.Events[1].Data) {
+		t.Fatalf("exit event reused caller-owned data slice")
+	}
+}
+
+func TestExitFlowHandlerProcessesUDPBlockWithTargetConfirmAndDatagramEvent(t *testing.T) {
+	handler := NewExitFlowHandler(DefaultExitPolicy())
+	handler.UDPConfirmTTLSeconds = 120
+	open := relayUDPFlowOpen(41, []byte{93, 184, 216, 34})
+	datagram, err := protocol.NewDatagramDataFrame(41, []byte("payload"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := handler.HandleFrameBlock(protocol.FrameBlock{Frames: []protocol.AuroraFrame{
+		flowOpenFrame(t, open),
+		datagram,
+	}}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.OutboundFrames) != 1 || result.OutboundFrames[0].FrameType != registry.FrameUDPTargetConfirm || result.OutboundFrames[0].FlowID != 41 {
+		t.Fatalf("UDP frame block did not emit target confirmation: %+v", result.OutboundFrames)
+	}
+	if len(result.Events) != 2 || result.Events[0].Kind != ExitEventFlowOpened || result.Events[1].Kind != ExitEventDatagramData {
+		t.Fatalf("unexpected UDP frame block events: %+v", result.Events)
+	}
+	if result.Events[1].Flow.Kind != coreflow.FlowKindUDPAssociation || !bytes.Equal(result.Events[1].Data, []byte("payload")) {
+		t.Fatalf("datagram event lost flow state or payload: %+v", result.Events[1])
+	}
+}
+
+func TestExitFlowHandlerRejectsDataBeforeFlowOpen(t *testing.T) {
+	handler := NewExitFlowHandler(DefaultExitPolicy())
+	data, err := protocol.NewStreamDataFrame(42, []byte("early"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handler.HandleFrameBlock(protocol.FrameBlock{Frames: []protocol.AuroraFrame{data}}, 100); err == nil {
+		t.Fatalf("stream data before FLOW_OPEN was accepted")
+	}
+	if _, ok := handler.FlowState(42); ok {
+		t.Fatalf("data-only frame block mutated flow state")
+	}
+}
+
+func TestExitFlowHandlerIgnoresPaddingInFrameBlock(t *testing.T) {
+	handler := NewExitFlowHandler(DefaultExitPolicy())
+	open := relayTCPFlowOpen(43, "example.com")
+	data, err := protocol.NewStreamDataFrame(43, []byte("payload"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := handler.HandleFrameBlock(protocol.FrameBlock{Frames: []protocol.AuroraFrame{
+		{FrameType: registry.FramePadding},
+		flowOpenFrame(t, open),
+		{FrameType: registry.FramePadding},
+		data,
+	}}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Events) != 2 || result.Events[0].Kind != ExitEventFlowOpened || result.Events[1].Kind != ExitEventStreamData {
+		t.Fatalf("padding changed exit frame events: %+v", result.Events)
+	}
+}
+
 func TestExitFlowHandlerRejectsMismatchedFlowIDBeforeOpen(t *testing.T) {
 	handler := NewExitFlowHandler(DefaultExitPolicy())
 	open := relayUDPFlowOpen(30, []byte{93, 184, 216, 34})
@@ -630,6 +725,22 @@ func relayUDPFlowOpen(flowID uint64, target []byte) protocol.FlowOpen {
 		DNSAnswerSetHash: bytesOf(0xdd, 48),
 		LocalBindingMode: coreflow.LocalBindingTransparentFakeIP,
 		PriorityClass:    coreflow.PriorityRealtime,
+	}
+}
+
+func relayTCPFlowOpen(flowID uint64, domain string) protocol.FlowOpen {
+	return protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           flowID,
+		FlowKind:         coreflow.FlowKindTCPStream,
+		TargetKind:       coreflow.TargetKindDomainName,
+		TargetHost:       []byte(domain),
+		TargetPort:       443,
+		UDPFQDNMode:      coreflow.UDPFQDNNoneIPAuthoritative,
+		NameBindingID:    bytesOf(0x11, 16),
+		DNSAnswerSetHash: bytesOf(0x22, 48),
+		LocalBindingMode: coreflow.LocalBindingExplicitProxyAPI,
+		PriorityClass:    coreflow.PriorityInteractive,
 	}
 }
 

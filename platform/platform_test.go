@@ -129,6 +129,55 @@ func TestThinAdapterForwardsCoreABIWithoutCryptoState(t *testing.T) {
 	}
 }
 
+func TestAdapterBlueprintsCoverP8Platforms(t *testing.T) {
+	report, err := VerifyAdapterBlueprints(AdapterBlueprints())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Passed {
+		t.Fatalf("platform adapter conformance failed: %+v", report)
+	}
+	if len(report.Platforms) != 7 || len(report.Failures) != 0 {
+		t.Fatalf("unexpected platform report shape: %+v", report)
+	}
+	wantPackets := map[Kind]string{
+		KindLinux:   PacketTUN,
+		KindWindows: PacketWintun,
+		KindApple:   PacketNetworkExtension,
+		KindAndroid: PacketVpnService,
+		KindFreeBSD: PacketTUN,
+		KindOpenWrt: PacketTUN,
+		KindCI:      PacketNone,
+	}
+	for _, platform := range report.Platforms {
+		if platform.PacketMode != wantPackets[platform.Kind] {
+			t.Fatalf("%s packet mode = %s, want %s", platform.Kind, platform.PacketMode, wantPackets[platform.Kind])
+		}
+		if !platform.LocalProxyFallback || !platform.NoCryptoState || !platform.BoundaryComplete {
+			t.Fatalf("%s does not satisfy P8 adapter boundary: %+v", platform.Kind, platform)
+		}
+		delete(wantPackets, platform.Kind)
+	}
+	if len(wantPackets) != 0 {
+		t.Fatalf("missing platform adapter blueprints: %+v", wantPackets)
+	}
+}
+
+func TestAdapterBlueprintVerificationRejectsMissingProxyFallback(t *testing.T) {
+	blueprints := AdapterBlueprints()
+	blueprints[0].LocalModes = nil
+	report, err := VerifyAdapterBlueprints(blueprints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatalf("platform adapter conformance accepted missing proxy fallback: %+v", report)
+	}
+	if len(report.Failures) != 1 || report.Failures[0].Field != "local_proxy_fallback" {
+		t.Fatalf("unexpected platform adapter failure report: %+v", report.Failures)
+	}
+}
+
 type recordingCoreSink struct {
 	openSessions   int
 	tcpFlows       int

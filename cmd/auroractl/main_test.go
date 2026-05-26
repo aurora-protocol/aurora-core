@@ -72,6 +72,27 @@ func TestClassifierCheckCommandPrintsBaselineReport(t *testing.T) {
 	}
 }
 
+func TestPlatformCheckCommandPrintsAdapterConformance(t *testing.T) {
+	var out bytes.Buffer
+	if err := platformCheck(&out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"platform_adapter_check passed=true platforms=7 failures=0\n",
+		"platform linux passed=true packet=tun local_proxy=true no_crypto=true boundary=true\n",
+		"platform windows passed=true packet=wintun local_proxy=true no_crypto=true boundary=true\n",
+		"platform ci passed=true packet=none local_proxy=true no_crypto=true boundary=true\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("platform-check output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "passed=false") {
+		t.Fatalf("platform-check output contains failing platform:\n%s", text)
+	}
+}
+
 func TestCryptoCheckCommandPrintsProviderAgreement(t *testing.T) {
 	var out bytes.Buffer
 	if err := cryptoCheck(&out); err != nil {
@@ -117,13 +138,16 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "DPI/classifier baseline harness") {
 		t.Fatalf("capabilities output missing classifier baseline harness:\n%s", text)
 	}
+	if !strings.Contains(text, "platform adapter conformance profiles") {
+		t.Fatalf("capabilities output missing platform adapter conformance:\n%s", text)
+	}
 	if strings.Contains(text, "not production-complete:\n- ML-DSA") {
 		t.Fatalf("capabilities output still reports ML-DSA work as the first missing item:\n%s", text)
 	}
 	if strings.Contains(text, "full real-crypto vector package") {
 		t.Fatalf("capabilities output still lists the real-crypto vector package as remaining:\n%s", text)
 	}
-	if !strings.Contains(text, "Privacy Pass production proof verification, production cover-origin deployment, platform adapters, external DPI/classifier evaluation, external active-probe evaluation") {
+	if !strings.Contains(text, "Privacy Pass production proof verification, production cover-origin deployment, production platform packaging/device entitlements, external DPI/classifier evaluation, external active-probe evaluation") {
 		t.Fatalf("capabilities output stopped tracking remaining production work:\n%s", text)
 	}
 }
@@ -302,6 +326,7 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go run ./cmd/auroractl wire-check",
 		"go run ./cmd/auroractl active-probes",
 		"go run ./cmd/auroractl classifier-check",
+		"go run ./cmd/auroractl platform-check",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("CI workflow missing %q:\n%s", want, text)

@@ -1,0 +1,135 @@
+package admission
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"fmt"
+	"sync"
+
+	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
+	"github.com/aurora-protocol/aurora-core/wire"
+)
+
+type AccessHintCredential struct {
+	HintIssuerID  []byte
+	RelayBucketID []byte
+	HintEpochID   uint64
+	HintSelector  []byte
+	HintSecret    []byte
+	ExpiryUnix    uint64
+	MaxUses       uint16
+}
+
+func DeriveHintSecret(verifierSecret, issuerID, relayBucketID []byte, hintEpochID uint64, hintSelector []byte) ([]byte, error) {
+	context := wire.NewEncoder()
+	context.WriteOpaqueFixed(issuerID, 16)
+	context.WriteOpaqueFixed(relayBucketID, 16)
+	context.WriteUint64(hintEpochID)
+	context.WriteOpaqueFixed(hintSelector, 16)
+	contextBytes, err := context.Bytes()
+	if err != nil {
+		return nil, err
+	}
+	secret, err := auroracrypto.HKDFExtractSHA384(verifierSecret, []byte("aurora v2.0 hint"))
+	if err != nil {
+		return nil, err
+	}
+	return auroracrypto.HKDFExpandLabelSHA384(secret, "hint secret", contextBytes, 32)
+}
+
+func ComputeAccessHint(cred AccessHintCredential, accessHintBindingContext, clientNonceForAccessHint []byte) ([]byte, error) {
+	if err := cred.validate(); err != nil {
+		return nil, err
+	}
+	if len(accessHintBindingContext) != 48 {
+		return nil, fmt.Errorf("admission: access hint binding context length %d, want 48", len(accessHintBindingContext))
+	}
+	if len(clientNonceForAccessHint) != 32 {
+		return nil, fmt.Errorf("admission: client nonce length %d, want 32", len(clientNonceForAccessHint))
+	}
+	mac := hmac.New(sha256.New, cred.HintSecret)
+	mac.Write([]byte("aurora v2.0 access hint"))
+	mac.Write(cred.HintIssuerID)
+	mac.Write(cred.HintSelector)
+	mac.Write(cred.RelayBucketID)
+	mac.Write(wire.EncodeUint64(cred.HintEpochID))
+	mac.Write(accessHintBindingContext)
+	mac.Write(clientNonceForAccessHint)
+	return auroracrypto.Truncate128(mac.Sum(nil)), nil
+}
+
+func ComputeSpentHintKey(cred AccessHintCredential) ([]byte, error) {
+	if err := cred.validate(); err != nil {
+		return nil, err
+	}
+	e := wire.NewEncoder()
+	e.WriteBytes([]byte("aurora v2.0 spent hint credential"))
+	e.WriteOpaqueFixed(cred.HintIssuerID, 16)
+	e.WriteOpaqueFixed(cred.RelayBucketID, 16)
+	e.WriteUint64(cred.HintEpochID)
+	e.WriteOpaqueFixed(cred.HintSelector, 16)
+	preimage, err := e.Bytes()
+	if err != nil {
+		return nil, err
+	}
+	return auroracrypto.PreHash(preimage), nil
+}
+
+func VerifyAndSpendAccessHint(cache *MemoryReplayCache, cred AccessHintCredential, bindingContext, clientNonce, receivedHint []byte) error {
+	expected, err := ComputeAccessHint(cred, bindingContext, clientNonce)
+	if err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare(expected, receivedHint) != 1 {
+		return fmt.Errorf("admission: access hint mismatch")
+	}
+	spentKey, err := ComputeSpentHintKey(cred)
+	if err != nil {
+		return err
+	}
+	if !cache.InsertIfAbsent(spentKey) {
+		return fmt.Errorf("admission: access hint already spent")
+	}
+	return nil
+}
+
+func (c AccessHintCredential) validate() error {
+	if len(c.HintIssuerID) != 16 || len(c.RelayBucketID) != 16 || len(c.HintSelector) != 16 {
+		return fmt.Errorf("admission: hint issuer, bucket, and selector must be 16 bytes")
+	}
+	if len(c.HintSecret) != 32 {
+		return fmt.Errorf("admission: hint secret length %d, want 32", len(c.HintSecret))
+	}
+	if c.MaxUses != 0 && c.MaxUses != 1 {
+		return fmt.Errorf("admission: AccessHint max_uses must be 1")
+	}
+	return nil
+}
+
+type MemoryReplayCache struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+func NewMemoryReplayCache() *MemoryReplayCache {
+	return &MemoryReplayCache{seen: make(map[string]struct{})}
+}
+
+func (c *MemoryReplayCache) InsertIfAbsent(key []byte) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	k := string(key)
+	if _, ok := c.seen[k]; ok {
+		return false
+	}
+	c.seen[k] = struct{}{}
+	return true
+}
+
+func (c *MemoryReplayCache) Has(key []byte) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.seen[string(key)]
+	return ok
+}

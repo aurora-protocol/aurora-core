@@ -1,0 +1,243 @@
+package handshake
+
+import (
+	"fmt"
+
+	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
+	"github.com/aurora-protocol/aurora-core/protocol"
+)
+
+type HandshakeSecrets struct {
+	EarlySecret           []byte
+	DerivedSecret         []byte
+	HandshakeSecret       []byte
+	ClientHandshakeSecret []byte
+	ServerHandshakeSecret []byte
+	ClientFinishedKey     []byte
+	ServerFinishedKey     []byte
+	ClientHSKey           []byte
+	ClientHSIV            []byte
+	ServerHSKey           []byte
+	ServerHSIV            []byte
+}
+
+func PreludeTranscriptHash(suite uint64, coverStreamBinding []byte, p0 protocol.CoverPrelude0, p1 protocol.CoverPrelude1) ([]byte, error) {
+	encoded0, err := protocol.Encode(p0)
+	if err != nil {
+		return nil, err
+	}
+	encoded1, err := protocol.Encode(p1.Unsigned())
+	if err != nil {
+		return nil, err
+	}
+	return auroracrypto.SuiteHash(suite,
+		[]byte("aurora v2.0 prelude transcript"),
+		coverStreamBinding,
+		encoded0,
+		encoded1,
+	)
+}
+
+func DeriveHandshakeSecrets(suite uint64, ssPQ, ssClassical, handshakeBindingContext, preludeTranscriptHash []byte) (HandshakeSecrets, error) {
+	hashLen, err := auroracrypto.SuiteHashLength(suite)
+	if err != nil {
+		return HandshakeSecrets{}, err
+	}
+	zeros := make([]byte, hashLen)
+	early, err := auroracrypto.HKDFExtractForSuite(suite, zeros, zeros)
+	if err != nil {
+		return HandshakeSecrets{}, err
+	}
+	derived, err := auroracrypto.HKDFExpandLabelForSuite(suite, early, "derived", nil, hashLen)
+	if err != nil {
+		return HandshakeSecrets{}, err
+	}
+	ikm := append(append(append([]byte(nil), ssPQ...), ssClassical...), handshakeBindingContext...)
+	handshakeSecret, err := auroracrypto.HKDFExtractForSuite(suite, ikm, derived)
+	if err != nil {
+		return HandshakeSecrets{}, err
+	}
+	clientHS, err := auroracrypto.HKDFExpandLabelForSuite(suite, handshakeSecret, "client hs", preludeTranscriptHash, hashLen)
+	if err != nil {
+		return HandshakeSecrets{}, err
+	}
+	serverHS, err := auroracrypto.HKDFExpandLabelForSuite(suite, handshakeSecret, "server hs", preludeTranscriptHash, hashLen)
+	if err != nil {
+		return HandshakeSecrets{}, err
+	}
+	clientFinished, err := auroracrypto.HKDFExpandLabelForSuite(suite, clientHS, "finished", nil, hashLen)
+	if err != nil {
+		return HandshakeSecrets{}, err
+	}
+	serverFinished, err := auroracrypto.HKDFExpandLabelForSuite(suite, serverHS, "finished", nil, hashLen)
+	if err != nil {
+		return HandshakeSecrets{}, err
+	}
+	keyLen, err := auroracrypto.AEADKeyLength(suite)
+	if err != nil {
+		return HandshakeSecrets{}, err
+	}
+	clientKey, err := auroracrypto.HKDFExpandLabelForSuite(suite, clientHS, "key", nil, keyLen)
+	if err != nil {
+		return HandshakeSecrets{}, err
+	}
+	clientIV, err := auroracrypto.HKDFExpandLabelForSuite(suite, clientHS, "iv", nil, 12)
+	if err != nil {
+		return HandshakeSecrets{}, err
+	}
+	serverKey, err := auroracrypto.HKDFExpandLabelForSuite(suite, serverHS, "key", nil, keyLen)
+	if err != nil {
+		return HandshakeSecrets{}, err
+	}
+	serverIV, err := auroracrypto.HKDFExpandLabelForSuite(suite, serverHS, "iv", nil, 12)
+	if err != nil {
+		return HandshakeSecrets{}, err
+	}
+	return HandshakeSecrets{
+		EarlySecret:           early,
+		DerivedSecret:         derived,
+		HandshakeSecret:       handshakeSecret,
+		ClientHandshakeSecret: clientHS,
+		ServerHandshakeSecret: serverHS,
+		ClientFinishedKey:     clientFinished,
+		ServerFinishedKey:     serverFinished,
+		ClientHSKey:           clientKey,
+		ClientHSIV:            clientIV,
+		ServerHSKey:           serverKey,
+		ServerHSIV:            serverIV,
+	}, nil
+}
+
+func ComputeClientFinished(suite uint64, clientFinishedKey, preludeTranscriptHash []byte, capsule1 protocol.CoverCapsule1Plain) ([]byte, error) {
+	encodedUnsigned, err := protocol.Encode(capsule1.UnsignedClientFinished())
+	if err != nil {
+		return nil, err
+	}
+	capsuleHash, err := auroracrypto.SuiteHash(suite, encodedUnsigned)
+	if err != nil {
+		return nil, err
+	}
+	input, err := auroracrypto.SuiteHash(suite,
+		[]byte("aurora v2.0 client finished"),
+		preludeTranscriptHash,
+		capsuleHash,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return auroracrypto.HMACForSuite(suite, clientFinishedKey, input)
+}
+
+func ComputeServerFinished(suite uint64, serverFinishedKey, preludeTranscriptHash []byte, capsule1 protocol.CoverCapsule1Plain, accept protocol.PolicyAccept) ([]byte, []byte, []byte, error) {
+	encodedCapsule1, err := protocol.Encode(capsule1)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	capsule1Hash, err := auroracrypto.SuiteHash(suite, encodedCapsule1)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	encodedAccept, err := protocol.Encode(accept)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	policyAcceptHash, err := auroracrypto.SuiteHash(suite, encodedAccept)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	input, err := auroracrypto.SuiteHash(suite,
+		[]byte("aurora v2.0 server finished"),
+		preludeTranscriptHash,
+		capsule1Hash,
+		policyAcceptHash,
+	)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	finished, err := auroracrypto.HMACForSuite(suite, serverFinishedKey, input)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return finished, capsule1Hash, policyAcceptHash, nil
+}
+
+type ApplicationSecrets struct {
+	ApplicationTranscriptHash []byte
+	ApplicationSecret         []byte
+	ClientAppSecret0          []byte
+	ServerAppSecret0          []byte
+	ClientAppKey0             []byte
+	ClientAppIV0              []byte
+	ServerAppKey0             []byte
+	ServerAppIV0              []byte
+}
+
+func DeriveApplicationSecrets(suite uint64, handshakeSecret, preludeTranscriptHash, capsule1PlainHash, policyAcceptHash, serverFinished []byte) (ApplicationSecrets, error) {
+	hashLen, err := auroracrypto.SuiteHashLength(suite)
+	if err != nil {
+		return ApplicationSecrets{}, err
+	}
+	applicationTranscript, err := auroracrypto.SuiteHash(suite,
+		[]byte("aurora v2.0 application transcript"),
+		preludeTranscriptHash,
+		capsule1PlainHash,
+		policyAcceptHash,
+		serverFinished,
+	)
+	if err != nil {
+		return ApplicationSecrets{}, err
+	}
+	derivedHandshake, err := auroracrypto.HKDFExpandLabelForSuite(suite, handshakeSecret, "derived", nil, hashLen)
+	if err != nil {
+		return ApplicationSecrets{}, err
+	}
+	applicationSecret, err := auroracrypto.HKDFExtractForSuite(suite, make([]byte, hashLen), derivedHandshake)
+	if err != nil {
+		return ApplicationSecrets{}, err
+	}
+	clientApp, err := auroracrypto.HKDFExpandLabelForSuite(suite, applicationSecret, "client app", applicationTranscript, hashLen)
+	if err != nil {
+		return ApplicationSecrets{}, err
+	}
+	serverApp, err := auroracrypto.HKDFExpandLabelForSuite(suite, applicationSecret, "server app", applicationTranscript, hashLen)
+	if err != nil {
+		return ApplicationSecrets{}, err
+	}
+	keyLen, err := auroracrypto.AEADKeyLength(suite)
+	if err != nil {
+		return ApplicationSecrets{}, err
+	}
+	clientKey, clientIV, err := trafficKeyIV(suite, clientApp, keyLen)
+	if err != nil {
+		return ApplicationSecrets{}, err
+	}
+	serverKey, serverIV, err := trafficKeyIV(suite, serverApp, keyLen)
+	if err != nil {
+		return ApplicationSecrets{}, err
+	}
+	return ApplicationSecrets{
+		ApplicationTranscriptHash: applicationTranscript,
+		ApplicationSecret:         applicationSecret,
+		ClientAppSecret0:          clientApp,
+		ServerAppSecret0:          serverApp,
+		ClientAppKey0:             clientKey,
+		ClientAppIV0:              clientIV,
+		ServerAppKey0:             serverKey,
+		ServerAppIV0:              serverIV,
+	}, nil
+}
+
+func trafficKeyIV(suite uint64, secret []byte, keyLen int) ([]byte, []byte, error) {
+	key, err := auroracrypto.HKDFExpandLabelForSuite(suite, secret, "key", nil, keyLen)
+	if err != nil {
+		return nil, nil, err
+	}
+	iv, err := auroracrypto.HKDFExpandLabelForSuite(suite, secret, "iv", nil, 12)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(key) != keyLen || len(iv) != 12 {
+		return nil, nil, fmt.Errorf("handshake: invalid traffic key/iv lengths")
+	}
+	return key, iv, nil
+}

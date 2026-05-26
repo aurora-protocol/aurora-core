@@ -11,19 +11,42 @@ import (
 )
 
 type Config struct {
-	Profile string
-	Route   string
-	Speed   string
+	Version                     string
+	Profile                     string
+	Route                       string
+	Speed                       string
+	LocalMode                   string
+	LocalDNS                    string
+	AllowH2                     bool
+	AllowH1WS                   bool
+	AllowH3ExtDgram             bool
+	AllowMasque                 bool
+	RequirePQ                   bool
+	RequireSplit2ForAdversarial bool
+	AllowLabTokens              bool
+	ReplayCache                 string
 }
 
 func Default() Config {
-	return Config{Profile: "smart"}
+	return Config{
+		Version:                     "2.0",
+		Profile:                     "smart",
+		Route:                       "auto",
+		Speed:                       "balanced",
+		LocalMode:                   "socks5",
+		LocalDNS:                    "through-aurora",
+		AllowH2:                     true,
+		AllowH1WS:                   true,
+		RequirePQ:                   true,
+		RequireSplit2ForAdversarial: true,
+		ReplayCache:                 "sqlite",
+	}
 }
 
 func Parse(r io.Reader) (Config, error) {
 	cfg := Default()
 	scanner := bufio.NewScanner(r)
-	inAurora := false
+	section := ""
 	lineNo := 0
 	for scanner.Scan() {
 		lineNo++
@@ -32,10 +55,7 @@ func Parse(r io.Reader) (Config, error) {
 			continue
 		}
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			inAurora = line == "[aurora]"
-			continue
-		}
-		if !inAurora {
+			section = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
 			continue
 		}
 		key, val, ok := strings.Cut(line, "=")
@@ -44,15 +64,8 @@ func Parse(r io.Reader) (Config, error) {
 		}
 		key = strings.TrimSpace(key)
 		val = strings.Trim(strings.TrimSpace(val), "\"")
-		switch key {
-		case "profile":
-			cfg.Profile = val
-		case "route":
-			cfg.Route = val
-		case "speed":
-			cfg.Speed = val
-		default:
-			return Config{}, fmt.Errorf("config: unknown aurora key %q", key)
+		if err := cfg.set(section, key, val); err != nil {
+			return Config{}, err
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -64,7 +77,103 @@ func Parse(r io.Reader) (Config, error) {
 	return cfg, nil
 }
 
+func (c *Config) set(section, key, val string) error {
+	switch section {
+	case "aurora":
+		switch key {
+		case "version":
+			c.Version = val
+		case "profile":
+			c.Profile = val
+		case "route":
+			c.Route = val
+		case "speed":
+			c.Speed = val
+		default:
+			return fmt.Errorf("config: unknown aurora key %q", key)
+		}
+	case "local":
+		switch key {
+		case "mode":
+			c.LocalMode = val
+		case "dns":
+			c.LocalDNS = val
+		default:
+			return fmt.Errorf("config: unknown local key %q", key)
+		}
+	case "methods":
+		parsed, err := parseBool(val)
+		if err != nil {
+			return fmt.Errorf("config: %s must be boolean", key)
+		}
+		switch key {
+		case "allow_h2":
+			c.AllowH2 = parsed
+		case "allow_h1_ws":
+			c.AllowH1WS = parsed
+		case "allow_h3_ext_dgram":
+			c.AllowH3ExtDgram = parsed
+		case "allow_masque":
+			c.AllowMasque = parsed
+		default:
+			return fmt.Errorf("config: unknown methods key %q", key)
+		}
+	case "security":
+		parsed, err := parseBool(val)
+		if err != nil {
+			return fmt.Errorf("config: %s must be boolean", key)
+		}
+		switch key {
+		case "require_pq":
+			c.RequirePQ = parsed
+		case "require_split2_for_adversarial":
+			c.RequireSplit2ForAdversarial = parsed
+		case "allow_lab_tokens":
+			c.AllowLabTokens = parsed
+		default:
+			return fmt.Errorf("config: unknown security key %q", key)
+		}
+	case "storage":
+		switch key {
+		case "replay_cache":
+			c.ReplayCache = val
+		default:
+			return fmt.Errorf("config: unknown storage key %q", key)
+		}
+	default:
+		if isExtensionSection(section) {
+			return nil
+		}
+		if section == "" {
+			return fmt.Errorf("config: key %q outside a table", key)
+		}
+		return fmt.Errorf("config: unknown table %q", section)
+	}
+	return nil
+}
+
+func parseBool(val string) (bool, error) {
+	switch val {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("not a boolean")
+	}
+}
+
+func isExtensionSection(section string) bool {
+	return strings.HasPrefix(section, "x.") ||
+		strings.HasPrefix(section, "ext.") ||
+		strings.HasPrefix(section, "extension.") ||
+		strings.HasPrefix(section, "extensions.")
+}
+
 func (c Config) Validate() error {
+	if c.Version != "2.0" {
+		return fmt.Errorf("config: unsupported version %q", c.Version)
+	}
 	if c.Profile != "smart" {
 		if _, err := policy.ProfileByName(c.Profile); err != nil {
 			return err
@@ -83,6 +192,21 @@ func (c Config) Validate() error {
 		default:
 			return fmt.Errorf("config: unknown speed %q", c.Speed)
 		}
+	}
+	switch c.LocalMode {
+	case "socks5", "http-connect", "tun", "platform-vpn":
+	default:
+		return fmt.Errorf("config: unknown local mode %q", c.LocalMode)
+	}
+	switch c.LocalDNS {
+	case "through-aurora":
+	default:
+		return fmt.Errorf("config: unknown local dns %q", c.LocalDNS)
+	}
+	switch c.ReplayCache {
+	case "sqlite", "redis", "postgres", "memory-lab-only":
+	default:
+		return fmt.Errorf("config: unknown replay cache %q", c.ReplayCache)
 	}
 	return nil
 }

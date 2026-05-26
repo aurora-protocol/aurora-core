@@ -73,7 +73,7 @@ func (p *Protector) Seal(block protocol.FrameBlock) (AuroraPacket, error) {
 	if err != nil {
 		return AuroraPacket{}, err
 	}
-	sealed, err := auroracrypto.AES256GCMSeal(p.Key, nonce, aad, plaintext)
+	sealed, err := auroracrypto.SealForSuite(p.Suite, p.Key, nonce, aad, plaintext)
 	if err != nil {
 		return AuroraPacket{}, err
 	}
@@ -105,7 +105,7 @@ func (p Protector) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
 		return protocol.FrameBlock{}, err
 	}
 	sealed := append(append([]byte(nil), pkt.Ciphertext...), pkt.AuthTag...)
-	plaintext, err := auroracrypto.AES256GCMOpen(p.Key, nonce, aad, sealed)
+	plaintext, err := auroracrypto.OpenForSuite(p.Suite, p.Key, nonce, aad, sealed)
 	if err != nil {
 		return protocol.FrameBlock{}, err
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 )
@@ -55,6 +56,45 @@ func TestProtectorSealOpen(t *testing.T) {
 	}
 	if len(opened.Frames) != 1 || opened.Frames[0].FlowID != 99 {
 		t.Fatalf("unexpected opened frame block: %+v", opened)
+	}
+}
+
+func TestProtectorUsesChaChaSuiteAEAD(t *testing.T) {
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
+	p := &Protector{
+		Suite:           registry.SuiteHybrid768ChaCha20,
+		RouteInstanceID: 0x43,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        0,
+		Key:             bytesOf(0x35, 32),
+		StaticIV:        bytesOf(0x46, 12),
+	}
+	pkt, err := p.Seal(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := protocol.Encode(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aad, err := auroracrypto.PacketAD(p.Suite, p.RouteInstanceID, p.HopLayer, p.Direction, p.KeyPhase, pkt.PacketNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce, err := auroracrypto.XORNonce96(p.StaticIV, pkt.PacketNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := auroracrypto.SealForSuite(p.Suite, p.Key, nonce, aad, plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(pkt.Ciphertext, sealed[:len(sealed)-16]) || !bytes.Equal(pkt.AuthTag, sealed[len(sealed)-16:]) {
+		t.Fatalf("packet seal did not use suite AEAD")
+	}
+	if _, err := p.Open(pkt); err != nil {
+		t.Fatal(err)
 	}
 }
 

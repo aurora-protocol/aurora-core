@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"encoding/hex"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,39 +25,37 @@ func TestHarnessHandlerServesCoverAndIssuerEndpoints(t *testing.T) {
 		t.Fatalf("NewHarnessHandler failed: %v", err)
 	}
 
-	health := serveRequest(handler, http.MethodGet, "/healthz", nil)
-	if health.status != http.StatusOK || !bytes.Contains(health.body, []byte(`"ready":true`)) {
-		t.Fatalf("health endpoint = %d %s", health.status, health.body)
-	}
-
 	cover := serveRequest(handler, http.MethodGet, "/ordinary-origin-path", nil)
 	if cover.status != http.StatusOK || string(cover.body) != "<html>cover</html>" {
 		t.Fatalf("cover origin response = %d %q", cover.status, cover.body)
 	}
 
-	metadata := serveRequest(handler, http.MethodGet, "/issuer/issuer-metadata", nil)
-	if metadata.status != http.StatusOK || !bytes.Contains(metadata.body, []byte("issuer_metadata_hash")) {
-		t.Fatalf("issuer metadata endpoint = %d %s", metadata.status, metadata.body)
+	// The former public issuer and health paths must be byte-identical to an
+	// ordinary origin probe (no distinguishable public Aurora path).
+	for _, path := range []string{"/issuer/issuer-metadata", "/issuer/blind-rsa/issue", "/issuer/token/spend", "/healthz"} {
+		probe := serveRequest(handler, http.MethodGet, path, nil)
+		if probe.status != cover.status || !bytes.Equal(probe.body, cover.body) {
+			t.Fatalf("legacy path %q is distinguishable from cover: status=%d body=%q", path, probe.status, probe.body)
+		}
 	}
 
-	issueBody := mustJSON(t, map[string]any{
-		"token_nonce":             strings.Repeat("44", 32),
-		"redemption_context_hash": strings.Repeat("45", 48),
-		"expiry_unix":             uint64(250),
-	})
-	issue := serveRequest(handler, http.MethodPost, "/issuer/blind-rsa/issue", issueBody)
-	if issue.status != http.StatusOK || !bytes.Contains(issue.body, []byte("admission_proof")) {
-		t.Fatalf("issuer issue endpoint = %d %s", issue.status, issue.body)
+	// Issuer metadata is reachable only over the cover carrier.
+	metaType, metaPayload, resp := doCarrierExchangeHandler(handler, CarrierIssuerMetadataReq, nil)
+	if metaType != CarrierIssuerMetadataResp {
+		t.Fatalf("carrier metadata response type = %d status=%d", metaType, resp.status)
+	}
+	encoded, hash, err := DecodeCarrierMetadataResponse(metaPayload)
+	if err != nil || len(encoded) == 0 || len(hash) != carrierMetadataHashLen {
+		t.Fatalf("carrier metadata decode failed: err=%v encoded=%d hash=%d", err, len(encoded), len(hash))
 	}
 
-	var issued struct {
-		AdmissionProof string `json:"admission_proof"`
+	issueReq, err := EncodeCarrierIssueRequest(repeatedByte(0x44, carrierTokenNonceLen), repeatedByte(0x45, carrierRedemptionContextLen), 250)
+	if err != nil {
+		t.Fatalf("EncodeCarrierIssueRequest failed: %v", err)
 	}
-	if err := json.Unmarshal(issue.body, &issued); err != nil {
-		t.Fatalf("issue response JSON failed: %v", err)
-	}
-	if raw, err := hex.DecodeString(issued.AdmissionProof); err != nil || len(raw) == 0 {
-		t.Fatalf("issue response admission proof is not non-empty hex: len=%d err=%v", len(raw), err)
+	issueType, proof, _ := doCarrierExchangeHandler(handler, CarrierBlindRSAIssueReq, issueReq)
+	if issueType != CarrierBlindRSAIssueResp || len(proof) == 0 {
+		t.Fatalf("carrier issue response type=%d len=%d", issueType, len(proof))
 	}
 }
 
@@ -71,37 +68,18 @@ func TestHarnessHandlerUsesInjectedSpentTokenCacheForIssuerHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHarnessHandler failed: %v", err)
 	}
-	issueBody := mustJSON(t, map[string]any{
-		"token_nonce":             strings.Repeat("44", 32),
-		"redemption_context_hash": strings.Repeat("45", 48),
-		"expiry_unix":             uint64(250),
-	})
-	issue := serveRequest(handler, http.MethodPost, "/issuer/blind-rsa/issue", issueBody)
-	if issue.status != http.StatusOK {
-		t.Fatalf("issuer issue endpoint = %d %s", issue.status, issue.body)
+	issueReq, err := EncodeCarrierIssueRequest(repeatedByte(0x44, carrierTokenNonceLen), repeatedByte(0x45, carrierRedemptionContextLen), 250)
+	if err != nil {
+		t.Fatalf("EncodeCarrierIssueRequest failed: %v", err)
 	}
-	var issued struct {
-		AdmissionProof string `json:"admission_proof"`
-	}
-	if err := json.Unmarshal(issue.body, &issued); err != nil {
-		t.Fatalf("issue response JSON failed: %v", err)
+	issueType, proof, _ := doCarrierExchangeHandler(handler, CarrierBlindRSAIssueReq, issueReq)
+	if issueType != CarrierBlindRSAIssueResp || len(proof) == 0 {
+		t.Fatalf("carrier issue response type=%d len=%d", issueType, len(proof))
 	}
 
-	spend := serveRequest(handler, http.MethodPost, "/issuer/token/spend", mustJSON(t, map[string]any{
-		"admission_proof": issued.AdmissionProof,
-	}))
-	if spend.status != http.StatusOK {
-		t.Fatalf("token spend endpoint = %d %s", spend.status, spend.body)
-	}
-	var spent struct {
-		SpentKey string `json:"spent_key"`
-	}
-	if err := json.Unmarshal(spend.body, &spent); err != nil {
-		t.Fatalf("spend response JSON failed: %v", err)
-	}
-	spentKey, err := hex.DecodeString(spent.SpentKey)
-	if err != nil {
-		t.Fatalf("spent key is not hex: %v", err)
+	spendType, spentKey, _ := doCarrierExchangeHandler(handler, CarrierTokenSpendReq, proof)
+	if spendType != CarrierTokenSpendResp || len(spentKey) != carrierSpentKeyLen {
+		t.Fatalf("carrier spend response type=%d len=%d", spendType, len(spentKey))
 	}
 	if !spentTokens.Has(spentKey) {
 		t.Fatalf("injected spent-token cache did not record spent key")
@@ -183,7 +161,7 @@ func TestHarnessHandlerExchangesPacketBatchesThroughPrivateCarrierSlot(t *testin
 		t.Fatalf("EncodePacketBatch failed: %v", err)
 	}
 
-	exchanged := serveRequestWithContentType(handler, http.MethodPost, DefaultPacketExchangePath, inbound, "application/octet-stream")
+	exchanged := serveRequestWithContentType(handler, http.MethodPost, DefaultPacketExchangePath, EncodeCarrier(CarrierPacketBatch, inbound), "application/octet-stream")
 
 	if exchanged.status != http.StatusOK {
 		t.Fatalf("packet exchange status = %d body=%q", exchanged.status, exchanged.body)
@@ -191,7 +169,11 @@ func TestHarnessHandlerExchangesPacketBatchesThroughPrivateCarrierSlot(t *testin
 	if got := exchanged.header.Get("Content-Type"); got != "application/octet-stream" {
 		t.Fatalf("packet exchange content type = %q", got)
 	}
-	outbound, err := DecodePacketBatch(exchanged.body)
+	respType, respPayload, err := DecodeCarrier(exchanged.body)
+	if err != nil || respType != CarrierPacketBatch {
+		t.Fatalf("packet exchange carrier response type=%d err=%v", respType, err)
+	}
+	outbound, err := DecodePacketBatch(respPayload)
 	if err != nil {
 		t.Fatalf("DecodePacketBatch response failed: %v", err)
 	}
@@ -354,11 +336,11 @@ func TestRunReadinessHarnessCoversLinuxServerSurface(t *testing.T) {
 	if !report.Passed {
 		t.Fatalf("server readiness report failed: %+v", report)
 	}
-	if !report.HealthEndpoint || !report.CoverEndpoint || !report.IssuerMetadataEndpoint || !report.BlindRSAIssueEndpoint {
-		t.Fatalf("server readiness report missing coverage: %+v", report)
+	if !report.CoverEndpoint || !report.CoverNeutralIssuerPath || !report.CoverNeutralHealthPath {
+		t.Fatalf("server readiness report missing cover-neutrality coverage: %+v", report)
 	}
-	if !report.PacketExchangeEndpoint {
-		t.Fatalf("server readiness report did not cover packet exchange: %+v", report)
+	if !report.IssuerMetadataCarrier || !report.BlindRSAIssueCarrier || !report.PacketExchangeEndpoint {
+		t.Fatalf("server readiness report missing carrier coverage: %+v", report)
 	}
 }
 
@@ -367,7 +349,7 @@ func TestRunReadinessHarnessUsesValidDefaultClock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunReadinessHarness failed: %v", err)
 	}
-	if !report.Passed || !report.BlindRSAIssueEndpoint {
+	if !report.Passed || !report.BlindRSAIssueCarrier {
 		t.Fatalf("zero-value readiness report failed: %+v", report)
 	}
 }
@@ -380,14 +362,14 @@ func TestRunClientInteropHarnessExercisesLiveHTTPAndHTTPSBoundary(t *testing.T) 
 	if !report.Passed {
 		t.Fatalf("client interop report failed: %+v", report)
 	}
-	if !report.HealthEndpoint || !report.PacketExchangeEndpoint || !report.CoverNeutralInvalidPacket {
+	if !report.CoverNeutralIssuerPath || !report.CoverNeutralHealthPath || !report.PacketExchangeEndpoint || !report.CoverNeutralInvalidCarrier {
 		t.Fatalf("client interop report missing live HTTP coverage: %+v", report)
 	}
-	if !report.IssuerMetadataEndpoint || !report.TokenIssueEndpoint || !report.TokenSpendEndpoint || !report.DuplicateSpendRejected {
+	if !report.IssuerMetadataCarrier || !report.TokenIssueCarrier || !report.TokenSpendCarrier || !report.DuplicateSpendRejected {
 		t.Fatalf("client interop report missing live issuer coverage: %+v", report)
 	}
-	if !report.HTTPSHealthEndpoint || !report.HTTPSIssuerMetadataEndpoint || !report.HTTPSTokenIssueEndpoint ||
-		!report.HTTPSTokenSpendEndpoint || !report.HTTPSDuplicateSpendRejected {
+	if !report.HTTPSCoverNeutralIssuerPath || !report.HTTPSCoverNeutralHealthPath || !report.HTTPSIssuerMetadataCarrier || !report.HTTPSTokenIssueCarrier ||
+		!report.HTTPSTokenSpendCarrier || !report.HTTPSDuplicateSpendRejected {
 		t.Fatalf("client interop report missing live HTTPS coverage: %+v", report)
 	}
 	formatted := FormatClientInteropReport(report)
@@ -418,15 +400,6 @@ func serveRequestWithContentType(handler http.Handler, method, path string, body
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	return servedResponse{status: rec.Code, header: rec.Result().Header, body: rec.Body.Bytes()}
-}
-
-func mustJSON(t *testing.T, v any) []byte {
-	t.Helper()
-	out, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("json marshal failed: %v", err)
-	}
-	return out
 }
 
 func mustParseURL(t *testing.T, raw string) *url.URL {

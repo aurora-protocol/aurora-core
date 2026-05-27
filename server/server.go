@@ -2,8 +2,6 @@ package server
 
 import (
 	"bytes"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -34,12 +32,13 @@ type Options struct {
 
 type ReadinessReport struct {
 	Passed                  bool
-	HealthEndpoint          bool
 	CoverEndpoint           bool
-	IssuerMetadataEndpoint  bool
-	BlindRSAIssueEndpoint   bool
-	PacketExchangeEndpoint  bool
 	CoverNeutralUnknownPath bool
+	CoverNeutralIssuerPath  bool
+	CoverNeutralHealthPath  bool
+	IssuerMetadataCarrier   bool
+	BlindRSAIssueCarrier    bool
+	PacketExchangeEndpoint  bool
 	Findings                []string
 }
 
@@ -70,33 +69,26 @@ func NewHarnessHandler(opts HarnessOptions) (http.Handler, error) {
 	}), nil
 }
 
+// NewHandler builds the public-facing relay handler. The public Aurora wire
+// exposes no distinguishable issuer, health, or authentication path: issuance
+// and packet exchange are multiplexed over a single cover carrier surface
+// (DefaultPacketExchangePath) that falls through to byte-identical cover-origin
+// behaviour for any request that is not a well-formed carrier message. This
+// satisfies the cover-neutrality invariants (Section 8) and carries issuance as
+// Section 27.2 cover-issuance rather than over a fixed public path.
 func NewHandler(opts Options) http.Handler {
 	mux := http.NewServeMux()
-	issuerHandler := issuerd.NewHTTPHandler(opts.Issuer)
-	mux.Handle("/issuer/", http.StripPrefix("/issuer", issuerHandler))
-	if opts.PacketExchanger != nil {
-		packetPath := opts.PacketExchangePath
-		if packetPath == "" {
-			packetPath = DefaultPacketExchangePath
-		}
-		mux.HandleFunc(packetPath, func(w http.ResponseWriter, r *http.Request) {
-			if !isPacketExchangeRequest(r) {
-				serveCoverRequest(w, r, opts.Origin, opts.CoverOrigin)
-				return
-			}
-			servePacketExchange(w, r, opts.Origin, opts.CoverOrigin, opts.PacketExchanger)
-		})
+	issuer := serviceIssuerCarrier{service: opts.Issuer}
+	packetPath := opts.PacketExchangePath
+	if packetPath == "" {
+		packetPath = DefaultPacketExchangePath
 	}
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	mux.HandleFunc(packetPath, func(w http.ResponseWriter, r *http.Request) {
+		if !isCarrierRequest(r) {
+			serveCoverRequest(w, r, opts.Origin, opts.CoverOrigin)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]bool{
-			"ready":  opts.Issuer != nil && coverReady(opts),
-			"issuer": opts.Issuer != nil,
-			"cover":  coverReady(opts),
-		})
+		serveCoverCarrier(w, r, opts.Origin, opts.CoverOrigin, opts.PacketExchanger, issuer)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		serveCoverRequest(w, r, opts.Origin, opts.CoverOrigin)
@@ -115,10 +107,6 @@ func RunReadinessHarness(nowUnix uint64) (ReadinessReport, error) {
 	}
 	report := ReadinessReport{Passed: true}
 
-	health := serveHarnessRequest(handler, http.MethodGet, "/healthz", nil)
-	report.HealthEndpoint = health.status == http.StatusOK && bytes.Contains(health.body, []byte(`"ready":true`))
-	report.require(report.HealthEndpoint, "health endpoint failed")
-
 	cover := serveHarnessRequest(handler, http.MethodGet, "/cover", nil)
 	report.CoverEndpoint = cover.status == http.StatusOK && bytes.Contains(cover.body, []byte("<html>"))
 	report.require(report.CoverEndpoint, "cover endpoint failed")
@@ -127,22 +115,34 @@ func RunReadinessHarness(nowUnix uint64) (ReadinessReport, error) {
 	report.CoverNeutralUnknownPath = unknown.status == cover.status && bytes.Equal(unknown.body, cover.body)
 	report.require(report.CoverNeutralUnknownPath, "unknown path did not map to cover origin")
 
-	metadata := serveHarnessRequest(handler, http.MethodGet, "/issuer/issuer-metadata", nil)
-	report.IssuerMetadataEndpoint = metadata.status == http.StatusOK && bytes.Contains(metadata.body, []byte("issuer_metadata_hash"))
-	report.require(report.IssuerMetadataEndpoint, "issuer metadata endpoint failed")
+	// The former fixed public issuer and health paths MUST now be
+	// byte-identical to an ordinary origin probe (no distinguishable public
+	// Aurora path, Section 8 cover-neutrality).
+	legacyIssuer := serveHarnessRequest(handler, http.MethodGet, "/issuer/issuer-metadata", nil)
+	report.CoverNeutralIssuerPath = legacyIssuer.status == cover.status && bytes.Equal(legacyIssuer.body, cover.body)
+	report.require(report.CoverNeutralIssuerPath, "legacy issuer path is distinguishable from cover")
 
-	issue := serveHarnessRequest(handler, http.MethodPost, "/issuer/blind-rsa/issue", mustMarshalJSON(issuerd.IssueRequest{
-		TokenNonce:            hex.EncodeToString(repeatedByte(0x44, 32)),
-		RedemptionContextHash: hex.EncodeToString(repeatedByte(0x45, 48)),
-		ExpiryUnix:            nowUnix + 100,
-	}))
-	var issued issuerd.IssueResponse
-	if issue.status == http.StatusOK && json.Unmarshal(issue.body, &issued) == nil && issued.AdmissionProof != "" {
-		if raw, err := hex.DecodeString(issued.AdmissionProof); err == nil && len(raw) > 0 {
-			report.BlindRSAIssueEndpoint = true
+	legacyHealth := serveHarnessRequest(handler, http.MethodGet, "/healthz", nil)
+	report.CoverNeutralHealthPath = legacyHealth.status == cover.status && bytes.Equal(legacyHealth.body, cover.body)
+	report.require(report.CoverNeutralHealthPath, "legacy health path is distinguishable from cover")
+
+	// Issuance is reachable only over the cover carrier (Section 27.2
+	// cover-issuance), never over a fixed public path.
+	metaType, metaPayload, _ := doCarrierExchangeHandler(handler, CarrierIssuerMetadataReq, nil)
+	if metaType == CarrierIssuerMetadataResp {
+		if encoded, hash, decodeErr := DecodeCarrierMetadataResponse(metaPayload); decodeErr == nil && len(encoded) > 0 && len(hash) == carrierMetadataHashLen {
+			report.IssuerMetadataCarrier = true
 		}
 	}
-	report.require(report.BlindRSAIssueEndpoint, "Blind RSA issue endpoint failed")
+	report.require(report.IssuerMetadataCarrier, "issuer metadata carrier failed")
+
+	issueRequest, err := EncodeCarrierIssueRequest(repeatedByte(0x44, 32), repeatedByte(0x45, 48), nowUnix+100)
+	if err != nil {
+		return ReadinessReport{}, err
+	}
+	issueType, issuePayload, _ := doCarrierExchangeHandler(handler, CarrierBlindRSAIssueReq, issueRequest)
+	report.BlindRSAIssueCarrier = issueType == CarrierBlindRSAIssueResp && len(issuePayload) > 0
+	report.require(report.BlindRSAIssueCarrier, "Blind RSA issue carrier failed")
 
 	packetRequest, err := EncodePacketBatch(PacketBatch{
 		Packets:         [][]byte{{0x45, 0x00, 0x00, 0x14}},
@@ -151,16 +151,16 @@ func RunReadinessHarness(nowUnix uint64) (ReadinessReport, error) {
 	if err != nil {
 		return ReadinessReport{}, err
 	}
-	packetExchange := serveHarnessRequestWithContentType(handler, http.MethodPost, DefaultPacketExchangePath, packetRequest, "application/octet-stream")
-	if packetExchange.status == http.StatusOK && bytes.Equal(packetExchange.contentType(), []byte("application/octet-stream")) {
-		if packetResponse, err := DecodePacketBatch(packetExchange.body); err == nil &&
+	packetType, packetPayload, _ := doCarrierExchangeHandler(handler, CarrierPacketBatch, packetRequest)
+	if packetType == CarrierPacketBatch {
+		if packetResponse, decodeErr := DecodePacketBatch(packetPayload); decodeErr == nil &&
 			len(packetResponse.Packets) == 1 &&
 			bytes.Equal(packetResponse.Packets[0], []byte{0x45, 0x00, 0x00, 0x14}) &&
 			packetResponse.ProtocolNumbers[0] == 2 {
 			report.PacketExchangeEndpoint = true
 		}
 	}
-	report.require(report.PacketExchangeEndpoint, "packet exchange endpoint failed")
+	report.require(report.PacketExchangeEndpoint, "packet exchange carrier failed")
 
 	return report, nil
 }
@@ -251,19 +251,7 @@ func serveCoverFailure(w http.ResponseWriter, r *http.Request, origin relay.Orig
 	coverOrigin.ServeHTTP(w, sanitizedCoverFailureRequest(r))
 }
 
-func coverReady(opts Options) bool {
-	return opts.Origin != nil || opts.CoverOrigin != nil
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-const packetExchangeMaxBodyBytes = 1 << 20
-
-func isPacketExchangeRequest(r *http.Request) bool {
+func isCarrierRequest(r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return false
 	}
@@ -271,40 +259,10 @@ func isPacketExchangeRequest(r *http.Request) bool {
 	return err == nil && mediaType == "application/octet-stream"
 }
 
-func servePacketExchange(w http.ResponseWriter, r *http.Request, origin relay.Origin, coverOrigin http.Handler, exchanger PacketExchanger) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, packetExchangeMaxBodyBytes+1))
-	if err != nil || len(body) > packetExchangeMaxBodyBytes {
-		serveCoverFailure(w, r, origin, coverOrigin)
-		return
-	}
-	inbound, err := DecodePacketBatch(body)
-	if err != nil {
-		serveCoverFailure(w, r, origin, coverOrigin)
-		return
-	}
-	outbound, err := exchanger.ExchangePacketBatch(inbound)
-	if err != nil {
-		serveCoverFailure(w, r, origin, coverOrigin)
-		return
-	}
-	encoded, err := EncodePacketBatch(outbound)
-	if err != nil {
-		serveCoverFailure(w, r, origin, coverOrigin)
-		return
-	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(encoded)
-}
-
 type harnessResponse struct {
 	status int
 	header http.Header
 	body   []byte
-}
-
-func (r harnessResponse) contentType() []byte {
-	return []byte(r.header.Get("Content-Type"))
 }
 
 func serveHarnessRequest(handler http.Handler, method, path string, body []byte) harnessResponse {
@@ -320,14 +278,6 @@ func serveHarnessRequestWithContentType(handler http.Handler, method, path strin
 	handler.ServeHTTP(rec, req)
 	out, _ := io.ReadAll(rec.Result().Body)
 	return harnessResponse{status: rec.Code, header: rec.Result().Header, body: out}
-}
-
-func mustMarshalJSON(v any) []byte {
-	out, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return out
 }
 
 func repeatedByte(b byte, n int) []byte {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/platform"
+	"github.com/aurora-protocol/aurora-core/server"
 )
 
 func TestReadinessCheckReportsRunnableServer(t *testing.T) {
@@ -24,8 +24,9 @@ func TestReadinessCheckReportsRunnableServer(t *testing.T) {
 	text := stdout.String()
 	for _, want := range []string{
 		"server_check passed=true",
-		"health=true",
 		"cover=true",
+		"cover_neutral_issuer_path=true",
+		"cover_neutral_health_path=true",
 		"issuer_metadata=true",
 		"blind_rsa_issue=true",
 	} {
@@ -102,24 +103,32 @@ func TestRunTLSModeServesHTTPSForAppleClients(t *testing.T) {
 		gotAddr = addr
 		gotCert = certFile
 		gotKey = keyFile
+		// The legacy public health path is now cover-neutral.
 		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("TLS handler health response = %d", rec.Code)
+		if rec.Code != http.StatusOK || rec.Body.String() != "cover" {
+			t.Fatalf("TLS handler health probe not cover-neutral = %d %q", rec.Code, rec.Body.String())
 		}
-		issueBody := fmt.Sprintf(
-			`{"token_nonce":"%s","redemption_context_hash":"%s","expiry_unix":%d}`,
-			strings.Repeat("44", 32),
-			strings.Repeat("45", 48),
+		// Issuance succeeds over the cover carrier with a wall-clock expiry.
+		issueReq, err := server.EncodeCarrierIssueRequest(
+			bytes.Repeat([]byte{0x44}, 32),
+			bytes.Repeat([]byte{0x45}, 48),
 			uint64(time.Now().Unix())+300,
 		)
-		req = httptest.NewRequest(http.MethodPost, "/issuer/blind-rsa/issue", strings.NewReader(issueBody))
-		req.Header.Set("Content-Type", "application/json")
+		if err != nil {
+			t.Fatalf("EncodeCarrierIssueRequest failed: %v", err)
+		}
+		req = httptest.NewRequest(http.MethodPost, server.DefaultPacketExchangePath, bytes.NewReader(server.EncodeCarrier(server.CarrierBlindRSAIssueReq, issueReq)))
+		req.Header.Set("Content-Type", "application/octet-stream")
 		rec = httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "admission_proof") {
-			t.Fatalf("TLS handler wall-clock issue response = %d %s", rec.Code, rec.Body.String())
+		if rec.Code != http.StatusOK {
+			t.Fatalf("TLS handler carrier issue status = %d", rec.Code)
+		}
+		respType, proof, decErr := server.DecodeCarrier(rec.Body.Bytes())
+		if decErr != nil || respType != server.CarrierBlindRSAIssueResp || len(proof) == 0 {
+			t.Fatalf("TLS handler wall-clock issue response type=%d len=%d err=%v", respType, len(proof), decErr)
 		}
 		return http.ErrServerClosed
 	})

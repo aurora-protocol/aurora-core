@@ -376,8 +376,10 @@ func TestServerCheckCommandReportsRunnableLinuxServerSurface(t *testing.T) {
 	text := out.String()
 	for _, want := range []string{
 		"server_check passed=true",
-		"health=true",
 		"cover=true",
+		"cover_neutral_unknown=true",
+		"cover_neutral_issuer_path=true",
+		"cover_neutral_health_path=true",
 		"issuer_metadata=true",
 		"blind_rsa_issue=true",
 		"packet_exchange=true",
@@ -399,8 +401,10 @@ func TestClientCheckCommandReportsLiveServerClientInterop(t *testing.T) {
 	text := out.String()
 	for _, want := range []string{
 		"client_check passed=true",
-		"health=true",
-		"https_health=true",
+		"cover_neutral_issuer_path=true",
+		"https_cover_neutral_issuer_path=true",
+		"cover_neutral_health_path=true",
+		"https_cover_neutral_health_path=true",
 		"packet_exchange=true",
 		"https_packet_exchange=true",
 		"issuer_metadata=true",
@@ -411,7 +415,7 @@ func TestClientCheckCommandReportsLiveServerClientInterop(t *testing.T) {
 		"https_token_spend=true",
 		"duplicate_spend_rejected=true",
 		"https_duplicate_spend_rejected=true",
-		"cover_neutral_invalid_packet=true",
+		"cover_neutral_invalid_carrier=true",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("client-check output missing %q:\n%s", want, text)

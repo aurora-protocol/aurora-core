@@ -2,8 +2,6 @@ package server
 
 import (
 	"bytes"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -11,25 +9,25 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"time"
-
-	"github.com/aurora-protocol/aurora-core/issuerd"
 )
 
 type ClientInteropReport struct {
 	Passed                      bool
-	HealthEndpoint              bool
-	HTTPSHealthEndpoint         bool
-	IssuerMetadataEndpoint      bool
-	HTTPSIssuerMetadataEndpoint bool
-	TokenIssueEndpoint          bool
-	HTTPSTokenIssueEndpoint     bool
-	TokenSpendEndpoint          bool
-	HTTPSTokenSpendEndpoint     bool
+	CoverNeutralIssuerPath      bool
+	HTTPSCoverNeutralIssuerPath bool
+	CoverNeutralHealthPath      bool
+	HTTPSCoverNeutralHealthPath bool
+	IssuerMetadataCarrier       bool
+	HTTPSIssuerMetadataCarrier  bool
+	TokenIssueCarrier           bool
+	HTTPSTokenIssueCarrier      bool
+	TokenSpendCarrier           bool
+	HTTPSTokenSpendCarrier      bool
 	DuplicateSpendRejected      bool
 	HTTPSDuplicateSpendRejected bool
 	PacketExchangeEndpoint      bool
 	HTTPSPacketExchangeEndpoint bool
-	CoverNeutralInvalidPacket   bool
+	CoverNeutralInvalidCarrier  bool
 	Findings                    []string
 }
 
@@ -55,100 +53,45 @@ func RunClientInteropHarness(nowUnix uint64) (ClientInteropReport, error) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	report := ClientInteropReport{Passed: true}
 
-	health, err := client.Get(server.URL + "/healthz")
-	if err == nil {
-		defer health.Body.Close()
-		var status struct {
-			Ready  bool `json:"ready"`
-			Issuer bool `json:"issuer"`
-			Cover  bool `json:"cover"`
-		}
-		body, readErr := io.ReadAll(health.Body)
-		if readErr == nil && json.Unmarshal(body, &status) == nil {
-			report.HealthEndpoint = health.StatusCode == http.StatusOK && status.Ready && status.Issuer && status.Cover
-		}
-	}
-	report.require(report.HealthEndpoint, "live health request failed")
+	// The former fixed public issuer and health paths MUST be byte-identical to
+	// an ordinary origin probe over both HTTP and HTTPS.
+	report.CoverNeutralIssuerPath = probeIsCoverNeutral(client, server.URL+"/issuer/issuer-metadata", coverBody)
+	report.require(report.CoverNeutralIssuerPath, "legacy issuer path distinguishable from cover over HTTP")
+	report.CoverNeutralHealthPath = probeIsCoverNeutral(client, server.URL+"/healthz", coverBody)
+	report.require(report.CoverNeutralHealthPath, "legacy health path distinguishable from cover over HTTP")
+
+	report.IssuerMetadataCarrier, report.TokenIssueCarrier, report.TokenSpendCarrier, report.DuplicateSpendRejected =
+		exerciseCarrierIssuance(client, server.URL+DefaultPacketExchangePath, nowUnix, 0x10)
+	report.require(report.IssuerMetadataCarrier, "issuer metadata carrier failed over HTTP")
+	report.require(report.TokenIssueCarrier, "token issue carrier failed over HTTP")
+	report.require(report.TokenSpendCarrier, "token spend carrier failed over HTTP")
+	report.require(report.DuplicateSpendRejected, "duplicate token spend was not rejected over HTTP")
+
+	report.PacketExchangeEndpoint = exerciseCarrierPacketExchange(client, server.URL+DefaultPacketExchangePath)
+	report.require(report.PacketExchangeEndpoint, "packet exchange carrier failed over HTTP")
+
+	report.CoverNeutralInvalidCarrier = exerciseInvalidCarrierIsCover(client, server.URL+DefaultPacketExchangePath, coverBody)
+	report.require(report.CoverNeutralInvalidCarrier, "invalid carrier request did not map to cover")
 
 	tlsServer := httptest.NewTLSServer(handler)
 	defer tlsServer.Close()
 	tlsClient := tlsServer.Client()
 	tlsClient.Timeout = 2 * time.Second
-	tlsHealth, err := tlsClient.Get(tlsServer.URL + "/healthz")
-	if err == nil {
-		defer tlsHealth.Body.Close()
-		var status struct {
-			Ready  bool `json:"ready"`
-			Issuer bool `json:"issuer"`
-			Cover  bool `json:"cover"`
-		}
-		body, readErr := io.ReadAll(tlsHealth.Body)
-		if readErr == nil && json.Unmarshal(body, &status) == nil {
-			report.HTTPSHealthEndpoint = tlsHealth.StatusCode == http.StatusOK && status.Ready && status.Issuer && status.Cover
-		}
-	}
-	report.require(report.HTTPSHealthEndpoint, "live HTTPS health request failed")
 
-	report.IssuerMetadataEndpoint, report.TokenIssueEndpoint, report.TokenSpendEndpoint, report.DuplicateSpendRejected =
-		exerciseIssuerHTTPClient(client, server.URL, nowUnix)
-	report.require(report.IssuerMetadataEndpoint, "live issuer metadata request failed")
-	report.require(report.TokenIssueEndpoint, "live token issue request failed")
-	report.require(report.TokenSpendEndpoint, "live token spend request failed")
-	report.require(report.DuplicateSpendRejected, "live duplicate token spend was not rejected")
+	report.HTTPSCoverNeutralIssuerPath = probeIsCoverNeutral(tlsClient, tlsServer.URL+"/issuer/issuer-metadata", coverBody)
+	report.require(report.HTTPSCoverNeutralIssuerPath, "legacy issuer path distinguishable from cover over HTTPS")
+	report.HTTPSCoverNeutralHealthPath = probeIsCoverNeutral(tlsClient, tlsServer.URL+"/healthz", coverBody)
+	report.require(report.HTTPSCoverNeutralHealthPath, "legacy health path distinguishable from cover over HTTPS")
 
-	report.HTTPSIssuerMetadataEndpoint, report.HTTPSTokenIssueEndpoint, report.HTTPSTokenSpendEndpoint, report.HTTPSDuplicateSpendRejected =
-		exerciseIssuerHTTPClient(tlsClient, tlsServer.URL, nowUnix)
-	report.require(report.HTTPSIssuerMetadataEndpoint, "live HTTPS issuer metadata request failed")
-	report.require(report.HTTPSTokenIssueEndpoint, "live HTTPS token issue request failed")
-	report.require(report.HTTPSTokenSpendEndpoint, "live HTTPS token spend request failed")
-	report.require(report.HTTPSDuplicateSpendRejected, "live HTTPS duplicate token spend was not rejected")
+	report.HTTPSIssuerMetadataCarrier, report.HTTPSTokenIssueCarrier, report.HTTPSTokenSpendCarrier, report.HTTPSDuplicateSpendRejected =
+		exerciseCarrierIssuance(tlsClient, tlsServer.URL+DefaultPacketExchangePath, nowUnix, 0x20)
+	report.require(report.HTTPSIssuerMetadataCarrier, "issuer metadata carrier failed over HTTPS")
+	report.require(report.HTTPSTokenIssueCarrier, "token issue carrier failed over HTTPS")
+	report.require(report.HTTPSTokenSpendCarrier, "token spend carrier failed over HTTPS")
+	report.require(report.HTTPSDuplicateSpendRejected, "duplicate token spend was not rejected over HTTPS")
 
-	inbound, err := EncodePacketBatch(PacketBatch{
-		Packets:         [][]byte{{0x45, 0x00, 0x00, 0x14}},
-		ProtocolNumbers: []uint16{2},
-	})
-	if err != nil {
-		return ClientInteropReport{}, err
-	}
-	packetResp, err := client.Post(server.URL+DefaultPacketExchangePath, "application/octet-stream", bytes.NewReader(inbound))
-	if err == nil {
-		defer packetResp.Body.Close()
-		body, readErr := io.ReadAll(packetResp.Body)
-		mediaType, _, mediaErr := mime.ParseMediaType(packetResp.Header.Get("Content-Type"))
-		if readErr == nil && mediaErr == nil && packetResp.StatusCode == http.StatusOK && mediaType == "application/octet-stream" {
-			outbound, decodeErr := DecodePacketBatch(body)
-			report.PacketExchangeEndpoint = decodeErr == nil &&
-				len(outbound.Packets) == 1 &&
-				bytes.Equal(outbound.Packets[0], []byte{0x45, 0x00, 0x00, 0x14}) &&
-				outbound.ProtocolNumbers[0] == 2
-		}
-	}
-	report.require(report.PacketExchangeEndpoint, "live packet exchange failed")
-
-	tlsPacketResp, err := tlsClient.Post(tlsServer.URL+DefaultPacketExchangePath, "application/octet-stream", bytes.NewReader(inbound))
-	if err == nil {
-		defer tlsPacketResp.Body.Close()
-		body, readErr := io.ReadAll(tlsPacketResp.Body)
-		mediaType, _, mediaErr := mime.ParseMediaType(tlsPacketResp.Header.Get("Content-Type"))
-		if readErr == nil && mediaErr == nil && tlsPacketResp.StatusCode == http.StatusOK && mediaType == "application/octet-stream" {
-			outbound, decodeErr := DecodePacketBatch(body)
-			report.HTTPSPacketExchangeEndpoint = decodeErr == nil &&
-				len(outbound.Packets) == 1 &&
-				bytes.Equal(outbound.Packets[0], []byte{0x45, 0x00, 0x00, 0x14}) &&
-				outbound.ProtocolNumbers[0] == 2
-		}
-	}
-	report.require(report.HTTPSPacketExchangeEndpoint, "live HTTPS packet exchange failed")
-
-	invalidResp, err := client.Post(server.URL+DefaultPacketExchangePath, "application/octet-stream", bytes.NewReader([]byte("not a packet batch")))
-	if err == nil {
-		defer invalidResp.Body.Close()
-		body, readErr := io.ReadAll(invalidResp.Body)
-		report.CoverNeutralInvalidPacket = readErr == nil &&
-			invalidResp.StatusCode == http.StatusOK &&
-			bytes.Equal(body, coverBody)
-	}
-	report.require(report.CoverNeutralInvalidPacket, "invalid packet request did not map to cover")
+	report.HTTPSPacketExchangeEndpoint = exerciseCarrierPacketExchange(tlsClient, tlsServer.URL+DefaultPacketExchangePath)
+	report.require(report.HTTPSPacketExchangeEndpoint, "packet exchange carrier failed over HTTPS")
 
 	return report, nil
 }
@@ -163,95 +106,109 @@ func (r *ClientInteropReport) require(ok bool, finding string) {
 
 func FormatClientInteropReport(report ClientInteropReport) string {
 	return fmt.Sprintf(
-		"client_check passed=%t health=%t https_health=%t issuer_metadata=%t https_issuer_metadata=%t token_issue=%t https_token_issue=%t token_spend=%t https_token_spend=%t duplicate_spend_rejected=%t https_duplicate_spend_rejected=%t packet_exchange=%t https_packet_exchange=%t cover_neutral_invalid_packet=%t findings=%d\n",
+		"client_check passed=%t cover_neutral_issuer_path=%t https_cover_neutral_issuer_path=%t cover_neutral_health_path=%t https_cover_neutral_health_path=%t issuer_metadata=%t https_issuer_metadata=%t token_issue=%t https_token_issue=%t token_spend=%t https_token_spend=%t duplicate_spend_rejected=%t https_duplicate_spend_rejected=%t packet_exchange=%t https_packet_exchange=%t cover_neutral_invalid_carrier=%t findings=%d\n",
 		report.Passed,
-		report.HealthEndpoint,
-		report.HTTPSHealthEndpoint,
-		report.IssuerMetadataEndpoint,
-		report.HTTPSIssuerMetadataEndpoint,
-		report.TokenIssueEndpoint,
-		report.HTTPSTokenIssueEndpoint,
-		report.TokenSpendEndpoint,
-		report.HTTPSTokenSpendEndpoint,
+		report.CoverNeutralIssuerPath,
+		report.HTTPSCoverNeutralIssuerPath,
+		report.CoverNeutralHealthPath,
+		report.HTTPSCoverNeutralHealthPath,
+		report.IssuerMetadataCarrier,
+		report.HTTPSIssuerMetadataCarrier,
+		report.TokenIssueCarrier,
+		report.HTTPSTokenIssueCarrier,
+		report.TokenSpendCarrier,
+		report.HTTPSTokenSpendCarrier,
 		report.DuplicateSpendRejected,
 		report.HTTPSDuplicateSpendRejected,
 		report.PacketExchangeEndpoint,
 		report.HTTPSPacketExchangeEndpoint,
-		report.CoverNeutralInvalidPacket,
+		report.CoverNeutralInvalidCarrier,
 		len(report.Findings),
 	)
 }
 
-func exerciseIssuerHTTPClient(client *http.Client, baseURL string, nowUnix uint64) (metadataOK, issueOK, spendOK, duplicateRejected bool) {
-	metadataResp, err := client.Get(baseURL + "/issuer/issuer-metadata")
+// probeIsCoverNeutral confirms a GET probe to the given URL returns a 200 with a
+// body byte-identical to the configured cover body.
+func probeIsCoverNeutral(client *http.Client, url string, coverBody []byte) bool {
+	resp, err := client.Get(url)
 	if err != nil {
-		return false, false, false, false
+		return false
 	}
-	defer metadataResp.Body.Close()
-	var metadata issuerd.MetadataResponse
-	metadataBody, readErr := io.ReadAll(metadataResp.Body)
-	if readErr == nil && json.Unmarshal(metadataBody, &metadata) == nil {
-		metadataOK = metadataResp.StatusCode == http.StatusOK &&
-			validHexLength(metadata.IssuerMetadataHash, 48) &&
-			validNonEmptyHex(metadata.IssuerMetadata)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false
+	}
+	return resp.StatusCode == http.StatusOK && bytes.Equal(body, coverBody)
+}
+
+// exerciseCarrierIssuance fetches metadata, issues a Blind RSA admission token,
+// spends it, and confirms a replayed spend is rejected — all over the cover
+// carrier. seed differentiates token material across independent runs sharing
+// the same issuer spent-token state.
+func exerciseCarrierIssuance(client *http.Client, carrierURL string, nowUnix uint64, seed byte) (metadataOK, issueOK, spendOK, duplicateRejected bool) {
+	metaType, metaPayload, err := doCarrierExchangeHTTP(client, carrierURL, CarrierIssuerMetadataReq, nil)
+	if err == nil && metaType == CarrierIssuerMetadataResp {
+		if encoded, hash, decodeErr := DecodeCarrierMetadataResponse(metaPayload); decodeErr == nil && len(encoded) > 0 && len(hash) == carrierMetadataHashLen {
+			metadataOK = true
+		}
 	}
 
-	issueBody, err := json.Marshal(issuerd.IssueRequest{
-		TokenNonce:            repeatedHex(0xa1, 32),
-		RedemptionContextHash: repeatedHex(0xb2, 48),
-		ExpiryUnix:            nowUnix + 300,
-	})
+	issueRequest, err := EncodeCarrierIssueRequest(repeatedByte(seed|0x01, carrierTokenNonceLen), repeatedByte(seed|0x02, carrierRedemptionContextLen), nowUnix+300)
 	if err != nil {
 		return metadataOK, false, false, false
 	}
-	issueResp, err := client.Post(baseURL+"/issuer/blind-rsa/issue", "application/json", bytes.NewReader(issueBody))
-	if err != nil {
+	issueType, proof, err := doCarrierExchangeHTTP(client, carrierURL, CarrierBlindRSAIssueReq, issueRequest)
+	if err != nil || issueType != CarrierBlindRSAIssueResp || len(proof) == 0 {
 		return metadataOK, false, false, false
 	}
-	defer issueResp.Body.Close()
-	var issued issuerd.IssueResponse
-	issueRespBody, readErr := io.ReadAll(issueResp.Body)
-	if readErr == nil && json.Unmarshal(issueRespBody, &issued) == nil {
-		issueOK = issueResp.StatusCode == http.StatusOK && validNonEmptyHex(issued.AdmissionProof)
-	}
-	if !issueOK {
-		return metadataOK, issueOK, false, false
+	issueOK = true
+
+	spendType, spentKey, err := doCarrierExchangeHTTP(client, carrierURL, CarrierTokenSpendReq, proof)
+	if err == nil && spendType == CarrierTokenSpendResp && len(spentKey) == carrierSpentKeyLen {
+		spendOK = true
 	}
 
-	spendBody, err := json.Marshal(issuerd.SpendRequest{AdmissionProof: issued.AdmissionProof})
-	if err != nil {
-		return metadataOK, issueOK, false, false
+	duplicateType, _, err := doCarrierExchangeHTTP(client, carrierURL, CarrierTokenSpendReq, proof)
+	if err == nil && duplicateType == CarrierTokenSpendConflict {
+		duplicateRejected = true
 	}
-	spendResp, err := client.Post(baseURL+"/issuer/token/spend", "application/json", bytes.NewReader(spendBody))
-	if err != nil {
-		return metadataOK, issueOK, false, false
-	}
-	defer spendResp.Body.Close()
-	var spent issuerd.SpendResponse
-	spendRespBody, readErr := io.ReadAll(spendResp.Body)
-	if readErr == nil && json.Unmarshal(spendRespBody, &spent) == nil {
-		spendOK = spendResp.StatusCode == http.StatusOK && spent.Spent && validHexLength(spent.SpentKey, 48)
-	}
-
-	duplicateResp, err := client.Post(baseURL+"/issuer/token/spend", "application/json", bytes.NewReader(spendBody))
-	if err != nil {
-		return metadataOK, issueOK, spendOK, false
-	}
-	defer duplicateResp.Body.Close()
-	duplicateRejected = duplicateResp.StatusCode == http.StatusConflict
 	return metadataOK, issueOK, spendOK, duplicateRejected
 }
 
-func repeatedHex(value byte, count int) string {
-	return hex.EncodeToString(bytes.Repeat([]byte{value}, count))
+func exerciseCarrierPacketExchange(client *http.Client, carrierURL string) bool {
+	inbound, err := EncodePacketBatch(PacketBatch{
+		Packets:         [][]byte{{0x45, 0x00, 0x00, 0x14}},
+		ProtocolNumbers: []uint16{2},
+	})
+	if err != nil {
+		return false
+	}
+	respType, payload, err := doCarrierExchangeHTTP(client, carrierURL, CarrierPacketBatch, inbound)
+	if err != nil || respType != CarrierPacketBatch {
+		return false
+	}
+	outbound, err := DecodePacketBatch(payload)
+	return err == nil &&
+		len(outbound.Packets) == 1 &&
+		bytes.Equal(outbound.Packets[0], []byte{0x45, 0x00, 0x00, 0x14}) &&
+		outbound.ProtocolNumbers[0] == 2
 }
 
-func validHexLength(raw string, want int) bool {
-	decoded, err := hex.DecodeString(raw)
-	return err == nil && len(decoded) == want
-}
-
-func validNonEmptyHex(raw string) bool {
-	decoded, err := hex.DecodeString(raw)
-	return err == nil && len(decoded) > 0
+// exerciseInvalidCarrierIsCover confirms a POST of an unknown/garbage carrier
+// body to the carrier surface is served as byte-identical cover.
+func exerciseInvalidCarrierIsCover(client *http.Client, carrierURL string, coverBody []byte) bool {
+	resp, err := client.Post(carrierURL, "application/octet-stream", bytes.NewReader([]byte("not a carrier message")))
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false
+	}
+	// A garbage carrier body must look like the ordinary origin: a plain cover
+	// response, never an octet-stream carrier reply.
+	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	return resp.StatusCode == http.StatusOK && bytes.Equal(body, coverBody) && mediaType != "application/octet-stream"
 }

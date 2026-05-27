@@ -19,6 +19,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/issuerd"
 	auroraops "github.com/aurora-protocol/aurora-core/ops"
+	auroraperf "github.com/aurora-protocol/aurora-core/perf"
 	auroraplatform "github.com/aurora-protocol/aurora-core/platform"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
@@ -84,6 +85,12 @@ func main() {
 		err = flowCheck(os.Stdout)
 	case "route-check":
 		err = routeCheck(os.Stdout)
+	case "perf-check":
+		err = perfCheck(os.Stdout)
+	case "release-gate-check":
+		err = releaseGateCheck(os.Stdout)
+	case "p0-p11-check":
+		err = p0P11Check(os.Stdout)
 	case "host-build-check":
 		err = hostBuildCheck(os.Args[2:], os.Stdout)
 	case "check-config":
@@ -102,7 +109,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|server-check|client-check|p0-p8-check|cover-check|crypto-check|wire-check|transport-check|flow-check|route-check|host-build-check [--portable|--apple-simulator|--all]|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|server-check|client-check|p0-p8-check|p0-p11-check|cover-check|crypto-check|wire-check|transport-check|flow-check|route-check|perf-check|release-gate-check|host-build-check [--portable|--apple-simulator|--all]|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -513,8 +520,22 @@ func classifierCheck(w io.Writer) error {
 			len(sample.ForbiddenMarkers),
 		)
 	}
+	const deploymentThreshold = 0.02
+	decision := auroracover.EvaluateProductionCandidate(report, deploymentThreshold)
+	fmt.Fprintf(
+		w,
+		"classifier_production_candidate candidate=%t advantage=%.4f threshold=%.4f distinguishers=%d comparisons=%d\n",
+		decision.ProductionCandidate,
+		decision.ClassifierAdvantage,
+		decision.Threshold,
+		decision.DistinguisherCount,
+		decision.ComparisonCount,
+	)
 	if !report.Passed {
 		return fmt.Errorf("classifier-check failed cover indistinguishability baseline")
+	}
+	if !decision.ProductionCandidate {
+		return fmt.Errorf("classifier-check template not production-candidate: advantage %.4f exceeds threshold %.4f", decision.ClassifierAdvantage, decision.Threshold)
 	}
 	return nil
 }
@@ -833,7 +854,21 @@ type p0P8Gate struct {
 }
 
 func p0P8Check(w io.Writer) error {
-	return runP0P8Check(w, defaultP0P8Gates())
+	return runMilestoneGates(w, "p0_p8", defaultP0P8Gates())
+}
+
+func p0P11Check(w io.Writer) error {
+	return runMilestoneGates(w, "p0_p11", defaultP0P11Gates())
+}
+
+// defaultP0P11Gates extends the P0-P8 gate set with the P10 performance/bad-path
+// harness and the P11 release-gate checklist. P9 production-candidate gating is
+// folded into the classifier gate.
+func defaultP0P11Gates() []p0P8Gate {
+	return append(defaultP0P8Gates(),
+		p0P8Gate{Name: "perf", Run: perfCheck},
+		p0P8Gate{Name: "release-gate", Run: releaseGateCheck},
+	)
 }
 
 func defaultP0P8Gates() []p0P8Gate {
@@ -865,7 +900,7 @@ func defaultP0P8Gates() []p0P8Gate {
 	}
 }
 
-func runP0P8Check(w io.Writer, gates []p0P8Gate) error {
+func runMilestoneGates(w io.Writer, label string, gates []p0P8Gate) error {
 	failures := 0
 	for _, gate := range gates {
 		var output bytes.Buffer
@@ -874,7 +909,7 @@ func runP0P8Check(w io.Writer, gates []p0P8Gate) error {
 		if !passed {
 			failures++
 		}
-		if _, writeErr := fmt.Fprintf(w, "p0_p8_gate %s passed=%t\n", gate.Name, passed); writeErr != nil {
+		if _, writeErr := fmt.Fprintf(w, "%s_gate %s passed=%t\n", label, gate.Name, passed); writeErr != nil {
 			return writeErr
 		}
 		if output.Len() > 0 {
@@ -888,17 +923,17 @@ func runP0P8Check(w io.Writer, gates []p0P8Gate) error {
 			}
 		}
 		if err != nil {
-			if _, writeErr := fmt.Fprintf(w, "p0_p8_finding %s: %v\n", gate.Name, err); writeErr != nil {
+			if _, writeErr := fmt.Fprintf(w, "%s_finding %s: %v\n", label, gate.Name, err); writeErr != nil {
 				return writeErr
 			}
 		}
 	}
 	passed := failures == 0
-	if _, err := fmt.Fprintf(w, "p0_p8_check passed=%t gates=%d failures=%d\n", passed, len(gates), failures); err != nil {
+	if _, err := fmt.Fprintf(w, "%s_check passed=%t gates=%d failures=%d\n", label, passed, len(gates), failures); err != nil {
 		return err
 	}
 	if !passed {
-		return fmt.Errorf("p0-p8-check failed verification gates")
+		return fmt.Errorf("%s-check failed verification gates", label)
 	}
 	return nil
 }
@@ -1005,6 +1040,94 @@ func routeCheck(w io.Writer) error {
 	}
 	if !report.Passed {
 		return fmt.Errorf("route-check failed split-route conformance")
+	}
+	return nil
+}
+
+// releaseGateCheck implements the Milestone P11 prototype-interop release-gate
+// checklist (spec 35.11.13). Each item is backed by a concrete check; the build
+// clears the gate only if every item passes.
+func releaseGateCheck(w io.Writer) error {
+	items := []struct {
+		name string
+		run  func(io.Writer) error
+	}{
+		{"structural_vectors", func(io.Writer) error { return vectors([]string{"--check"}, io.Discard) }},
+		{"first_hop_split2_admission_replay_keyupdate_vectors", func(io.Writer) error { return vectors([]string{"--real-crypto", "--check"}, io.Discard) }},
+		{"wrong_token_and_replay_fail_closed", func(io.Writer) error { return negativeVectorsCheck(io.Discard) }},
+		{"crypto_fail_closed", func(io.Writer) error { return cryptoCheck(io.Discard) }},
+		{"two_independent_builds_and_redacted_diagnostics", func(io.Writer) error { return evaluationCheck(io.Discard) }},
+		{"dpi_active_probe_baseline", func(io.Writer) error {
+			if err := activeProbes(io.Discard); err != nil {
+				return err
+			}
+			return classifierCheck(io.Discard)
+		}},
+	}
+	failures := 0
+	for _, item := range items {
+		err := item.run(io.Discard)
+		passed := err == nil
+		if !passed {
+			failures++
+		}
+		if _, writeErr := fmt.Fprintf(w, "release_gate %s passed=%t\n", item.name, passed); writeErr != nil {
+			return writeErr
+		}
+		if err != nil {
+			if _, writeErr := fmt.Fprintf(w, "release_gate_finding %s: %v\n", item.name, err); writeErr != nil {
+				return writeErr
+			}
+		}
+	}
+	passed := failures == 0
+	if _, err := fmt.Fprintf(w, "release_gate_check passed=%t items=%d failures=%d tag=%s\n", passed, len(items), failures, prototypeInteropTag(passed)); err != nil {
+		return err
+	}
+	if !passed {
+		return fmt.Errorf("release-gate-check failed prototype-interop release gates")
+	}
+	return nil
+}
+
+func prototypeInteropTag(passed bool) string {
+	if passed {
+		return "prototype-interop"
+	}
+	return "untagged"
+}
+
+func perfCheck(w io.Writer) error {
+	report, err := auroraperf.RunImpairmentHarness()
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(
+		w,
+		"perf_check passed=%t scenarios=%d interactive_priority=%t udp_stale_policy=%t downgrade_no_reconnect_storm=%t tuple_cooldown=%t padding_reduces_under_congestion=%t findings=%d\n",
+		report.Passed,
+		len(report.Scenarios),
+		report.InteractivePrioritized,
+		report.UDPStalePolicy,
+		report.DowngradeNoReconnectStorm,
+		report.TupleCooldownActivates,
+		report.PaddingReducesUnderCongestion,
+		len(report.Findings),
+	); err != nil {
+		return err
+	}
+	for _, scenario := range report.Scenarios {
+		if _, err := fmt.Fprintf(w, "perf_scenario %s passed=%t %s\n", scenario.Name, scenario.Passed, scenario.Detail); err != nil {
+			return err
+		}
+	}
+	for _, finding := range report.Findings {
+		if _, err := fmt.Fprintf(w, "perf_finding %s\n", finding); err != nil {
+			return err
+		}
+	}
+	if !report.Passed {
+		return fmt.Errorf("perf-check failed performance and bad-path validation")
 	}
 	return nil
 }

@@ -20,6 +20,7 @@ func TestGenerateNegativeVectorReportCoversP2RequiredFailures(t *testing.T) {
 		"wrong_signature":      false,
 		"wrong_aead_tag":       false,
 		"replay":               false,
+		"wrong_token":          false,
 	}
 	for _, c := range report.Cases {
 		if _, ok := want[c.Name]; !ok {

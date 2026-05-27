@@ -42,6 +42,10 @@ jobs:
         run: go run ./cmd/auroractl flow-check
       - name: Check split-route conformance
         run: go run ./cmd/auroractl route-check
+      - name: Check performance and bad-path validation
+        run: go run ./cmd/auroractl perf-check
+      - name: Check release gates
+        run: go run ./cmd/auroractl release-gate-check
       - name: Check portable host build matrix
         if: matrix.os == 'ubuntu-latest'
         run: go run ./cmd/auroractl host-build-check --portable
@@ -76,8 +80,8 @@ jobs:
       - name: Check live server-client interop
         if: matrix.os == 'ubuntu-latest'
         run: go run ./cmd/auroractl client-check
-      - name: Check aggregate P0-P8 gates
+      - name: Check aggregate P0-P11 gates
         if: matrix.os == 'ubuntu-latest'
-        run: go run ./cmd/auroractl p0-p8-check
+        run: go run ./cmd/auroractl p0-p11-check
       - name: Check cover-origin deployment harness
         run: go run ./cmd/auroractl cover-check

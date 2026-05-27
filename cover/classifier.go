@@ -123,6 +123,37 @@ func EvaluateClassifierBaseline(samples []ClassifierSample) (ClassifierReport, e
 	return report, nil
 }
 
+// ProductionCandidateDecision is the Milestone P9 production-candidate gate: a
+// CoverTemplate may be marked production-candidate only if the measured
+// Aurora-vs-ordinary classifier advantage does not exceed the operator-chosen
+// deployment threshold.
+type ProductionCandidateDecision struct {
+	Threshold           float64
+	ClassifierAdvantage float64
+	DistinguisherCount  int
+	ComparisonCount     int
+	ProductionCandidate bool
+}
+
+// EvaluateProductionCandidate computes the measured classifier advantage from a
+// baseline report (the fraction of Aurora/ordinary feature comparisons a
+// classifier can separate) and decides whether the template clears the
+// operator's deployment threshold (spec 35.11.11).
+func EvaluateProductionCandidate(report ClassifierReport, threshold float64) ProductionCandidateDecision {
+	comparisons := len(report.Samples) * report.FeatureCount
+	advantage := 0.0
+	if comparisons > 0 {
+		advantage = float64(len(report.Distinguishers)) / float64(comparisons)
+	}
+	return ProductionCandidateDecision{
+		Threshold:           threshold,
+		ClassifierAdvantage: advantage,
+		DistinguisherCount:  len(report.Distinguishers),
+		ComparisonCount:     comparisons,
+		ProductionCandidate: comparisons > 0 && advantage <= threshold && len(report.ForbiddenMarkers) == 0,
+	}
+}
+
 func classifierSurfaceForCarrier(name string, probe failure.ProbeSurface) ClassifierSurface {
 	surface := ClassifierSurface{
 		TLSFingerprintFamily:           "cover-origin-tls-family",

@@ -1,6 +1,7 @@
-negative_vectors_check passed=true cases=5 failures=0
+negative_vectors_check passed=true cases=6 failures=0
 negative_vector malformed_public_key rejected=true error="crypto: invalid ECDSA SEC1 public key" evidence=scheme=ecdsa_p256_sha384_der key_encoding=p256_sec1_uncompressed public_key=0400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 negative_vector wrong_key_encoding rejected=true error="crypto: ML-DSA-65 signature incompatible with key encoding 0x1" evidence=scheme=mldsa65 key_encoding=p256_sec1_uncompressed public_key_len=1952
 negative_vector wrong_signature rejected=true error="crypto: ECDSA P-256 signature verification failed" evidence=scheme=ecdsa_p256_sha384_der signature=304502202d8a4da320ca2fab7e565ee4aee57bb49c0f12e5f56c896df268bd2d320dcfb7022100b46f189752219232d3a4153719ffd32ccdef8affe2e9c1bfe3eddd853c333824
 negative_vector wrong_aead_tag rejected=true error="cipher: message authentication failed" evidence=ciphertext_tag=066dd13e8e72c7e69ef1fbaf85dd4504211fe0f2e49afa8590fc9b0d769e34944bdba90439279f12e3
 negative_vector replay rejected=true error="admission: replay key already spent" evidence=replay_key=8181818181818181818181818181818181818181818181818181818181818181
+negative_vector wrong_token rejected=true error="admission: Blind RSA authenticator verification failed: crypto/rsa: verification error" evidence=proof_type=blind_rsa_2048 tamper=token_authenticator[0]^0xff

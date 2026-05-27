@@ -9,6 +9,7 @@ import (
 
 	"github.com/aurora-protocol/aurora-core/admission"
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
+	"github.com/aurora-protocol/aurora-core/issuerd"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 )
@@ -42,6 +43,9 @@ func GenerateNegativeVectorReport() (NegativeVectorReport, error) {
 		return NegativeVectorReport{}, err
 	}
 	if err := addReplayCase(&report); err != nil {
+		return NegativeVectorReport{}, err
+	}
+	if err := addWrongTokenCase(&report); err != nil {
 		return NegativeVectorReport{}, err
 	}
 	return report, nil
@@ -170,6 +174,42 @@ func addReplayCase(report *NegativeVectorReport) error {
 		rejected,
 		rejection,
 		"replay_key="+hex.EncodeToString(key),
+	)
+	return nil
+}
+
+// addWrongTokenCase issues a real Blind RSA admission proof, tampers its token
+// authenticator, and confirms the relay-side verifier fails closed — the P11
+// "wrong-token ... fail closed" release gate.
+func addWrongTokenCase(report *NegativeVectorReport) error {
+	service, err := issuerd.NewHarnessService(200)
+	if err != nil {
+		return err
+	}
+	proof, err := service.IssueBlindRSA2048(issuerd.IssueBlindRSA2048Request{
+		TokenNonce:            repeated(0x44, 32),
+		RedemptionContextHash: repeated(0x45, 48),
+		ExpiryUnix:            300,
+	})
+	if err != nil {
+		return err
+	}
+	metadata := service.PublishIssuerMetadata()
+	if vErr := admission.VerifyBlindRSA2048WithIssuerMetadata(proof, metadata, 250); vErr != nil {
+		return fmt.Errorf("vectors: baseline blind-rsa proof did not verify: %w", vErr)
+	}
+	if len(proof.TokenAuthenticator) == 0 {
+		return fmt.Errorf("vectors: issued proof has empty token authenticator")
+	}
+	tampered := proof
+	tampered.TokenAuthenticator = append([]byte(nil), proof.TokenAuthenticator...)
+	tampered.TokenAuthenticator[0] ^= 0xff
+	verifyErr := admission.VerifyBlindRSA2048WithIssuerMetadata(tampered, metadata, 250)
+	report.addCase(
+		"wrong_token",
+		verifyErr != nil,
+		verifyErr,
+		"proof_type=blind_rsa_2048 tamper=token_authenticator[0]^0xff",
 	)
 	return nil
 }

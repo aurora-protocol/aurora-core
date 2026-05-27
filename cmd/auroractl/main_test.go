@@ -483,7 +483,7 @@ func TestP0P8CheckCommandAggregatesVerificationGates(t *testing.T) {
 		},
 	}
 
-	if err := runP0P8Check(&out, checks); err != nil {
+	if err := runMilestoneGates(&out, "p0_p8", checks); err != nil {
 		t.Fatal(err)
 	}
 	text := out.String()
@@ -512,7 +512,7 @@ func TestP0P8CheckCommandFailsWhenAnyGateFails(t *testing.T) {
 		},
 	}
 
-	err := runP0P8Check(&out, checks)
+	err := runMilestoneGates(&out, "p0_p8", checks)
 	if err == nil {
 		t.Fatalf("p0-p8-check accepted failing gate")
 	}
@@ -678,12 +678,13 @@ func TestNegativeVectorsCheckCommandPrintsRequiredCases(t *testing.T) {
 	}
 	text := out.String()
 	for _, want := range []string{
-		"negative_vectors_check passed=true cases=5 failures=0\n",
+		"negative_vectors_check passed=true cases=6 failures=0\n",
 		"negative_vector malformed_public_key rejected=true",
 		"negative_vector wrong_key_encoding rejected=true",
 		"negative_vector wrong_signature rejected=true",
 		"negative_vector wrong_aead_tag rejected=true",
 		"negative_vector replay rejected=true",
+		"negative_vector wrong_token rejected=true",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("negative-vectors-check output missing %q:\n%s", want, text)
@@ -926,7 +927,9 @@ func TestCIWorkflowRunsVectorAndWireChecks(t *testing.T) {
 		"go run ./cmd/auroractl client-check",
 		"go run ./cmd/auroractl cover-check",
 		"go run ./cmd/auroractl packaging-check",
-		"go run ./cmd/auroractl p0-p8-check",
+		"go run ./cmd/auroractl perf-check",
+		"go run ./cmd/auroractl release-gate-check",
+		"go run ./cmd/auroractl p0-p11-check",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("CI workflow missing %q:\n%s", want, text)

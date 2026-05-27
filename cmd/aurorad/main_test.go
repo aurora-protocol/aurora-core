@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -316,8 +317,12 @@ func TestRunOpensPersistentSpentTokenCacheWhenConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spent-token cache file was not created: %v", err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("spent-token cache mode = %o, want 600", got)
+	// Windows does not model Unix permission bits, so the 0600 guarantee only
+	// applies on Unix-like platforms.
+	if runtime.GOOS != "windows" {
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("spent-token cache mode = %o, want 600", got)
+		}
 	}
 }
 

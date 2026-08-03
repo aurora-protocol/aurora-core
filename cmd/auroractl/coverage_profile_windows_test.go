@@ -18,8 +18,15 @@ func TestUnsafeWindowsCoverageProfilePath(t *testing.T) {
 		{path: `\\?\PIPE\coverage`, want: true},
 		{path: `\\?\GLOBALROOT\Device\HarddiskVolume1\coverage.out`, want: true},
 		{path: `\Device\NamedPipe\coverage`, want: true},
+		{path: `\\server\pipe\name`, want: true},
+		{path: `//SERVER/PiPe/name`, want: true},
+		{path: `\\?\UNC\server\pipe\name`, want: true},
+		{path: `//?/uNc/SERVER/PiPe/name`, want: true},
 		{path: `C:\evidence\coverage.out`, want: false},
 		{path: `\\server\share\coverage.out`, want: false},
+		{path: `\\server\pipeline\coverage.out`, want: false},
+		{path: `\\?\UNC\server\share\coverage.out`, want: false},
+		{path: `//?/UNC/server/pipeline/coverage.out`, want: false},
 	}
 
 	for _, tc := range tests {

@@ -43,11 +43,24 @@ func openCoverageProfile(path string) (*os.File, error) {
 
 func unsafeWindowsCoverageProfilePath(path string) bool {
 	normalized := strings.ToLower(strings.ReplaceAll(path, "/", "\\"))
-	return strings.HasPrefix(normalized, `\\.\`) ||
+	if strings.HasPrefix(normalized, `\\.\`) ||
 		strings.HasPrefix(normalized, `\\?\pipe\`) ||
 		strings.HasPrefix(normalized, `\\?\globalroot`) ||
 		strings.HasPrefix(normalized, `\device\namedpipe\`) ||
-		strings.HasPrefix(normalized, `\??\pipe\`)
+		strings.HasPrefix(normalized, `\??\pipe\`) {
+		return true
+	}
+
+	uncPath := normalized
+	if strings.HasPrefix(uncPath, `\\?\unc\`) {
+		uncPath = strings.TrimPrefix(uncPath, `\\?\unc\`)
+	} else if strings.HasPrefix(uncPath, `\\`) {
+		uncPath = strings.TrimPrefix(uncPath, `\\`)
+	} else {
+		return false
+	}
+	parts := strings.SplitN(uncPath, `\`, 3)
+	return len(parts) >= 2 && parts[0] != "" && parts[1] == "pipe"
 }
 
 func closeRejectedWindowsCoverageProfile(handle windows.Handle, rejected error) error {

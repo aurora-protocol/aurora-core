@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   test:
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -87,6 +88,7 @@ jobs:
         run: go run ./cmd/auroractl cover-check
 
   production-evidence:
+    timeout-minutes: 35
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -94,19 +96,24 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Race test
-        run: go test -race ./...
+        timeout-minutes: 15
+        run: go test -race -timeout 12m ./...
       - name: Coverage floor
+        timeout-minutes: 12
         run: |
-          go test -covermode=atomic -coverprofile=coverage.out ./...
+          go test -timeout 10m -covermode=atomic -coverprofile=coverage.out ./...
           go run ./cmd/auroractl coverage-check --profile coverage.out --minimum 70
       - name: Protocol fuzz smoke
-        run: go test ./protocol -run '^$' -fuzz '^FuzzDecodeProtocolStructs$' -fuzztime=10s
+        timeout-minutes: 5
+        run: go test -timeout 3m ./protocol -run '^$' -fuzz '^FuzzDecodeProtocolStructs$' -fuzztime=10s
       - name: Benchmark health
+        timeout-minutes: 7
         shell: bash
         run: |
           set -o pipefail
-          go test -run '^$' -bench . -benchtime=1x -benchmem ./... | tee benchmarks.txt
+          go test -timeout 5m -run '^$' -bench . -benchtime=1x -benchmem ./... | tee benchmarks.txt
       - name: Live server load smoke
+        timeout-minutes: 5
         shell: bash
         run: |
           set -euo pipefail
@@ -117,7 +124,7 @@ jobs:
           trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
           ready=false
           for attempt in $(seq 1 50); do
-            if curl --fail --silent http://127.0.0.1:19443/cover >/dev/null; then
+            if curl --fail --silent --connect-timeout 1 --max-time 1 http://127.0.0.1:19443/cover >/dev/null; then
               ready=true
               break
             fi
@@ -133,13 +140,16 @@ jobs:
           fi
           "$RUNNER_TEMP/auroractl" load-check --url http://127.0.0.1:19443/assets/app.bin --requests 200 --concurrency 8 --packet-bytes 1200 --request-limit 5s
       - name: Vulnerability scan
+        timeout-minutes: 10
         uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f
         with:
           repo-checkout: false
           go-version-file: go.mod
+          go-version-input: '1.25.0'
           output-format: text
       - name: Upload production evidence
         if: always()
+        timeout-minutes: 3
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: production-evidence
@@ -150,6 +160,7 @@ jobs:
           retention-days: 7
       - name: Upload server log on failure
         if: failure()
+        timeout-minutes: 3
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: aurorad-log

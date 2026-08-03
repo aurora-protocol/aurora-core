@@ -1,12 +1,13 @@
 package perf
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -119,10 +120,11 @@ func TestRunCarrierLoadCompletesBoundedHarnessLoad(t *testing.T) {
 	if report.GoroutinesBefore <= 0 || report.GoroutinesAfter <= 0 {
 		t.Fatalf("goroutine metrics = before %d after %d", report.GoroutinesBefore, report.GoroutinesAfter)
 	}
-	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
-		if !report.RSSAvailable || report.PeakRSSBytes == 0 {
-			t.Fatalf("RSS metrics = available %t peak %d", report.RSSAvailable, report.PeakRSSBytes)
-		}
+	if report.RSSAvailable && report.PeakRSSBytes == 0 {
+		t.Fatalf("RSS metrics = available %t peak %d", report.RSSAvailable, report.PeakRSSBytes)
+	}
+	if !report.RSSAvailable && report.PeakRSSBytes != 0 {
+		t.Fatalf("unavailable RSS reported peak %d", report.PeakRSSBytes)
 	}
 
 	encoded, err := json.Marshal(report)
@@ -268,6 +270,55 @@ func TestRunCarrierLoadAppliesRequestLimit(t *testing.T) {
 	}
 }
 
+func TestRunCarrierLoadCancellationCannotReturnPassingReport(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/octet-stream"}},
+			Body: cancelOnCloseBody{
+				ReadCloser: io.NopCloser(bytes.NewReader(body)),
+				cancel:     cancel,
+			},
+			Request: request,
+		}, nil
+	})}
+
+	report, err := RunCarrierLoad(ctx, client, "http://127.0.0.1/assets/app.bin", LoadOptions{
+		Requests:     1,
+		Concurrency:  1,
+		PacketBytes:  20,
+		RequestLimit: time.Second,
+	})
+	if !errors.Is(err, context.Canceled) || report.Passed {
+		t.Fatalf("report=%+v error=%v", report, err)
+	}
+}
+
+func TestRunCarrierLoadCountsBytesConsumedByTransport(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		buffer := make([]byte, 5)
+		if _, err := io.ReadFull(request.Body, buffer); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("transport failure")
+	})}
+
+	report, err := RunCarrierLoad(context.Background(), client, "http://127.0.0.1/assets/app.bin", LoadOptions{
+		Requests:     1,
+		Concurrency:  1,
+		PacketBytes:  20,
+		RequestLimit: time.Second,
+	})
+	if err == nil || report.BytesSent != 5 {
+		t.Fatalf("report=%+v error=%v", report, err)
+	}
+}
+
 func TestRunCarrierLoadBoundsResponseRead(t *testing.T) {
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
@@ -379,4 +430,20 @@ func withPacketBytes(options LoadOptions, packetBytes int) LoadOptions {
 func withRequestLimit(options LoadOptions, requestLimit time.Duration) LoadOptions {
 	options.RequestLimit = requestLimit
 	return options
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b cancelOnCloseBody) Close() error {
+	b.cancel()
+	return b.ReadCloser.Close()
 }

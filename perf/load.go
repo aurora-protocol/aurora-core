@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/server"
@@ -28,10 +27,12 @@ type LoadOptions struct {
 }
 
 type LoadReport struct {
-	Passed            bool          `json:"passed"`
-	Requested         int           `json:"requested"`
-	Completed         int           `json:"completed"`
-	Errors            int           `json:"errors"`
+	Passed    bool `json:"passed"`
+	Requested int  `json:"requested"`
+	Completed int  `json:"completed"`
+	Errors    int  `json:"errors"`
+	// BytesSent is the number of request-body bytes consumed by the HTTP
+	// transport. It does not claim kernel or peer delivery.
 	BytesSent         uint64        `json:"bytes_sent"`
 	BytesReceived     uint64        `json:"bytes_received"`
 	Duration          time.Duration `json:"duration_ns"`
@@ -78,28 +79,41 @@ func RunCarrierLoad(ctx context.Context, client *http.Client, endpoint string, o
 	started := time.Now()
 
 	workerCount := min(options.Concurrency, options.Requests)
+	jobs := make(chan int, workerCount)
 	results := make(chan carrierLoadResult, workerCount)
-	var nextRequest atomic.Int64
+	loadClient := *client
+	loadClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	var workers sync.WaitGroup
 	workers.Add(workerCount)
 	for range workerCount {
 		go func() {
 			defer workers.Done()
-			for {
-				requestIndex := int(nextRequest.Add(1) - 1)
-				if requestIndex >= options.Requests {
-					return
-				}
+			for range jobs {
 				if ctx.Err() != nil {
 					return
 				}
-				result := executeCarrierLoadRequest(ctx, client, endpoint, requestBody, options.RequestLimit)
+				result := executeCarrierLoadRequest(ctx, &loadClient, endpoint, requestBody, options.RequestLimit)
 				results <- result
 			}
 		}()
 	}
+	producerDone := make(chan struct{})
+	go func() {
+		defer close(producerDone)
+		defer close(jobs)
+		for requestIndex := 0; requestIndex < options.Requests; requestIndex++ {
+			select {
+			case jobs <- requestIndex:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 	go func() {
 		workers.Wait()
+		<-producerDone
 		close(results)
 	}()
 
@@ -128,10 +142,10 @@ func RunCarrierLoad(ctx context.Context, client *http.Client, endpoint string, o
 	if report.Duration > 0 {
 		report.RequestsPerSecond = float64(report.Completed) / report.Duration.Seconds()
 	}
-	report.Passed = report.Completed == report.Requested && report.Errors == 0
-
-	if err := ctx.Err(); err != nil {
-		return report, err
+	runErr := ctx.Err()
+	report.Passed = report.Completed == report.Requested && report.Errors == 0 && runErr == nil
+	if runErr != nil {
+		return report, runErr
 	}
 	if !report.Passed {
 		return report, fmt.Errorf("perf: carrier load failed: %d of %d completed requests failed", report.Errors, report.Completed)
@@ -185,18 +199,22 @@ func carrierLoadRequest(packetBytes int) ([]byte, error) {
 	return server.EncodeCarrier(server.CarrierPacketBatch, batch), nil
 }
 
-func executeCarrierLoadRequest(ctx context.Context, client *http.Client, endpoint string, requestBody []byte, requestLimit time.Duration) carrierLoadResult {
+func executeCarrierLoadRequest(ctx context.Context, client *http.Client, endpoint string, requestBody []byte, requestLimit time.Duration) (result carrierLoadResult) {
 	started := time.Now()
 	requestCtx, cancel := context.WithTimeout(ctx, requestLimit)
 	defer cancel()
-	result := carrierLoadResult{bytesSent: uint64(len(requestBody))}
+	body := &countingReader{reader: bytes.NewReader(requestBody)}
+	defer func() {
+		result.bytesSent = body.bytesRead
+	}()
 
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, endpoint, bytes.NewReader(requestBody))
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, endpoint, body)
 	if err != nil {
 		result.err = fmt.Errorf("create request")
 		result.latency = time.Since(started)
 		return result
 	}
+	request.ContentLength = int64(len(requestBody))
 	request.Header.Set("Content-Type", "application/octet-stream")
 	response, err := client.Do(request)
 	if err != nil {
@@ -244,6 +262,17 @@ func executeCarrierLoadRequest(ctx context.Context, client *http.Client, endpoin
 		result.err = fmt.Errorf("packet response mismatch")
 	}
 	return result
+}
+
+type countingReader struct {
+	reader    *bytes.Reader
+	bytesRead uint64
+}
+
+func (r *countingReader) Read(buffer []byte) (int, error) {
+	n, err := r.reader.Read(buffer)
+	r.bytesRead += uint64(n)
+	return n, err
 }
 
 func startRSSSampler() func() (uint64, bool) {

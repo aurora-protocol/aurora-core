@@ -113,7 +113,7 @@ func parseCoverageRow(row string) (uint64, bool, error) {
 		return 0, false, fmt.Errorf("coverage: invalid profile row")
 	}
 	statements, err := strconv.ParseUint(fields[1], 10, 64)
-	if err != nil || statements == 0 {
+	if err != nil {
 		return 0, false, fmt.Errorf("coverage: invalid statement count")
 	}
 	hits, err := strconv.ParseUint(fields[2], 10, 64)

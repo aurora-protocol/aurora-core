@@ -20,6 +20,30 @@ func TestVerifyCoverageWeightsStatementCounts(t *testing.T) {
 	}
 }
 
+func TestVerifyCoverageIgnoresZeroStatementRows(t *testing.T) {
+	profile := "mode: atomic\na.go:1.1,1.1 0 1\na.go:2.1,3.1 8 1\na.go:4.1,4.1 0 0\na.go:5.1,6.1 2 0\n"
+
+	report, err := VerifyCoverage(strings.NewReader(profile), 79)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Passed || report.CoveredStatements != 8 || report.TotalStatements != 10 || report.Percent != 80 || report.MinimumPercent != 79 {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
+func TestVerifyCoverageRejectsProfileWithOnlyZeroStatementRows(t *testing.T) {
+	profile := "mode: atomic\na.go:1.1,1.1 0 1\na.go:2.1,2.1 0 0\n"
+
+	report, err := VerifyCoverage(strings.NewReader(profile), 70)
+	if err == nil || err.Error() != "coverage: profile contains no statements" {
+		t.Fatalf("error = %v, want coverage: profile contains no statements", err)
+	}
+	if report != (CoverageReport{}) {
+		t.Fatalf("report = %+v, want empty report", report)
+	}
+}
+
 func TestVerifyCoverageRejectsMalformedProfiles(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -36,10 +60,6 @@ func TestVerifyCoverageRejectsMalformedProfiles(t *testing.T) {
 		{
 			name:    "negative count",
 			profile: "mode: atomic\na.go:1.1,2.1 1 -1\n",
-		},
-		{
-			name:    "zero statements",
-			profile: "mode: atomic\na.go:1.1,2.1 0 0\n",
 		},
 	}
 

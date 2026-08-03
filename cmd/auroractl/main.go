@@ -1194,16 +1194,14 @@ func coverageCheck(args []string, w io.Writer) error {
 		return fmt.Errorf("coverage-check: --profile is required")
 	}
 
-	profileInfo, err := os.Stat(*profilePath)
-	if err != nil || !profileInfo.Mode().IsRegular() {
-		return fmt.Errorf("coverage-check: unable to read profile")
-	}
-	profile, err := os.Open(*profilePath)
+	profile, err := openCoverageProfile(*profilePath)
 	if err != nil {
 		return fmt.Errorf("coverage-check: unable to read profile")
 	}
-	defer profile.Close()
 	report, verifyErr := evidence.VerifyCoverage(profile, *minimum)
+	if err := profile.Close(); err != nil {
+		return fmt.Errorf("coverage-check: unable to read profile")
+	}
 	if verifyErr != nil && report.TotalStatements == 0 {
 		return fmt.Errorf("coverage-check: coverage gate failed")
 	}

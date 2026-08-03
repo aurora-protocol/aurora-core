@@ -1,4 +1,4 @@
-//go:build aix || darwin || dragonfly || freebsd || illumos || linux || netbsd || openbsd || solaris
+//go:build aix || android || darwin || dragonfly || freebsd || illumos || ios || linux || netbsd || openbsd || solaris
 
 package main
 

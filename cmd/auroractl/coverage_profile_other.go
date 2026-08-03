@@ -1,4 +1,4 @@
-//go:build !(aix || darwin || dragonfly || freebsd || illumos || linux || netbsd || openbsd || solaris)
+//go:build !(aix || android || darwin || dragonfly || freebsd || illumos || ios || linux || netbsd || openbsd || solaris || windows)
 
 package main
 
@@ -8,9 +8,5 @@ import (
 )
 
 func openCoverageProfile(path string) (*os.File, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("coverage profile open failed")
-	}
-	return validateCoverageProfile(file)
+	return nil, fmt.Errorf("coverage profiles unsupported")
 }

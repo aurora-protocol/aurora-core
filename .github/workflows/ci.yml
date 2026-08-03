@@ -141,12 +141,10 @@ jobs:
           "$RUNNER_TEMP/auroractl" load-check --url http://127.0.0.1:19443/assets/app.bin --requests 200 --concurrency 8 --packet-bytes 1200 --request-limit 5s
       - name: Vulnerability scan
         timeout-minutes: 10
-        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f
-        with:
-          repo-checkout: false
-          go-version-file: go.mod
-          go-version-input: '1.25.0'
-          output-format: text
+        shell: bash
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          govulncheck ./...
       - name: Upload production evidence
         if: always()
         timeout-minutes: 3

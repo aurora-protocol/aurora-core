@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/aurora-protocol/aurora-core/admission"
 	auroraclient "github.com/aurora-protocol/aurora-core/client"
@@ -16,6 +20,7 @@ import (
 	auroracover "github.com/aurora-protocol/aurora-core/cover"
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/evaluation"
+	"github.com/aurora-protocol/aurora-core/evidence"
 	"github.com/aurora-protocol/aurora-core/failure"
 	"github.com/aurora-protocol/aurora-core/issuerd"
 	auroraops "github.com/aurora-protocol/aurora-core/ops"
@@ -87,6 +92,10 @@ func main() {
 		err = routeCheck(os.Stdout)
 	case "perf-check":
 		err = perfCheck(os.Stdout)
+	case "load-check":
+		err = loadCheck(os.Args[2:], os.Stdout)
+	case "coverage-check":
+		err = coverageCheck(os.Args[2:], os.Stdout)
 	case "release-gate-check":
 		err = releaseGateCheck(os.Stdout)
 	case "p0-p11-check":
@@ -109,7 +118,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|server-check|client-check|p0-p8-check|p0-p11-check|cover-check|crypto-check|wire-check|transport-check|flow-check|route-check|perf-check|release-gate-check|host-build-check [--portable|--apple-simulator|--all]|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|server-check|client-check|p0-p8-check|p0-p11-check|cover-check|crypto-check|wire-check|transport-check|flow-check|route-check|perf-check|load-check --url URL [--requests N --concurrency N --packet-bytes N --request-limit D]|coverage-check --profile PATH [--minimum PERCENT]|release-gate-check|host-build-check [--portable|--apple-simulator|--all]|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -1128,6 +1137,75 @@ func perfCheck(w io.Writer) error {
 	}
 	if !report.Passed {
 		return fmt.Errorf("perf-check failed performance and bad-path validation")
+	}
+	return nil
+}
+
+func loadCheck(args []string, w io.Writer) error {
+	flags := flag.NewFlagSet("load-check", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	url := flags.String("url", "", "carrier endpoint URL")
+	requests := flags.Int("requests", 200, "number of requests")
+	concurrency := flags.Int("concurrency", 8, "number of concurrent requests")
+	packetBytes := flags.Int("packet-bytes", 1200, "packet bytes per request")
+	requestLimit := flags.Duration("request-limit", 5*time.Second, "per-request limit")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return fmt.Errorf("load-check: invalid options")
+	}
+	if *url == "" {
+		return fmt.Errorf("load-check: --url is required")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	report, loadErr := auroraperf.RunCarrierLoad(ctx, http.DefaultClient, *url, auroraperf.LoadOptions{
+		Requests:     *requests,
+		Concurrency:  *concurrency,
+		PacketBytes:  *packetBytes,
+		RequestLimit: *requestLimit,
+	})
+	if err := json.NewEncoder(w).Encode(report); err != nil {
+		return err
+	}
+	if loadErr != nil {
+		return fmt.Errorf("load-check: carrier load failed")
+	}
+	return nil
+}
+
+func coverageCheck(args []string, w io.Writer) error {
+	flags := flag.NewFlagSet("coverage-check", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	profilePath := flags.String("profile", "", "coverprofile path")
+	minimum := flags.Float64("minimum", 70, "minimum coverage percentage")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return fmt.Errorf("coverage-check: invalid options")
+	}
+	if *profilePath == "" {
+		return fmt.Errorf("coverage-check: --profile is required")
+	}
+
+	profile, err := os.Open(*profilePath)
+	if err != nil {
+		return fmt.Errorf("coverage-check: unable to read profile")
+	}
+	defer profile.Close()
+	report, verifyErr := evidence.VerifyCoverage(profile, *minimum)
+	if report.TotalStatements > 0 {
+		if _, err := fmt.Fprintf(
+			w,
+			"coverage_check passed=%t covered_statements=%d total_statements=%d percent=%.2f minimum_percent=%.2f\n",
+			report.Passed,
+			report.CoveredStatements,
+			report.TotalStatements,
+			report.Percent,
+			report.MinimumPercent,
+		); err != nil {
+			return err
+		}
+	}
+	if verifyErr != nil {
+		return fmt.Errorf("coverage-check: coverage gate failed")
 	}
 	return nil
 }

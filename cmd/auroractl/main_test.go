@@ -2,17 +2,100 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	auroraperf "github.com/aurora-protocol/aurora-core/perf"
 	auroraplatform "github.com/aurora-protocol/aurora-core/platform"
+	"github.com/aurora-protocol/aurora-core/server"
 )
+
+func TestLoadCheckCommandEmitsPassingJSON(t *testing.T) {
+	harness, err := server.NewHarnessHandler(server.HarnessOptions{NowUnix: 1_700_000_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	testServer := httptest.NewServer(harness)
+	defer testServer.Close()
+
+	var out bytes.Buffer
+	err = loadCheck([]string{
+		"--url", testServer.URL + server.DefaultPacketExchangePath,
+		"--requests", "1",
+		"--concurrency", "1",
+		"--packet-bytes", "20",
+		"--request-limit", "1s",
+	}, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var report auroraperf.LoadReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("load-check output is not JSON: %v", err)
+	}
+	if !report.Passed || report.Requested != 1 || report.Completed != 1 || report.Errors != 0 {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
+func TestLoadCheckCommandRequiresURL(t *testing.T) {
+	var out bytes.Buffer
+	err := loadCheck(nil, &out)
+	if err == nil || !strings.Contains(err.Error(), "--url is required") {
+		t.Fatalf("error = %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("load-check wrote output for missing URL: %q", out.String())
+	}
+}
+
+func TestCoverageCheckCommandPrintsReportWithoutModifyingProfile(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "coverage.out")
+	contents := []byte("mode: atomic\na.go:1.1,2.1 8 1\na.go:3.1,4.1 2 0\n")
+	if err := os.WriteFile(profile, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := coverageCheck([]string{"--profile", profile, "--minimum", "70"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := out.String(), "coverage_check passed=true covered_statements=8 total_statements=10 percent=80.00 minimum_percent=70.00\n"; got != want {
+		t.Fatalf("coverage-check output = %q, want %q", got, want)
+	}
+	after, err := os.ReadFile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, contents) {
+		t.Fatalf("coverage-check modified profile: %q", after)
+	}
+}
+
+func TestCoverageCheckCommandReturnsErrorBelowThreshold(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "coverage.out")
+	if err := os.WriteFile(profile, []byte("mode: atomic\na.go:1.1,2.1 3 1\na.go:3.1,4.1 1 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := coverageCheck([]string{"--profile", profile, "--minimum", "80"}, &out)
+	if err == nil {
+		t.Fatal("coverage-check accepted coverage below threshold")
+	}
+	if got, want := out.String(), "coverage_check passed=false covered_statements=3 total_statements=4 percent=75.00 minimum_percent=80.00\n"; got != want {
+		t.Fatalf("coverage-check output = %q, want %q", got, want)
+	}
+}
 
 func TestActiveProbesCommandPrintsBaselineReport(t *testing.T) {
 	var out bytes.Buffer

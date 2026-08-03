@@ -1142,6 +1142,12 @@ func perfCheck(w io.Writer) error {
 }
 
 func loadCheck(args []string, w io.Writer) error {
+	return loadCheckWithRunner(args, w, auroraperf.RunCarrierLoad)
+}
+
+type carrierLoadRunner func(context.Context, *http.Client, string, auroraperf.LoadOptions) (auroraperf.LoadReport, error)
+
+func loadCheckWithRunner(args []string, w io.Writer, runner carrierLoadRunner) error {
 	flags := flag.NewFlagSet("load-check", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	url := flags.String("url", "", "carrier endpoint URL")
@@ -1155,10 +1161,13 @@ func loadCheck(args []string, w io.Writer) error {
 	if *url == "" {
 		return fmt.Errorf("load-check: --url is required")
 	}
+	if runner == nil {
+		return fmt.Errorf("load-check: carrier load failed")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	report, loadErr := auroraperf.RunCarrierLoad(ctx, http.DefaultClient, *url, auroraperf.LoadOptions{
+	report, loadErr := runner(ctx, http.DefaultClient, *url, auroraperf.LoadOptions{
 		Requests:     *requests,
 		Concurrency:  *concurrency,
 		PacketBytes:  *packetBytes,
@@ -1185,24 +1194,29 @@ func coverageCheck(args []string, w io.Writer) error {
 		return fmt.Errorf("coverage-check: --profile is required")
 	}
 
+	profileInfo, err := os.Stat(*profilePath)
+	if err != nil || !profileInfo.Mode().IsRegular() {
+		return fmt.Errorf("coverage-check: unable to read profile")
+	}
 	profile, err := os.Open(*profilePath)
 	if err != nil {
 		return fmt.Errorf("coverage-check: unable to read profile")
 	}
 	defer profile.Close()
 	report, verifyErr := evidence.VerifyCoverage(profile, *minimum)
-	if report.TotalStatements > 0 {
-		if _, err := fmt.Fprintf(
-			w,
-			"coverage_check passed=%t covered_statements=%d total_statements=%d percent=%.2f minimum_percent=%.2f\n",
-			report.Passed,
-			report.CoveredStatements,
-			report.TotalStatements,
-			report.Percent,
-			report.MinimumPercent,
-		); err != nil {
-			return err
-		}
+	if verifyErr != nil && report.TotalStatements == 0 {
+		return fmt.Errorf("coverage-check: coverage gate failed")
+	}
+	if _, err := fmt.Fprintf(
+		w,
+		"coverage_check passed=%t covered_statements=%d total_statements=%d percent=%.2f minimum_percent=%.2f\n",
+		report.Passed,
+		report.CoveredStatements,
+		report.TotalStatements,
+		report.Percent,
+		report.MinimumPercent,
+	); err != nil {
+		return err
 	}
 	if verifyErr != nil {
 		return fmt.Errorf("coverage-check: coverage gate failed")

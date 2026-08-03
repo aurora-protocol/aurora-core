@@ -2,16 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	auroraperf "github.com/aurora-protocol/aurora-core/perf"
 	auroraplatform "github.com/aurora-protocol/aurora-core/platform"
@@ -58,6 +61,79 @@ func TestLoadCheckCommandRequiresURL(t *testing.T) {
 	}
 }
 
+func TestLoadCheckCommandAppliesDefaultsAndDeadline(t *testing.T) {
+	var out bytes.Buffer
+	err := loadCheckWithRunner([]string{"--url", "http://example.invalid/load"}, &out, func(ctx context.Context, client *http.Client, endpoint string, options auroraperf.LoadOptions) (auroraperf.LoadReport, error) {
+		if client != http.DefaultClient {
+			t.Fatalf("client = %p, want http.DefaultClient", client)
+		}
+		if endpoint != "http://example.invalid/load" {
+			t.Fatalf("endpoint = %q", endpoint)
+		}
+		if options.Requests != 200 || options.Concurrency != 8 || options.PacketBytes != 1200 || options.RequestLimit != 5*time.Second {
+			t.Fatalf("options = %+v", options)
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("load-check did not set a parent deadline")
+		}
+		if duration := time.Until(deadline); duration < 29*time.Second || duration > 30*time.Second {
+			t.Fatalf("parent deadline duration = %s", duration)
+		}
+		return auroraperf.LoadReport{Passed: true}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report auroraperf.LoadReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if !report.Passed {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
+func TestLoadCheckCommandRejectsInvalidFlags(t *testing.T) {
+	var out bytes.Buffer
+	err := loadCheckWithRunner([]string{"--url", "http://example.invalid", "--requests", "not-a-number"}, &out, nil)
+	if err == nil || err.Error() != "load-check: invalid options" {
+		t.Fatalf("error = %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("load-check wrote output for invalid flags: %q", out.String())
+	}
+}
+
+func TestLoadCheckCommandRedactsLiveFailure(t *testing.T) {
+	const sensitivePath = "/private-carrier-value"
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer testServer.Close()
+
+	var out bytes.Buffer
+	err := loadCheck([]string{
+		"--url", testServer.URL + sensitivePath,
+		"--requests", "1",
+		"--concurrency", "1",
+		"--packet-bytes", "20",
+	}, &out)
+	if err == nil || err.Error() != "load-check: carrier load failed" {
+		t.Fatalf("error = %v", err)
+	}
+	if strings.Contains(err.Error(), sensitivePath) || strings.Contains(out.String(), sensitivePath) {
+		t.Fatalf("load-check exposed endpoint data: error=%q output=%q", err, out.String())
+	}
+	var report auroraperf.LoadReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed || report.Errors != 1 {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
 func TestCoverageCheckCommandPrintsReportWithoutModifyingProfile(t *testing.T) {
 	profile := filepath.Join(t.TempDir(), "coverage.out")
 	contents := []byte("mode: atomic\na.go:1.1,2.1 8 1\na.go:3.1,4.1 2 0\n")
@@ -78,6 +154,59 @@ func TestCoverageCheckCommandPrintsReportWithoutModifyingProfile(t *testing.T) {
 	}
 	if !bytes.Equal(after, contents) {
 		t.Fatalf("coverage-check modified profile: %q", after)
+	}
+}
+
+func TestCoverageCheckCommandUsesDefaultMinimum(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "coverage.out")
+	if err := os.WriteFile(profile, []byte("mode: atomic\na.go:1.1,2.1 3 1\na.go:3.1,4.1 1 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := coverageCheck([]string{"--profile", profile}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := out.String(), "coverage_check passed=true covered_statements=3 total_statements=4 percent=75.00 minimum_percent=70.00\n"; got != want {
+		t.Fatalf("coverage-check output = %q, want %q", got, want)
+	}
+}
+
+func TestCoverageCheckCommandRejectsInvalidFlags(t *testing.T) {
+	var out bytes.Buffer
+	err := coverageCheck([]string{"--profile", "coverage.out", "--minimum", "not-a-number"}, &out)
+	if err == nil || err.Error() != "coverage-check: invalid options" {
+		t.Fatalf("error = %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("coverage-check wrote output for invalid flags: %q", out.String())
+	}
+}
+
+func TestCoverageCheckCommandRejectsNonRegularProfile(t *testing.T) {
+	var out bytes.Buffer
+	err := coverageCheck([]string{"--profile", t.TempDir()}, &out)
+	if err == nil || err.Error() != "coverage-check: unable to read profile" {
+		t.Fatalf("error = %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("coverage-check wrote output for non-regular profile: %q", out.String())
+	}
+}
+
+func TestCoverageCheckCommandDoesNotEmitPartialResult(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "coverage.out")
+	if err := os.WriteFile(profile, []byte("mode: atomic\na.go:1.1,2.1 1 1\nnot a profile row\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := coverageCheck([]string{"--profile", profile}, &out)
+	if err == nil || err.Error() != "coverage-check: coverage gate failed" {
+		t.Fatalf("error = %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("coverage-check wrote partial report: %q", out.String())
 	}
 }
 

@@ -17,45 +17,64 @@ type CoverageReport struct {
 	MinimumPercent    float64 `json:"minimum_percent"`
 }
 
+const (
+	// MaxCoverageProfileBytes bounds all data VerifyCoverage reads from its input.
+	MaxCoverageProfileBytes = 4 * 1024 * 1024
+	// MaxCoverageProfileRows bounds the number of coverage data rows VerifyCoverage parses.
+	MaxCoverageProfileRows = 100_000
+)
+
 func VerifyCoverage(profile io.Reader, minimumPercent float64) (CoverageReport, error) {
-	report := CoverageReport{MinimumPercent: minimumPercent}
 	if profile == nil {
-		return report, fmt.Errorf("coverage: profile is required")
+		return CoverageReport{}, fmt.Errorf("coverage: profile is required")
 	}
 	if math.IsNaN(minimumPercent) || math.IsInf(minimumPercent, 0) || minimumPercent < 0 || minimumPercent > 100 {
-		return report, fmt.Errorf("coverage: minimum percentage must be between 0 and 100")
+		return CoverageReport{}, fmt.Errorf("coverage: minimum percentage must be between 0 and 100")
 	}
 
-	scanner := bufio.NewScanner(profile)
-	scanner.Buffer(make([]byte, 1024), 1024*1024)
+	reader := &countingReader{Reader: io.LimitReader(profile, MaxCoverageProfileBytes+1)}
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 1024), MaxCoverageProfileBytes+1)
 	if !scanner.Scan() {
-		return report, fmt.Errorf("coverage: missing profile header")
+		return CoverageReport{}, fmt.Errorf("coverage: missing profile header")
 	}
 	if !validCoverageMode(scanner.Text()) {
-		return report, fmt.Errorf("coverage: invalid profile header")
+		return CoverageReport{}, fmt.Errorf("coverage: invalid profile header")
 	}
 
+	report := CoverageReport{MinimumPercent: minimumPercent}
+	rows := 0
 	for scanner.Scan() {
+		if reader.BytesRead > MaxCoverageProfileBytes {
+			return CoverageReport{}, fmt.Errorf("coverage: profile byte limit exceeded")
+		}
+		rows++
+		if rows > MaxCoverageProfileRows {
+			return CoverageReport{}, fmt.Errorf("coverage: profile row limit exceeded")
+		}
 		statements, covered, err := parseCoverageRow(scanner.Text())
 		if err != nil {
-			return report, err
+			return CoverageReport{}, err
 		}
 		if maxUint64-report.TotalStatements < statements {
-			return report, fmt.Errorf("coverage: statement count overflow")
+			return CoverageReport{}, fmt.Errorf("coverage: statement count overflow")
 		}
 		report.TotalStatements += statements
 		if covered {
 			if maxUint64-report.CoveredStatements < statements {
-				return report, fmt.Errorf("coverage: statement count overflow")
+				return CoverageReport{}, fmt.Errorf("coverage: statement count overflow")
 			}
 			report.CoveredStatements += statements
 		}
 	}
+	if reader.BytesRead > MaxCoverageProfileBytes {
+		return CoverageReport{}, fmt.Errorf("coverage: profile byte limit exceeded")
+	}
 	if err := scanner.Err(); err != nil {
-		return report, fmt.Errorf("coverage: read profile")
+		return CoverageReport{}, fmt.Errorf("coverage: read profile")
 	}
 	if report.TotalStatements == 0 {
-		return report, fmt.Errorf("coverage: profile contains no statements")
+		return CoverageReport{}, fmt.Errorf("coverage: profile contains no statements")
 	}
 
 	report.Percent = float64(report.CoveredStatements) * 100 / float64(report.TotalStatements)
@@ -67,6 +86,17 @@ func VerifyCoverage(profile io.Reader, minimumPercent float64) (CoverageReport, 
 }
 
 const maxUint64 = ^uint64(0)
+
+type countingReader struct {
+	io.Reader
+	BytesRead int
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.BytesRead += n
+	return n, err
+}
 
 func validCoverageMode(header string) bool {
 	switch header {

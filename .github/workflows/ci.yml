@@ -16,8 +16,8 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version-file: go.mod
       - name: Test
@@ -85,3 +85,74 @@ jobs:
         run: go run ./cmd/auroractl p0-p11-check
       - name: Check cover-origin deployment harness
         run: go run ./cmd/auroractl cover-check
+
+  production-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+      - name: Race test
+        run: go test -race ./...
+      - name: Coverage floor
+        run: |
+          go test -covermode=atomic -coverprofile=coverage.out ./...
+          go run ./cmd/auroractl coverage-check --profile coverage.out --minimum 70
+      - name: Protocol fuzz smoke
+        run: go test ./protocol -run '^$' -fuzz '^FuzzDecodeProtocolStructs$' -fuzztime=10s
+      - name: Benchmark health
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -run '^$' -bench . -benchtime=1x -benchmem ./... | tee benchmarks.txt
+      - name: Live server load smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -o "$RUNNER_TEMP/aurorad" ./cmd/aurorad
+          go build -o "$RUNNER_TEMP/auroractl" ./cmd/auroractl
+          "$RUNNER_TEMP/aurorad" --listen 127.0.0.1:19443 >"$RUNNER_TEMP/aurorad.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for attempt in $(seq 1 50); do
+            if curl --fail --silent http://127.0.0.1:19443/cover >/dev/null; then
+              ready=true
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo "aurorad exited before readiness" >&2
+              exit 1
+            fi
+            sleep 0.1
+          done
+          if [ "$ready" != true ]; then
+            echo "aurorad did not become ready" >&2
+            exit 1
+          fi
+          "$RUNNER_TEMP/auroractl" load-check --url http://127.0.0.1:19443/assets/app.bin --requests 200 --concurrency 8 --packet-bytes 1200 --request-limit 5s
+      - name: Vulnerability scan
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f
+        with:
+          repo-checkout: false
+          go-version-file: go.mod
+          output-format: text
+      - name: Upload production evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: production-evidence
+          path: |
+            coverage.out
+            benchmarks.txt
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: aurorad-log
+          path: ${{ runner.temp }}/aurorad.log
+          if-no-files-found: ignore
+          retention-days: 7

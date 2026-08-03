@@ -52,10 +52,16 @@ func BenchmarkHarnessPacketCarrier(b *testing.B) {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		resp := rec.Result()
-		responseBody, err := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if err != nil {
-			b.Fatal(err)
+		responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxCarrierBodyBytes+1))
+		closeErr := resp.Body.Close()
+		if readErr != nil {
+			b.Fatal(readErr)
+		}
+		if closeErr != nil {
+			b.Fatal(closeErr)
+		}
+		if len(responseBody) > maxCarrierBodyBytes {
+			b.Fatalf("carrier response body length %d exceeds %d", len(responseBody), maxCarrierBodyBytes)
 		}
 		carrierType, payload, err := DecodeCarrier(responseBody)
 		if err != nil {

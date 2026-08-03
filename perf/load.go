@@ -203,13 +203,14 @@ func executeCarrierLoadRequest(ctx context.Context, client *http.Client, endpoin
 	started := time.Now()
 	requestCtx, cancel := context.WithTimeout(ctx, requestLimit)
 	defer cancel()
-	body := &countingReader{reader: bytes.NewReader(requestBody)}
+	body := newCountingBody(requestBody)
 	defer func() {
-		result.bytesSent = body.bytesRead
+		result.bytesSent = body.BytesRead()
 	}()
 
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, endpoint, body)
 	if err != nil {
+		_ = body.Close()
 		result.err = fmt.Errorf("create request")
 		result.latency = time.Since(started)
 		return result
@@ -217,8 +218,15 @@ func executeCarrierLoadRequest(ctx context.Context, client *http.Client, endpoin
 	request.ContentLength = int64(len(requestBody))
 	request.Header.Set("Content-Type", "application/octet-stream")
 	response, err := client.Do(request)
+	bodyErr := body.WaitClosed(requestCtx)
 	if err != nil {
 		result.err = fmt.Errorf("execute request")
+		result.latency = time.Since(started)
+		return result
+	}
+	if bodyErr != nil {
+		_ = response.Body.Close()
+		result.err = fmt.Errorf("finish request body")
 		result.latency = time.Since(started)
 		return result
 	}
@@ -264,15 +272,56 @@ func executeCarrierLoadRequest(ctx context.Context, client *http.Client, endpoin
 	return result
 }
 
-type countingReader struct {
+type countingBody struct {
+	mu        sync.Mutex
 	reader    *bytes.Reader
 	bytesRead uint64
+	closed    bool
+	closedCh  chan struct{}
 }
 
-func (r *countingReader) Read(buffer []byte) (int, error) {
-	n, err := r.reader.Read(buffer)
-	r.bytesRead += uint64(n)
+func newCountingBody(data []byte) *countingBody {
+	return &countingBody{
+		reader:   bytes.NewReader(data),
+		closedCh: make(chan struct{}),
+	}
+}
+
+func (b *countingBody) Read(buffer []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return 0, http.ErrBodyReadAfterClose
+	}
+	n, err := b.reader.Read(buffer)
+	b.bytesRead += uint64(n)
 	return n, err
+}
+
+func (b *countingBody) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.closed {
+		b.closed = true
+		close(b.closedCh)
+	}
+	return nil
+}
+
+func (b *countingBody) BytesRead() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.bytesRead
+}
+
+func (b *countingBody) WaitClosed(ctx context.Context) error {
+	select {
+	case <-b.closedCh:
+		return nil
+	case <-ctx.Done():
+		_ = b.Close()
+		return ctx.Err()
+	}
 }
 
 func startRSSSampler() func() (uint64, bool) {

@@ -277,6 +277,9 @@ func TestRunCarrierLoadCancellationCannotReturnPassingReport(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
+		if err := request.Body.Close(); err != nil {
+			return nil, err
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/octet-stream"}},
@@ -301,6 +304,7 @@ func TestRunCarrierLoadCancellationCannotReturnPassingReport(t *testing.T) {
 
 func TestRunCarrierLoadCountsBytesConsumedByTransport(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		defer request.Body.Close()
 		buffer := make([]byte, 5)
 		if _, err := io.ReadFull(request.Body, buffer); err != nil {
 			return nil, err
@@ -316,6 +320,56 @@ func TestRunCarrierLoadCountsBytesConsumedByTransport(t *testing.T) {
 	})
 	if err == nil || report.BytesSent != 5 {
 		t.Fatalf("report=%+v error=%v", report, err)
+	}
+}
+
+func TestRunCarrierLoadWaitsForAsynchronousRequestBodyClose(t *testing.T) {
+	read := make(chan struct{})
+	release := make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		go func() {
+			buffer := make([]byte, 5)
+			_, _ = io.ReadFull(request.Body, buffer)
+			close(read)
+			<-release
+			_ = request.Body.Close()
+		}()
+		return nil, errors.New("transport failure")
+	})}
+
+	type outcome struct {
+		report LoadReport
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		report, err := RunCarrierLoad(context.Background(), client, "http://127.0.0.1/assets/app.bin", LoadOptions{
+			Requests:     1,
+			Concurrency:  1,
+			PacketBytes:  20,
+			RequestLimit: time.Second,
+		})
+		done <- outcome{report: report, err: err}
+	}()
+
+	select {
+	case <-read:
+	case <-time.After(time.Second):
+		t.Fatal("transport did not consume request body")
+	}
+	select {
+	case got := <-done:
+		t.Fatalf("load returned before body close: report=%+v error=%v", got.report, got.err)
+	default:
+	}
+	close(release)
+	select {
+	case got := <-done:
+		if got.err == nil || got.report.BytesSent != 5 {
+			t.Fatalf("report=%+v error=%v", got.report, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("load did not return after body close")
 	}
 }
 

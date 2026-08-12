@@ -24,6 +24,8 @@ func NewMemoryReplayCache() *MemoryReplayCache {
 	return &MemoryReplayCache{seen: make(map[string]struct{})}
 }
 
+func (*MemoryReplayCache) Durable() bool { return false }
+
 func (c *MemoryReplayCache) InsertIfAbsent(key []byte) (bool, error) {
 	if c == nil {
 		return false, fmt.Errorf("admission: missing replay cache")
@@ -87,6 +89,8 @@ func NewFileReplayCache(path string) (*FileReplayCache, error) {
 	}
 	return cache, nil
 }
+
+func (*FileReplayCache) Durable() bool { return true }
 
 func (c *FileReplayCache) InsertIfAbsent(key []byte) (bool, error) {
 	if c == nil {

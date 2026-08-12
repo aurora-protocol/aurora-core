@@ -40,6 +40,9 @@ func TestVerifyRelayDeploymentAcceptsSignedPinnedDeployment(t *testing.T) {
 	if !bytes.Equal(verified.TemplateHash(), templateHash) {
 		t.Fatal("verified template hash mismatch")
 	}
+	if verified.Suite() != fixture.input.Suite || verified.Method() != fixture.input.Method {
+		t.Fatal("verified deployment lost suite or method binding")
+	}
 	class := verified.RequestClass()
 	if class.ClassID != deploymentClassID || class.ClassType != registry.RequestGatewayOwnedSlot || class.AllowedMethodFamily != registry.MethodWebH2Stream {
 		t.Fatalf("unexpected verified request class: %+v", class)
@@ -156,6 +159,29 @@ func TestZeroVerifiedRelayDeploymentIsInvalid(t *testing.T) {
 	}
 }
 
+func TestValidateDeploymentTemplateAppliesSelectedSuiteEnvelopeFloors(t *testing.T) {
+	fixture := newDeploymentFixture(t)
+	if err := validateDeploymentTemplate(fixture.input.Template, registry.SuiteHybrid1024AESGCM, deploymentNow, 120); err != nil {
+		t.Fatalf("larger hybrid suite rejected adequate envelope: %v", err)
+	}
+
+	for _, mutate := range []func(*protocol.CoverTemplate){
+		func(template *protocol.CoverTemplate) { template.PreludeEnvelope.MaxRequestBodySize = 2047 },
+		func(template *protocol.CoverTemplate) { template.PreludeEnvelope.MaxResponseBodySize = 8191 },
+	} {
+		template := fixture.input.Template
+		mutate(&template)
+		commitment, err := CoverOriginCommitment(template)
+		if err != nil {
+			t.Fatal(err)
+		}
+		template.CoverOriginCommitment = commitment
+		if err := validateDeploymentTemplate(template, registry.SuiteHybrid1024AESGCM, deploymentNow, 120); err == nil {
+			t.Fatal("larger hybrid suite accepted an undersized prelude envelope")
+		}
+	}
+}
+
 func newDeploymentFixture(t *testing.T) deploymentFixture {
 	t.Helper()
 	longtermClassical, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -249,14 +275,14 @@ func newDeploymentFixture(t *testing.T) deploymentFixture {
 		RoleFlags:                 1,
 		ValidFromUnix:             100,
 		ValidUntilUnix:            400,
-		RelayLongtermClassicalKey: ecdsaPublicRecord(longtermClassical),
+		RelayLongtermClassicalKey: ecdsaPublicRecord(t, longtermClassical),
 		RelayLongtermPQKey: protocol.PublicKeyRecord{
 			SignatureScheme: registry.SigMLDSA65,
 			KeyEncoding:     registry.KeyMLDSA65RawPublic,
 			PublicKey:       longtermPQPublic.Bytes(),
 		},
 		EpochID:               9,
-		EpochAuthClassicalKey: ecdsaPublicRecord(epochClassical),
+		EpochAuthClassicalKey: ecdsaPublicRecord(t, epochClassical),
 		EpochAuthPQKey: protocol.PublicKeyRecord{
 			SignatureScheme: registry.SigMLDSA65,
 			KeyEncoding:     registry.KeyMLDSA65RawPublic,
@@ -313,7 +339,7 @@ func newDeploymentFixture(t *testing.T) deploymentFixture {
 		Descriptor:               descriptor,
 		TrustedDescriptorHash:    descriptorHash,
 		Template:                 template,
-		TemplateAuthorityKey:     ecdsaPublicRecord(templateAuthority),
+		TemplateAuthorityKey:     ecdsaPublicRecord(t, templateAuthority),
 		RequestClassID:           deploymentClassID,
 		Suite:                    registry.SuiteHybrid768P256AESGCM,
 		Method:                   registry.MethodWebH2Stream,
@@ -323,10 +349,15 @@ func newDeploymentFixture(t *testing.T) deploymentFixture {
 	}}
 }
 
-func ecdsaPublicRecord(key *ecdsa.PrivateKey) protocol.PublicKeyRecord {
+func ecdsaPublicRecord(t *testing.T, key *ecdsa.PrivateKey) protocol.PublicKeyRecord {
+	t.Helper()
+	publicKey, err := key.PublicKey.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
 	return protocol.PublicKeyRecord{
 		SignatureScheme: registry.SigECDSAP256SHA384DER,
 		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
-		PublicKey:       elliptic.Marshal(elliptic.P256(), key.PublicKey.X, key.PublicKey.Y),
+		PublicKey:       publicKey,
 	}
 }

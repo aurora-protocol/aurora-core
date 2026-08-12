@@ -25,6 +25,8 @@ type RelayDeploymentVerification struct {
 
 type VerifiedRelayDeployment struct {
 	verified       bool
+	suite          uint64
+	method         uint64
 	descriptor     protocol.RelayDescriptor
 	template       protocol.CoverTemplate
 	requestClass   protocol.RequestClass
@@ -81,7 +83,7 @@ func VerifyRelayDeployment(in RelayDeploymentVerification) (VerifiedRelayDeploym
 		}
 	}
 
-	if err := validateDeploymentTemplate(template, in.NowUnix, in.MaxTemplateFutureSkew); err != nil {
+	if err := validateDeploymentTemplate(template, in.Suite, in.NowUnix, in.MaxTemplateFutureSkew); err != nil {
 		return VerifiedRelayDeployment{}, err
 	}
 	templateHash, err := CoverTemplateHash(template)
@@ -136,6 +138,8 @@ func VerifyRelayDeployment(in RelayDeploymentVerification) (VerifiedRelayDeploym
 
 	return VerifiedRelayDeployment{
 		verified:       true,
+		suite:          in.Suite,
+		method:         in.Method,
 		descriptor:     descriptor,
 		template:       template,
 		requestClass:   cloneRequestClass(requestClass),
@@ -147,6 +151,10 @@ func VerifyRelayDeployment(in RelayDeploymentVerification) (VerifiedRelayDeploym
 func (d VerifiedRelayDeployment) Valid() bool {
 	return d.verified
 }
+
+func (d VerifiedRelayDeployment) Suite() uint64 { return d.suite }
+
+func (d VerifiedRelayDeployment) Method() uint64 { return d.method }
 
 func (d VerifiedRelayDeployment) Descriptor() protocol.RelayDescriptor {
 	cloned, _ := cloneRelayDescriptor(d.descriptor)
@@ -226,7 +234,7 @@ func validateDeploymentDescriptor(d protocol.RelayDescriptor, now uint64) error 
 	return nil
 }
 
-func validateDeploymentTemplate(t protocol.CoverTemplate, now, maxFutureSkew uint64) error {
+func validateDeploymentTemplate(t protocol.CoverTemplate, suite, now, maxFutureSkew uint64) error {
 	if t.TemplateVersion != registry.Version20 {
 		return fmt.Errorf("trust: unsupported cover template version")
 	}
@@ -243,10 +251,14 @@ func validateDeploymentTemplate(t protocol.CoverTemplate, now, maxFutureSkew uin
 	if !bytes.Equal(commitment, t.CoverOriginCommitment) {
 		return fmt.Errorf("trust: cover origin commitment mismatch")
 	}
-	if t.PreludeEnvelope.MaxRequestBodySize < t.PreludeEnvelope.MinRequestBodySize || t.PreludeEnvelope.MaxRequestBodySize < 1536 {
+	minimumRequest, minimumResponse := uint64(1536), uint64(6144)
+	if suite == registry.SuiteHybrid1024AESGCM || suite == registry.SuiteHybrid1024ChaCha20 {
+		minimumRequest, minimumResponse = 2048, 8192
+	}
+	if t.PreludeEnvelope.MaxRequestBodySize < t.PreludeEnvelope.MinRequestBodySize || t.PreludeEnvelope.MaxRequestBodySize < minimumRequest {
 		return fmt.Errorf("trust: invalid cover prelude request envelope")
 	}
-	if t.PreludeEnvelope.MaxResponseBodySize < t.PreludeEnvelope.MinResponseBodySize || t.PreludeEnvelope.MaxResponseBodySize < 6144 {
+	if t.PreludeEnvelope.MaxResponseBodySize < t.PreludeEnvelope.MinResponseBodySize || t.PreludeEnvelope.MaxResponseBodySize < minimumResponse {
 		return fmt.Errorf("trust: invalid cover prelude response envelope")
 	}
 	if t.CapsuleEnvelope.MaxCapsuleBodySize < t.CapsuleEnvelope.MinCapsuleBodySize {

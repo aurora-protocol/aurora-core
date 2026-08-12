@@ -5,9 +5,11 @@ import (
 	"io"
 	"reflect"
 	"sync"
+
+	"github.com/aurora-protocol/aurora-core/wire"
 )
 
-const DefaultMaxRecordBodyBytes uint32 = 1 << 20
+const DefaultMaxRecordBodyBytes uint32 = wire.DefaultRecordBodyBytes
 
 var (
 	ErrEmptyRecord    = errors.New("transport: empty record")

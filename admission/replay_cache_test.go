@@ -10,6 +10,20 @@ import (
 	"github.com/aurora-protocol/aurora-core/registry"
 )
 
+func TestReplayCacheDurabilityMarkers(t *testing.T) {
+	if NewMemoryReplayCache().Durable() {
+		t.Fatal("memory replay cache reported durable")
+	}
+	cache, err := NewFileReplayCache(filepath.Join(t.TempDir(), "durability.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cache.Close() })
+	if !cache.Durable() {
+		t.Fatal("file replay cache did not report durable")
+	}
+}
+
 func TestFileReplayCachePersistsSpentKeysAcrossInstances(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "replay-cache.log")
 	key := rep(0x77, 48)

@@ -248,9 +248,14 @@ git commit -m "feat: derive first-hop binding from live tls"
 ### Task 4: Handshake Contracts and Envelope Padding
 
 **Files:**
+- Modify: `trust/deployment.go`
 - Create: `handshake/driver.go`
+- Create: `handshake/driver_test.go`
 - Create: `handshake/padding.go`
 - Create: `handshake/padding_test.go`
+- Modify: `admission/replay_cache.go`
+- Modify: `transport/record.go`
+- Create: `wire/limits.go`
 
 **Interfaces:**
 - Consumes: `trust.VerifiedRelayDeployment`, `admission.ReplayCache`, `session.Config`, and canonical protocol types.
@@ -258,9 +263,9 @@ git commit -m "feat: derive first-hop binding from live tls"
 - Produces: `ClientDriverConfig`, `RelayDriverConfig`, `EstablishedSession`, `NewClientDriver`, `NewRelayDriver`, and package-private test constructors that alone permit memory replay stores.
 - Produces: exact bounded-padding helpers for Prelude0, Prelude1, Capsule1, and Capsule2.
 
-- [ ] **Step 1: Write failing constructor and dependency tests**
+- [x] **Step 1: Write failing constructor and dependency tests**
 
-Assert production constructors reject a zero verified deployment, nil opener/provider/resolver/verifier/selector/signer, signer public-key mismatch, lab suites, memory hint/token/bootstrap caches, missing limits, wrong request-class method, replay epoch already expired, and mutable caller inputs. Assert the test constructor accepts explicit memory caches but still rejects every missing cryptographic dependency.
+Assert production constructors reject a zero verified deployment, nil provider/resolver/verifier/selector/signer, signer public-key mismatch, lab suites, memory hint/token/bootstrap caches, missing limits, wrong request-class method, replay epoch already expired, and mutable caller inputs. Assert `ClientDriver.Connect` rejects a nil opener in Task 5. Assert the test constructor accepts explicit memory caches but still rejects every missing cryptographic dependency.
 
 Use these exact contracts:
 
@@ -351,17 +356,17 @@ func NewRelayDriver(RelayDriverConfig) (*RelayDriver, error)
 func (s *EstablishedSession) Close() error
 ```
 
-- [ ] **Step 2: Write failing padding tests**
+- [x] **Step 2: Write failing padding tests**
 
 For each bootstrap object, use a counting cryptographic reader and assert the encoded or sealed body is within its signed envelope, padding bytes come from the reader, preexisting caller padding is replaced rather than retained, the maximum is checked after final encoding/signing/tag overhead, impossible intervals fail without partial output, and the input object remains unchanged.
 
-- [ ] **Step 3: Run the focused tests and verify red**
+- [x] **Step 3: Run the focused tests and verify red**
 
 Run: `GOCACHE=/private/tmp/aurora-first-hop-cache go test ./handshake -run 'Test(NewClientDriver|NewRelayDriver|Pad)' -count=1`
 
 Expected: FAIL because driver contracts and padding helpers do not exist.
 
-- [ ] **Step 4: Implement owned configuration and production/test separation**
+- [x] **Step 4: Implement owned configuration and production/test separation**
 
 `NewRelayDriver` accepts only replay stores implementing:
 
@@ -374,13 +379,15 @@ type DurableReplayCache interface {
 
 Add `Durable() bool` to existing memory and file caches, returning false and true respectively. Production construction requires three durable stores: spent hint, spent token, and bootstrap dedup. The package-private `newRelayDriverForTest` accepts ordinary replay caches. Both constructors verify signer public keys byte-for-byte against the deployment epoch keys and deep-clone all protocol/config inputs.
 
+Pin the selected suite and method inside `trust.VerifiedRelayDeployment`; driver construction must reject attempts to reuse the verified capability with another advertised suite or method. Validate suite-specific envelope floors and reject bootstrap envelopes above the shared operational record bound.
+
 Define `EstablishedSession` with owned `*session.Application`, aligned application `io.ReadCloser`/`io.WriteCloser`, selected policy, route instance, and a close function. Its `Close` must be idempotent, close carrier streams and application state once, and zero copied handshake material.
 
-- [ ] **Step 5: Implement exact bounded padding**
+- [x] **Step 5: Implement exact bounded padding**
 
 Padding helpers repeatedly encode using existing canonical encoders, add the exact remaining randomized bytes plus a 16-byte signature-size guard where ECDSA DER length can vary, and re-encode until the final body is in `[min,max]`. Abort after four monotonic attempts, reject `min > max`, reject maxima above the record limit, and never truncate a canonical object or signature. Capsule helpers account for the fixed AEAD tag before comparing the carrier record body to its envelope.
 
-- [ ] **Step 6: Run contract, admission, and padding verification**
+- [x] **Step 6: Run contract, admission, and padding verification**
 
 Run:
 
@@ -392,10 +399,10 @@ GOCACHE=/private/tmp/aurora-first-hop-cache go test -race ./admission ./handshak
 
 Expected: constructors fail closed, padding stays in signed bounds, and existing caches remain compatible.
 
-- [ ] **Step 7: Commit contracts and envelope enforcement**
+- [x] **Step 7: Commit contracts and envelope enforcement**
 
 ```bash
-git add admission/replay_cache.go handshake/driver.go handshake/padding.go handshake/padding_test.go
+git add admission/replay_cache.go admission/replay_cache_test.go trust/deployment.go trust/deployment_test.go wire/limits.go transport/record.go handshake/driver.go handshake/driver_test.go handshake/padding.go handshake/padding_test.go
 git commit -m "feat: define production handshake dependencies"
 ```
 

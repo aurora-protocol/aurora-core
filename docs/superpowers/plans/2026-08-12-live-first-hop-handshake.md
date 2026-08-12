@@ -497,7 +497,7 @@ GOCACHE=/private/tmp/aurora-first-hop-cache go test -race ./handshake -run 'Test
 
 Expected: all randomized and failure-order cases pass with no race report.
 
-- [ ] **Step 8: Commit the client driver**
+- [x] **Step 8: Commit the client driver**
 
 ```bash
 git add crypto/dh.go crypto/dh_test.go handshake/client.go handshake/client_test.go handshake/driver.go handshake/driver_test.go docs/superpowers/plans/2026-08-12-live-first-hop-handshake.md

@@ -597,7 +597,7 @@ GOCACHE=/private/tmp/aurora-first-hop-cache go test -race ./handshake -run 'Test
 
 Expected: exact ordering, replay, and terminal-lifecycle tests pass.
 
-- [ ] **Step 7: Commit the relay driver**
+- [x] **Step 7: Commit the relay driver**
 
 ```bash
 git add handshake/client.go handshake/control.go handshake/driver.go handshake/relay.go handshake/relay_test.go docs/superpowers/plans/2026-08-12-live-first-hop-handshake.md

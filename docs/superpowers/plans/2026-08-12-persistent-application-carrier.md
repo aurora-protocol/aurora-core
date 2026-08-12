@@ -176,13 +176,14 @@ type PreparedKeyUpdate struct {
 }
 ```
 
-`PrepareUpdate` calls `expireDrain(now)`, rejects an active drain and phase
-exhaustion, constructs and validates the next frame, derives next material, and
-returns an opaque token without mutating `DirectionState`. `Frame` returns a
-deep clone. `CommitPreparedUpdate` requires matching route, hop, direction,
-phase, and every current material byte before it stores previous material,
-advances phase, starts `MaxDrainWindow`, and records the pending update when
-acknowledgement is required.
+`PrepareUpdate` checks `drainActive(now)` without expiring or clearing state,
+rejects an unexpired drain and phase exhaustion, constructs and validates the
+next frame, derives next material, and returns an opaque token without mutating
+`DirectionState`. `Frame` returns a deep clone. `CommitPreparedUpdate` requires
+matching route, hop, direction, phase, and every current material byte before
+it stores previous material, advances phase, replaces any expired drain state,
+starts `MaxDrainWindow`, and records the pending update when acknowledgement is
+required.
 
 Refactor `InitiateUpdate` to call prepare and commit with one `time.Now()` value.
 Refactor `ApplyReceivedUpdate` to call `ApplyReceivedUpdateAt` with one
@@ -281,6 +282,24 @@ type Config struct {
 	Random          io.Reader
 }
 ```
+
+An all-zero `Limits` value normalizes to these production defaults:
+
+```go
+Limits{
+	MaxQueuedPackets:       256,
+	MaxQueuedBytes:         4 << 20,
+	ControlReservedPackets: 2,
+	ControlReservedBytes:   16 << 10,
+	ReplayWindow:           1024,
+}
+```
+
+A nonzero `Limits` value must specify every field. Enforce
+`MaxQueuedPackets <= 4096`, `MaxQueuedBytes <= 64 << 20`,
+`ControlReservedPackets >= 2` and `< MaxQueuedPackets`,
+`ControlReservedBytes >= 8 << 10` and `< MaxQueuedBytes`, and
+`64 <= ReplayWindow <= 1 << 20`.
 
 The application owns cloned key material, a `packet.Receiver`, per-phase write
 packet numbers, an ordered `[][]byte` queue, exact queued bytes, one buffered

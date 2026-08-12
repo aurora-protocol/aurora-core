@@ -23,6 +23,17 @@ type KeyUpdateResult struct {
 	ACK  *protocol.KeyUpdateACK
 }
 
+type PreparedKeyUpdate struct {
+	frame          protocol.KeyUpdate
+	next           KeyMaterial
+	sourcePhase    uint8
+	sourceMaterial KeyMaterial
+}
+
+func (p PreparedKeyUpdate) Frame() protocol.KeyUpdate {
+	return cloneKeyUpdate(p.frame)
+}
+
 func DeriveKeyUpdate(suite uint64, currentAppSecret []byte, frame protocol.KeyUpdate) (KeyMaterial, error) {
 	if err := protocol.ValidateKeyUpdate(frame); err != nil {
 		return KeyMaterial{}, err
@@ -107,9 +118,23 @@ type DirectionState struct {
 
 func (s *DirectionState) InitiateUpdate(suite uint64, updateNonce []byte, ackRequired bool, reason uint64) (protocol.KeyUpdate, error) {
 	now := time.Now()
+	prepared, err := s.PrepareUpdate(suite, updateNonce, ackRequired, reason, now)
+	if err != nil {
+		return protocol.KeyUpdate{}, err
+	}
+	if err := s.CommitPreparedUpdate(prepared, now); err != nil {
+		return protocol.KeyUpdate{}, err
+	}
+	return prepared.Frame(), nil
+}
+
+func (s *DirectionState) PrepareUpdate(suite uint64, updateNonce []byte, ackRequired bool, reason uint64, now time.Time) (PreparedKeyUpdate, error) {
 	s.expireDrain(now)
 	if s.drainActive(now) {
-		return protocol.KeyUpdate{}, fmt.Errorf("packet: KEY_UPDATE already in drain window")
+		return PreparedKeyUpdate{}, fmt.Errorf("packet: KEY_UPDATE already in drain window")
+	}
+	if s.KeyPhase == 255 {
+		return PreparedKeyUpdate{}, fmt.Errorf("packet: KEY_UPDATE key phase exhausted")
 	}
 	frame := protocol.KeyUpdate{
 		RouteInstanceID: s.RouteInstanceID,
@@ -121,14 +146,45 @@ func (s *DirectionState) InitiateUpdate(suite uint64, updateNonce []byte, ackReq
 		AckRequired:     ackRequired,
 		UpdateReason:    reason,
 	}
+	if err := protocol.ValidateKeyUpdate(frame); err != nil {
+		return PreparedKeyUpdate{}, err
+	}
 	next, err := DeriveKeyUpdate(suite, s.Material.AppSecret, frame)
 	if err != nil {
-		return protocol.KeyUpdate{}, err
+		return PreparedKeyUpdate{}, err
+	}
+	return PreparedKeyUpdate{
+		frame:          cloneKeyUpdate(frame),
+		next:           cloneKeyMaterial(next),
+		sourcePhase:    s.KeyPhase,
+		sourceMaterial: cloneKeyMaterial(s.Material),
+	}, nil
+}
+
+func (s *DirectionState) CommitPreparedUpdate(prepared PreparedKeyUpdate, now time.Time) error {
+	frame := prepared.frame
+	if err := protocol.ValidateKeyUpdate(frame); err != nil {
+		return err
+	}
+	if frame.RouteInstanceID != s.RouteInstanceID {
+		return fmt.Errorf("packet: prepared KEY_UPDATE route instance mismatch")
+	}
+	if frame.HopLayer != s.HopLayer {
+		return fmt.Errorf("packet: prepared KEY_UPDATE hop layer mismatch")
+	}
+	if frame.Direction != s.Direction {
+		return fmt.Errorf("packet: prepared KEY_UPDATE direction mismatch")
+	}
+	if frame.OldKeyPhase != prepared.sourcePhase || s.KeyPhase != prepared.sourcePhase {
+		return fmt.Errorf("packet: prepared KEY_UPDATE source phase mismatch")
+	}
+	if !bytes.Equal(s.Material.AppSecret, prepared.sourceMaterial.AppSecret) || !bytes.Equal(s.Material.Key, prepared.sourceMaterial.Key) || !bytes.Equal(s.Material.IV, prepared.sourceMaterial.IV) {
+		return fmt.Errorf("packet: prepared KEY_UPDATE source material mismatch")
 	}
 	s.previousKeyPhase = s.KeyPhase
 	s.previousMaterial = cloneKeyMaterial(s.Material)
 	s.KeyPhase = frame.NewKeyPhase
-	s.Material = next
+	s.Material = cloneKeyMaterial(prepared.next)
 	s.DrainUntil = now.Add(MaxDrainWindow)
 	s.clearLastReceivedUpdate()
 	if frame.AckRequired {
@@ -137,7 +193,7 @@ func (s *DirectionState) InitiateUpdate(suite uint64, updateNonce []byte, ackReq
 	} else {
 		s.clearPendingSentUpdate()
 	}
-	return frame, nil
+	return nil
 }
 
 func (s *DirectionState) MaterialForPacket(pkt AuroraPacket, now time.Time) (KeyMaterial, error) {
@@ -193,6 +249,10 @@ func (s *DirectionState) ApplyKeyUpdateACK(ack protocol.KeyUpdateACK, now time.T
 }
 
 func (s *DirectionState) ApplyReceivedUpdate(suite uint64, frame protocol.KeyUpdate, ackNonce []byte) (KeyUpdateResult, error) {
+	return s.ApplyReceivedUpdateAt(suite, frame, ackNonce, time.Now())
+}
+
+func (s *DirectionState) ApplyReceivedUpdateAt(suite uint64, frame protocol.KeyUpdate, ackNonce []byte, now time.Time) (KeyUpdateResult, error) {
 	if frame.RouteInstanceID != s.RouteInstanceID {
 		return KeyUpdateResult{}, fmt.Errorf("packet: KEY_UPDATE route instance mismatch")
 	}
@@ -207,7 +267,7 @@ func (s *DirectionState) ApplyReceivedUpdate(suite uint64, frame protocol.KeyUpd
 		return KeyUpdateResult{}, err
 	}
 	if frame.OldKeyPhase != s.KeyPhase {
-		if s.isDuplicateReceivedUpdate(frame, encodedFrame, time.Now()) {
+		if s.isDuplicateReceivedUpdate(frame, encodedFrame, now) {
 			return cloneKeyUpdateResult(s.lastReceivedUpdateResult), nil
 		}
 		return KeyUpdateResult{}, fmt.Errorf("packet: KEY_UPDATE old phase %d does not match active phase %d", frame.OldKeyPhase, s.KeyPhase)
@@ -220,7 +280,7 @@ func (s *DirectionState) ApplyReceivedUpdate(suite uint64, frame protocol.KeyUpd
 	s.previousMaterial = cloneKeyMaterial(s.Material)
 	s.KeyPhase = frame.NewKeyPhase
 	s.Material = res.Next
-	s.DrainUntil = time.Now().Add(MaxDrainWindow)
+	s.DrainUntil = now.Add(MaxDrainWindow)
 	s.lastReceivedUpdate = append(s.lastReceivedUpdate[:0], encodedFrame...)
 	s.lastReceivedUpdateResult = cloneKeyUpdateResult(res)
 	return res, nil

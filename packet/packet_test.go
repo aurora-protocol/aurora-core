@@ -19,6 +19,63 @@ func bytesOf(b byte, n int) []byte {
 	return out
 }
 
+func transactionalDirectionState() DirectionState {
+	return DirectionState{
+		RouteInstanceID: 0x50,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        0,
+		Material: KeyMaterial{
+			AppSecret: bytesOf(0x51, 48),
+			Key:       bytesOf(0x52, 32),
+			IV:        bytesOf(0x53, 12),
+		},
+	}
+}
+
+type directionStateSnapshot struct {
+	routeInstanceID uint64
+	hopLayer        uint8
+	direction       uint8
+	keyPhase        uint8
+	material        KeyMaterial
+	drainUntil      time.Time
+	pending         protocol.KeyUpdate
+	pendingMaterial KeyMaterial
+	pendingActive   bool
+}
+
+func snapshotDirectionState(state *DirectionState, now time.Time) directionStateSnapshot {
+	pending, pendingMaterial, pendingActive := state.PendingKeyUpdateRetransmission(now)
+	return directionStateSnapshot{
+		routeInstanceID: state.RouteInstanceID,
+		hopLayer:        state.HopLayer,
+		direction:       state.Direction,
+		keyPhase:        state.KeyPhase,
+		material:        cloneKeyMaterial(state.Material),
+		drainUntil:      state.DrainUntil,
+		pending:         pending,
+		pendingMaterial: pendingMaterial,
+		pendingActive:   pendingActive,
+	}
+}
+
+func requireSameDirectionStateSnapshot(t *testing.T, got, want directionStateSnapshot) {
+	t.Helper()
+	if got.routeInstanceID != want.routeInstanceID || got.hopLayer != want.hopLayer || got.direction != want.direction || got.keyPhase != want.keyPhase || !got.drainUntil.Equal(want.drainUntil) || got.pendingActive != want.pendingActive {
+		t.Fatalf("direction state metadata changed")
+	}
+	if !bytes.Equal(got.material.AppSecret, want.material.AppSecret) || !bytes.Equal(got.material.Key, want.material.Key) || !bytes.Equal(got.material.IV, want.material.IV) {
+		t.Fatalf("direction state material changed")
+	}
+	if got.pending.RouteInstanceID != want.pending.RouteInstanceID || got.pending.HopLayer != want.pending.HopLayer || got.pending.Direction != want.pending.Direction || got.pending.OldKeyPhase != want.pending.OldKeyPhase || got.pending.NewKeyPhase != want.pending.NewKeyPhase || !bytes.Equal(got.pending.UpdateNonce, want.pending.UpdateNonce) || got.pending.AckRequired != want.pending.AckRequired || got.pending.UpdateReason != want.pending.UpdateReason {
+		t.Fatalf("pending retransmission frame changed")
+	}
+	if !bytes.Equal(got.pendingMaterial.AppSecret, want.pendingMaterial.AppSecret) || !bytes.Equal(got.pendingMaterial.Key, want.pendingMaterial.Key) || !bytes.Equal(got.pendingMaterial.IV, want.pendingMaterial.IV) {
+		t.Fatalf("pending retransmission material changed")
+	}
+}
+
 func sealUncheckedForPacketTest(t *testing.T, p Protector, block protocol.FrameBlock) AuroraPacket {
 	t.Helper()
 	plaintext, err := protocol.Encode(block)
@@ -831,6 +888,201 @@ func TestKeyUpdateDerivationAndACK(t *testing.T) {
 	if _, err := ApplyReceivedKeyUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0x55, 48), frame, bytesOf(0xbb, 16)); err == nil {
 		t.Fatalf("expected skipped phase to fail")
 	}
+}
+
+func TestDirectionStatePrepareDoesNotMutateAndFrameIsOwned(t *testing.T) {
+	state := transactionalDirectionState()
+	now := time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC)
+	before := snapshotDirectionState(&state, now)
+
+	prepared, err := state.PrepareUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa1, 16), true, 7, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireSameDirectionStateSnapshot(t, snapshotDirectionState(&state, now), before)
+
+	frame := prepared.Frame()
+	frame.UpdateNonce[0] ^= 0xff
+	frame.NewKeyPhase = 9
+	owned := prepared.Frame()
+	if owned.NewKeyPhase != 1 || !bytes.Equal(owned.UpdateNonce, bytesOf(0xa1, 16)) {
+		t.Fatalf("prepared frame was changed through a returned clone")
+	}
+
+	if err := state.CommitPreparedUpdate(prepared, now); err != nil {
+		t.Fatal(err)
+	}
+	pending, _, active := state.PendingKeyUpdateRetransmission(now)
+	if !active || pending.NewKeyPhase != 1 || !bytes.Equal(pending.UpdateNonce, bytesOf(0xa1, 16)) {
+		t.Fatalf("commit used a frame changed through a returned clone")
+	}
+}
+
+func TestDirectionStatePrepareRejectsActiveDrainAndExhaustedPhaseWithoutMutation(t *testing.T) {
+	t.Run("active drain", func(t *testing.T) {
+		state := transactionalDirectionState()
+		if _, err := state.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa2, 16), true, 7); err != nil {
+			t.Fatal(err)
+		}
+		now := state.DrainUntil.Add(-time.Second)
+		before := snapshotDirectionState(&state, now)
+		if _, err := state.PrepareUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa3, 16), true, 7, now); err == nil {
+			t.Fatalf("prepare accepted an active drain")
+		}
+		requireSameDirectionStateSnapshot(t, snapshotDirectionState(&state, now), before)
+	})
+
+	t.Run("exhausted phase", func(t *testing.T) {
+		state := transactionalDirectionState()
+		state.KeyPhase = 255
+		now := time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC)
+		before := snapshotDirectionState(&state, now)
+		if _, err := state.PrepareUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa4, 16), false, 7, now); err == nil {
+			t.Fatalf("prepare accepted an exhausted key phase")
+		}
+		requireSameDirectionStateSnapshot(t, snapshotDirectionState(&state, now), before)
+	})
+}
+
+func TestDirectionStateCommitPreparedUpdateChangesStateExactlyOnce(t *testing.T) {
+	state := transactionalDirectionState()
+	original := cloneKeyMaterial(state.Material)
+	now := time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC)
+	prepared, err := state.PrepareUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa5, 16), true, 7, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CommitPreparedUpdate(prepared, now); err != nil {
+		t.Fatal(err)
+	}
+	if state.KeyPhase != 1 || !state.DrainUntil.Equal(now.Add(MaxDrainWindow)) {
+		t.Fatalf("commit did not advance the phase and start the drain window")
+	}
+	if bytes.Equal(state.Material.AppSecret, original.AppSecret) || bytes.Equal(state.Material.Key, original.Key) || bytes.Equal(state.Material.IV, original.IV) {
+		t.Fatalf("commit did not replace active key material")
+	}
+	pending, pendingMaterial, active := state.PendingKeyUpdateRetransmission(now)
+	if !active || pending.OldKeyPhase != 0 || pending.NewKeyPhase != 1 || !bytes.Equal(pending.UpdateNonce, bytesOf(0xa5, 16)) {
+		t.Fatalf("commit did not retain the acknowledgement retransmission")
+	}
+	if !bytes.Equal(pendingMaterial.AppSecret, original.AppSecret) || !bytes.Equal(pendingMaterial.Key, original.Key) || !bytes.Equal(pendingMaterial.IV, original.IV) {
+		t.Fatalf("commit did not retain the previous material for retransmission")
+	}
+
+	before := snapshotDirectionState(&state, now)
+	if err := state.CommitPreparedUpdate(prepared, now); err == nil {
+		t.Fatalf("same preparation committed twice")
+	}
+	requireSameDirectionStateSnapshot(t, snapshotDirectionState(&state, now), before)
+}
+
+func TestDirectionStateCommitPreparedUpdateRejectsChangedSourceWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(*DirectionState)
+	}{
+		{"route", func(s *DirectionState) { s.RouteInstanceID++ }},
+		{"hop", func(s *DirectionState) { s.HopLayer++ }},
+		{"direction", func(s *DirectionState) { s.Direction = 1 }},
+		{"phase", func(s *DirectionState) { s.KeyPhase++ }},
+		{"app secret", func(s *DirectionState) { s.Material.AppSecret[0] ^= 0xff }},
+		{"key", func(s *DirectionState) { s.Material.Key[0] ^= 0xff }},
+		{"iv", func(s *DirectionState) { s.Material.IV[0] ^= 0xff }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := transactionalDirectionState()
+			now := time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC)
+			prepared, err := state.PrepareUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa6, 16), false, 7, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.change(&state)
+			before := snapshotDirectionState(&state, now)
+			if err := state.CommitPreparedUpdate(prepared, now); err == nil {
+				t.Fatalf("commit accepted changed %s source", test.name)
+			}
+			requireSameDirectionStateSnapshot(t, snapshotDirectionState(&state, now), before)
+		})
+	}
+}
+
+func TestDirectionStatePrepareAndCommitMatchesInitiateUpdate(t *testing.T) {
+	legacy := transactionalDirectionState()
+	preparedState := transactionalDirectionState()
+	legacyFrame, err := legacy.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa7, 16), true, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := legacy.DrainUntil.Add(-MaxDrainWindow)
+	prepared, err := preparedState.PrepareUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa7, 16), true, 7, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedFrame := prepared.Frame()
+	if preparedFrame.RouteInstanceID != legacyFrame.RouteInstanceID || preparedFrame.HopLayer != legacyFrame.HopLayer || preparedFrame.Direction != legacyFrame.Direction || preparedFrame.OldKeyPhase != legacyFrame.OldKeyPhase || preparedFrame.NewKeyPhase != legacyFrame.NewKeyPhase || !bytes.Equal(preparedFrame.UpdateNonce, legacyFrame.UpdateNonce) || preparedFrame.AckRequired != legacyFrame.AckRequired || preparedFrame.UpdateReason != legacyFrame.UpdateReason {
+		t.Fatalf("prepare produced a different update frame than initiate")
+	}
+	if err := preparedState.CommitPreparedUpdate(prepared, now); err != nil {
+		t.Fatal(err)
+	}
+	requireSameDirectionStateSnapshot(t, snapshotDirectionState(&preparedState, legacy.DrainUntil), snapshotDirectionState(&legacy, legacy.DrainUntil))
+}
+
+func TestDirectionStateApplyReceivedUpdateAtUsesSuppliedTimeAndMatchesLegacyMethod(t *testing.T) {
+	frame := protocol.KeyUpdate{
+		RouteInstanceID: 0x50,
+		HopLayer:        1,
+		Direction:       0,
+		OldKeyPhase:     0,
+		NewKeyPhase:     1,
+		UpdateNonce:     bytesOf(0xa8, 16),
+		AckRequired:     true,
+		UpdateReason:    7,
+	}
+	ackNonce := bytesOf(0xb8, 16)
+
+	t.Run("supplied time controls drain", func(t *testing.T) {
+		state := transactionalDirectionState()
+		now := time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC)
+		first, err := state.ApplyReceivedUpdateAt(registry.SuiteHybrid768AESGCM, frame, ackNonce, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !state.DrainUntil.Equal(now.Add(MaxDrainWindow)) {
+			t.Fatalf("received update did not use the supplied time for drain expiry")
+		}
+		duplicate, err := state.ApplyReceivedUpdateAt(registry.SuiteHybrid768AESGCM, frame, bytesOf(0xb9, 16), now.Add(MaxDrainWindow))
+		if err != nil {
+			t.Fatalf("duplicate update at drain boundary was rejected: %v", err)
+		}
+		if duplicate.ACK == nil || first.ACK == nil || !bytes.Equal(duplicate.ACK.AckNonce, first.ACK.AckNonce) {
+			t.Fatalf("duplicate update did not return the original result")
+		}
+		before := snapshotDirectionState(&state, now.Add(MaxDrainWindow))
+		if _, err := state.ApplyReceivedUpdateAt(registry.SuiteHybrid768AESGCM, frame, bytesOf(0xba, 16), now.Add(MaxDrainWindow+time.Nanosecond)); err == nil {
+			t.Fatalf("duplicate update after drain expiry was accepted")
+		}
+		requireSameDirectionStateSnapshot(t, snapshotDirectionState(&state, now.Add(MaxDrainWindow)), before)
+	})
+
+	t.Run("legacy method", func(t *testing.T) {
+		legacy := transactionalDirectionState()
+		atState := transactionalDirectionState()
+		legacyResult, err := legacy.ApplyReceivedUpdate(registry.SuiteHybrid768AESGCM, frame, ackNonce)
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := legacy.DrainUntil.Add(-MaxDrainWindow)
+		atResult, err := atState.ApplyReceivedUpdateAt(registry.SuiteHybrid768AESGCM, frame, ackNonce, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(atResult.Next.AppSecret, legacyResult.Next.AppSecret) || !bytes.Equal(atResult.Next.Key, legacyResult.Next.Key) || !bytes.Equal(atResult.Next.IV, legacyResult.Next.IV) || atResult.ACK == nil || legacyResult.ACK == nil || !bytes.Equal(atResult.ACK.AckNonce, legacyResult.ACK.AckNonce) {
+			t.Fatalf("ApplyReceivedUpdateAt returned a different result than ApplyReceivedUpdate")
+		}
+		requireSameDirectionStateSnapshot(t, snapshotDirectionState(&atState, legacy.DrainUntil), snapshotDirectionState(&legacy, legacy.DrainUntil))
+	})
 }
 
 func TestDirectionStateApplyReceivedUpdateValidatesStateBeforeMutation(t *testing.T) {

@@ -172,6 +172,9 @@ func (d *ClientDriver) Connect(ctx context.Context, opener ClientCarrierOpener) 
 		return nil, err
 	}
 	defer zeroBindingBytes(preludeTranscriptHash)
+	if !bytes.Equal(prelude1.SelectedCoverProfileID, template.TemplateID) {
+		return nil, fmt.Errorf("handshake: selected cover profile mismatch")
+	}
 
 	sharedClassical, err := clientECDH.SharedSecret(prelude1.ServerClassicalEphPub)
 	if err != nil {

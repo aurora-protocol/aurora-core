@@ -240,6 +240,12 @@ func TestClientDriverDoesNotDiscloseProofsBeforeAuthenticatedPrelude(t *testing.
 			},
 		},
 		{
+			name: "selected cover profile mismatch",
+			mutatePrelude: func(prelude *protocol.CoverPrelude1) {
+				prelude.SelectedCoverProfileID[0] ^= 0xff
+			},
+		},
+		{
 			name: "malformed hybrid share",
 			mutatePrelude: func(prelude *protocol.CoverPrelude1) {
 				prelude.ServerClassicalEphPub = []byte{1}
@@ -859,7 +865,7 @@ func (c *scriptedClientCarrier) respondPrelude(record []byte) error {
 		ServerNonce:                   serverNonce,
 		ServerClassicalEphPub:         serverECDH.PublicKeyBytes(),
 		ServerMLKEMCiphertextToClient: ciphertext,
-		SelectedCoverProfileID:        bytes.Repeat([]byte{0x91}, 16),
+		SelectedCoverProfileID:        append([]byte(nil), template.TemplateID...),
 		SelectedBootstrapEnvelopeID:   append([]byte(nil), template.CapsuleEnvelope.EnvelopeID...),
 	}
 	if c.mutatePrelude != nil {

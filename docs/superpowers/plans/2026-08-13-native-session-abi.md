@@ -202,7 +202,7 @@ git commit -m "feat: validate native client provisioning"
 - Consumes: `client.NativeProvisioning`, `handshake.ClientHandshake`, and existing `AuroraCoreCall` allocation/free rules.
 - Produces: `AuroraCoreCall` operations `beginNativeSession`, `completeNativeSession`, `closeNativeSession`, `queueFrameBlock`, `nextPacket`, and `handlePacket`.
 
-- [ ] **Step 1: Write ABI misuse tests**
+- [x] **Step 1: Write ABI misuse tests**
 
 ```go
 func TestNativeSessionHandleRejectsUnknownAndClosedValues(t *testing.T)
@@ -211,7 +211,7 @@ func TestNativeSessionCompletionOwnsAndDestroysProvisioningSecrets(t *testing.T)
 func TestNativeSessionPacketCallsRejectMalformedFramesAndPackets(t *testing.T)
 ```
 
-- [ ] **Step 2: Implement a bounded process-local handle registry**
+- [x] **Step 2: Implement a bounded process-local handle registry**
 
 ```go
 type nativeSessionRegistry struct {
@@ -230,7 +230,7 @@ type nativeSession struct {
 
 Allocate monotonically nonzero handles, cap live sessions, remove before close, and serialize all operations for one handle. Never return pointer addresses as handles.
 
-- [ ] **Step 3: Return a bounded binary issuer-work item from `beginNativeSession`**
+- [x] **Step 3: Return a bounded binary issuer-work item from `beginNativeSession`**
 
 ```go
 type nativeIssuerWork struct {
@@ -243,7 +243,7 @@ type nativeIssuerWork struct {
 
 The core creates the issue request with the exact admission-context hash from `ClientProofRequest`; Swift only posts the returned opaque body and returns the opaque response.
 
-- [ ] **Step 4: Complete the handshake and expose encrypted application packet operations**
+- [x] **Step 4: Complete the handshake and expose encrypted application packet operations**
 
 ```go
 func (r *nativeSessionRegistry) complete(handle uint64, issuerResponse []byte) error
@@ -254,7 +254,7 @@ func (r *nativeSessionRegistry) handlePacket(handle uint64, encoded []byte) ([]b
 
 Use portable-core decoders for issuer responses and frame blocks; preserve queue backpressure and return status-only errors without secrets.
 
-- [ ] **Step 5: Add race, leak, and cross-compile coverage**
+- [x] **Step 5: Add race, leak, and cross-compile coverage**
 
 Run: `GOCACHE=/private/tmp/aurora-gocache go test -race ./mobile/auroracore && GOCACHE=/private/tmp/aurora-gocache GOOS=darwin GOARCH=arm64 go test -c ./mobile/auroracore && GOCACHE=/private/tmp/aurora-gocache GOOS=ios GOARCH=arm64 go test -c ./mobile/auroracore`
 

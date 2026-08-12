@@ -17,6 +17,7 @@ import (
 var (
 	ErrBackpressure   = errors.New("session: queue backpressure")
 	ErrClosed         = errors.New("session: closed")
+	ErrNoPacket       = errors.New("session: no packet available")
 	ErrSessionControl = errors.New("session: key control requires orchestration")
 	errRekeyRequired  = errors.New("session: key update required")
 )
@@ -231,31 +232,9 @@ func (a *Application) NextPacket(ctx context.Context) ([]byte, error) {
 			return nil, err
 		}
 		if len(a.queue) > 0 {
-			queued := &a.queue[0]
-			if queued.update != nil {
-				now := a.clock.Now()
-				if err := a.writeState.CommitPreparedUpdate(queued.update.prepared, now); err != nil {
-					returnErr := a.failLocked(fmt.Errorf("session: commit emitted key update: %w", err))
-					a.mu.Unlock()
-					return nil, returnErr
-				}
-				a.activateWriteStateLocked(now)
-				a.scheduleWriteDrainLocked()
-				a.pendingWriteUpdate = false
-			}
-			encodedBytes := len(queued.encoded)
-			encoded := queued.encoded
-			queued.encoded = nil
-			a.queuedBytes -= encodedBytes
-			queued.Destroy()
-			if len(a.queue) == 1 {
-				a.queue = a.queue[:0]
-			} else {
-				a.queue = a.queue[1:]
-			}
-			a.signalLocked()
+			encoded, err := a.takeNextPacketLocked()
 			a.mu.Unlock()
-			return encoded, nil
+			return encoded, err
 		}
 		changed := a.changed
 		closed := a.closed
@@ -272,6 +251,48 @@ func (a *Application) NextPacket(ctx context.Context) ([]byte, error) {
 		case <-changed:
 		}
 	}
+}
+
+// TryNextPacket returns one queued encrypted packet without waiting.
+func (a *Application) TryNextPacket() ([]byte, error) {
+	if a == nil {
+		return nil, ErrClosed
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.terminal != nil {
+		return nil, a.terminal
+	}
+	if len(a.queue) == 0 {
+		return nil, ErrNoPacket
+	}
+	return a.takeNextPacketLocked()
+}
+
+// takeNextPacketLocked transfers ownership of the first queued packet. a.mu must be held.
+func (a *Application) takeNextPacketLocked() ([]byte, error) {
+	queued := &a.queue[0]
+	if queued.update != nil {
+		now := a.clock.Now()
+		if err := a.writeState.CommitPreparedUpdate(queued.update.prepared, now); err != nil {
+			return nil, a.failLocked(fmt.Errorf("session: commit emitted key update: %w", err))
+		}
+		a.activateWriteStateLocked(now)
+		a.scheduleWriteDrainLocked()
+		a.pendingWriteUpdate = false
+	}
+	encodedBytes := len(queued.encoded)
+	encoded := queued.encoded
+	queued.encoded = nil
+	a.queuedBytes -= encodedBytes
+	queued.Destroy()
+	if len(a.queue) == 1 {
+		a.queue = a.queue[:0]
+	} else {
+		a.queue = a.queue[1:]
+	}
+	a.signalLocked()
+	return encoded, nil
 }
 
 func (a *Application) HandlePacket(ctx context.Context, now time.Time, encoded []byte) ([]protocol.FrameBlock, error) {

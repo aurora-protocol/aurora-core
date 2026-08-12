@@ -138,6 +138,32 @@ func TestApplicationOwnsConfigurationMaterial(t *testing.T) {
 	}
 }
 
+func TestApplicationTryNextPacketDoesNotBlock(t *testing.T) {
+	app, err := NewApplication(testApplicationConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+
+	if packet, err := app.TryNextPacket(); !errors.Is(err, ErrNoPacket) || packet != nil {
+		t.Fatalf("TryNextPacket() = %x, %v; want no packet", packet, err)
+	}
+	block := testFrameBlock(t, 1, []byte("nonblocking packet"))
+	if err := app.QueueFrames(context.Background(), block); err != nil {
+		t.Fatal(err)
+	}
+	packet, err := app.TryNextPacket()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packet) == 0 {
+		t.Fatal("TryNextPacket returned an empty encrypted packet")
+	}
+	if packet, err := app.TryNextPacket(); !errors.Is(err, ErrNoPacket) || packet != nil {
+		t.Fatalf("TryNextPacket after drain = %x, %v; want no packet", packet, err)
+	}
+}
+
 func TestApplicationRoundTripOwnsFrameInput(t *testing.T) {
 	client, relay := newApplicationPair(t)
 	defer client.Close()

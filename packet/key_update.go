@@ -129,7 +129,6 @@ func (s *DirectionState) InitiateUpdate(suite uint64, updateNonce []byte, ackReq
 }
 
 func (s *DirectionState) PrepareUpdate(suite uint64, updateNonce []byte, ackRequired bool, reason uint64, now time.Time) (PreparedKeyUpdate, error) {
-	s.expireDrain(now)
 	if s.drainActive(now) {
 		return PreparedKeyUpdate{}, fmt.Errorf("packet: KEY_UPDATE already in drain window")
 	}

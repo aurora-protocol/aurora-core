@@ -76,6 +76,62 @@ func requireSameDirectionStateSnapshot(t *testing.T, got, want directionStateSna
 	}
 }
 
+type directDirectionStateSnapshot struct {
+	routeInstanceID          uint64
+	hopLayer                 uint8
+	direction                uint8
+	keyPhase                 uint8
+	material                 KeyMaterial
+	drainUntil               time.Time
+	previousKeyPhase         uint8
+	previousMaterial         KeyMaterial
+	pendingSentUpdateActive  bool
+	pendingSentUpdate        protocol.KeyUpdate
+	lastReceivedUpdate       []byte
+	lastReceivedUpdateResult KeyUpdateResult
+}
+
+func snapshotDirectionStateDirect(state *DirectionState) directDirectionStateSnapshot {
+	return directDirectionStateSnapshot{
+		routeInstanceID:          state.RouteInstanceID,
+		hopLayer:                 state.HopLayer,
+		direction:                state.Direction,
+		keyPhase:                 state.KeyPhase,
+		material:                 cloneKeyMaterial(state.Material),
+		drainUntil:               state.DrainUntil,
+		previousKeyPhase:         state.previousKeyPhase,
+		previousMaterial:         cloneKeyMaterial(state.previousMaterial),
+		pendingSentUpdateActive:  state.pendingSentUpdateActive,
+		pendingSentUpdate:        cloneKeyUpdate(state.pendingSentUpdate),
+		lastReceivedUpdate:       append([]byte(nil), state.lastReceivedUpdate...),
+		lastReceivedUpdateResult: cloneKeyUpdateResult(state.lastReceivedUpdateResult),
+	}
+}
+
+func requireSameDirectDirectionStateSnapshot(t *testing.T, got, want directDirectionStateSnapshot) {
+	t.Helper()
+	if got.routeInstanceID != want.routeInstanceID || got.hopLayer != want.hopLayer || got.direction != want.direction || got.keyPhase != want.keyPhase || !got.drainUntil.Equal(want.drainUntil) || got.previousKeyPhase != want.previousKeyPhase || got.pendingSentUpdateActive != want.pendingSentUpdateActive {
+		t.Fatalf("direction state metadata changed")
+	}
+	if !bytes.Equal(got.material.AppSecret, want.material.AppSecret) || !bytes.Equal(got.material.Key, want.material.Key) || !bytes.Equal(got.material.IV, want.material.IV) || !bytes.Equal(got.previousMaterial.AppSecret, want.previousMaterial.AppSecret) || !bytes.Equal(got.previousMaterial.Key, want.previousMaterial.Key) || !bytes.Equal(got.previousMaterial.IV, want.previousMaterial.IV) {
+		t.Fatalf("direction state material changed")
+	}
+	if got.pendingSentUpdate.RouteInstanceID != want.pendingSentUpdate.RouteInstanceID || got.pendingSentUpdate.HopLayer != want.pendingSentUpdate.HopLayer || got.pendingSentUpdate.Direction != want.pendingSentUpdate.Direction || got.pendingSentUpdate.OldKeyPhase != want.pendingSentUpdate.OldKeyPhase || got.pendingSentUpdate.NewKeyPhase != want.pendingSentUpdate.NewKeyPhase || !bytes.Equal(got.pendingSentUpdate.UpdateNonce, want.pendingSentUpdate.UpdateNonce) || got.pendingSentUpdate.AckRequired != want.pendingSentUpdate.AckRequired || got.pendingSentUpdate.UpdateReason != want.pendingSentUpdate.UpdateReason {
+		t.Fatalf("pending sent update changed")
+	}
+	if !bytes.Equal(got.lastReceivedUpdate, want.lastReceivedUpdate) || !bytes.Equal(got.lastReceivedUpdateResult.Next.AppSecret, want.lastReceivedUpdateResult.Next.AppSecret) || !bytes.Equal(got.lastReceivedUpdateResult.Next.Key, want.lastReceivedUpdateResult.Next.Key) || !bytes.Equal(got.lastReceivedUpdateResult.Next.IV, want.lastReceivedUpdateResult.Next.IV) {
+		t.Fatalf("last received update changed")
+	}
+	if (got.lastReceivedUpdateResult.ACK == nil) != (want.lastReceivedUpdateResult.ACK == nil) {
+		t.Fatalf("last received acknowledgement changed")
+	}
+	if got.lastReceivedUpdateResult.ACK != nil {
+		if got.lastReceivedUpdateResult.ACK.RouteInstanceID != want.lastReceivedUpdateResult.ACK.RouteInstanceID || got.lastReceivedUpdateResult.ACK.HopLayer != want.lastReceivedUpdateResult.ACK.HopLayer || got.lastReceivedUpdateResult.ACK.AckedDirection != want.lastReceivedUpdateResult.ACK.AckedDirection || got.lastReceivedUpdateResult.ACK.AckedKeyPhase != want.lastReceivedUpdateResult.ACK.AckedKeyPhase || !bytes.Equal(got.lastReceivedUpdateResult.ACK.AckNonce, want.lastReceivedUpdateResult.ACK.AckNonce) {
+			t.Fatalf("last received acknowledgement changed")
+		}
+	}
+}
+
 func sealUncheckedForPacketTest(t *testing.T, p Protector, block protocol.FrameBlock) AuroraPacket {
 	t.Helper()
 	plaintext, err := protocol.Encode(block)
@@ -942,6 +998,51 @@ func TestDirectionStatePrepareRejectsActiveDrainAndExhaustedPhaseWithoutMutation
 		}
 		requireSameDirectionStateSnapshot(t, snapshotDirectionState(&state, now), before)
 	})
+}
+
+func TestDirectionStatePrepareRejectsExpiredDrainWithoutMutation(t *testing.T) {
+	state := transactionalDirectionState()
+	now := time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC)
+	state.KeyPhase = 255
+	state.DrainUntil = now.Add(-time.Nanosecond)
+	state.previousKeyPhase = 254
+	state.previousMaterial = KeyMaterial{
+		AppSecret: bytesOf(0x61, 48),
+		Key:       bytesOf(0x62, 32),
+		IV:        bytesOf(0x63, 12),
+	}
+	state.pendingSentUpdateActive = true
+	state.pendingSentUpdate = protocol.KeyUpdate{
+		RouteInstanceID: state.RouteInstanceID,
+		HopLayer:        state.HopLayer,
+		Direction:       state.Direction,
+		OldKeyPhase:     254,
+		NewKeyPhase:     255,
+		UpdateNonce:     bytesOf(0xa4, 16),
+		AckRequired:     true,
+		UpdateReason:    7,
+	}
+	state.lastReceivedUpdate = []byte{1, 2, 3}
+	state.lastReceivedUpdateResult = KeyUpdateResult{
+		Next: KeyMaterial{
+			AppSecret: bytesOf(0x71, 48),
+			Key:       bytesOf(0x72, 32),
+			IV:        bytesOf(0x73, 12),
+		},
+		ACK: &protocol.KeyUpdateACK{
+			RouteInstanceID: state.RouteInstanceID,
+			HopLayer:        state.HopLayer,
+			AckedDirection:  state.Direction,
+			AckedKeyPhase:   255,
+			AckNonce:        bytesOf(0xb4, 16),
+		},
+	}
+	before := snapshotDirectionStateDirect(&state)
+
+	if _, err := state.PrepareUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xc4, 16), false, 7, now); err == nil {
+		t.Fatalf("prepare accepted an exhausted key phase")
+	}
+	requireSameDirectDirectionStateSnapshot(t, snapshotDirectionStateDirect(&state), before)
 }
 
 func TestDirectionStateCommitPreparedUpdateChangesStateExactlyOnce(t *testing.T) {

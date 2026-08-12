@@ -240,6 +240,7 @@ func TestDirectionStateCloneOwnsEveryMutableField(t *testing.T) {
 	state.pendingSentUpdate = update
 	state.lastReceivedUpdate = bytesOf(0x94, 3)
 	clone := state.Clone()
+	defer clone.Destroy()
 	want := snapshotDirectionStateDirect(&state)
 
 	zeroKeyMaterialForTest(&state.Material)

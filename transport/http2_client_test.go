@@ -712,6 +712,8 @@ func TestHTTP2ClientCarrierStreamingBuilderRejectsInvalidInputs(t *testing.T) {
 		{name: "authority hash", mutate: func(in *CarrierRequestInput) { in.Template.PublicNameHash = []byte{1} }},
 		{name: "path ID", mutate: func(in *CarrierRequestInput) { in.Template.RequestClasses[0].PathTemplateID = []byte{1} }},
 		{name: "HTTP URL", mutate: func(in *CarrierRequestInput) { in.Scheme = "http" }},
+		{name: "query delimiter in path", mutate: func(in *CarrierRequestInput) { in.Path = "/upload?" }},
+		{name: "fragment delimiter in path", mutate: func(in *CarrierRequestInput) { in.Path = "/upload#fragment" }},
 		{name: "visible marker", mutate: func(in *CarrierRequestInput) { in.Header.Set("X-Service", "aurora") }},
 	}
 	for _, test := range tests {
@@ -756,6 +758,9 @@ func TestHTTP2ClientCarrierRejectsUnsafeConfiguration(t *testing.T) {
 		}},
 		{name: "empty path", mutate: func(c *HTTP2ClientCarrierConfig) { c.Request.URL.Path = "" }},
 		{name: "changed path", mutate: func(c *HTTP2ClientCarrierConfig) { c.Request.URL.Path = "/other" }},
+		{name: "encoded path", mutate: func(c *HTTP2ClientCarrierConfig) { c.Request.URL.RawPath = "/%75pload" }},
+		{name: "query delimiter in path", mutate: func(c *HTTP2ClientCarrierConfig) { c.Request.URL.Path = "/upload?" }},
+		{name: "fragment delimiter in path", mutate: func(c *HTTP2ClientCarrierConfig) { c.Request.URL.Path = "/upload#fragment" }},
 		{name: "query", mutate: func(c *HTTP2ClientCarrierConfig) { c.Request.URL.RawQuery = "page=1" }},
 		{name: "request trailer", mutate: func(c *HTTP2ClientCarrierConfig) { c.Request.Trailer = http.Header{"X-End": {"yes"}} }},
 		{name: "unbuilt request", mutate: func(c *HTTP2ClientCarrierConfig) {

@@ -66,6 +66,37 @@ func TestFirstHopWithholdsHeadersUntilBeginCompletes(t *testing.T) {
 	}
 }
 
+func TestFirstHopCarrierHeaderCommitRejectsConcurrentCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	writer := &cancellingFirstHopResponseWriter{cancelOnHeader: cancel}
+	var committed atomic.Bool
+	err := commitFirstHopCarrierHeaders(ctx, writer, http.Header{"X-Carrier-Reply": {"ordinary"}}, http.StatusCreated, &committed)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("header commit error = %v, want context cancellation", err)
+	}
+	if committed.Load() || writer.status != 0 || len(writer.header) != 0 {
+		t.Fatalf("canceled header commit changed response: committed=%t status=%d header=%v", committed.Load(), writer.status, writer.header)
+	}
+}
+
+func TestFirstHopPostHeaderDeadlineRejectsConcurrentCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	writer := &cancellingFirstHopResponseWriter{cancelOnReadDeadline: cancel}
+	postHeaderContext, stopPostHeader, err := beginFirstHopPostHeader(ctx, http.NewResponseController(writer), time.Second)
+	if stopPostHeader != nil {
+		defer stopPostHeader()
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("post-header deadline error = %v, want context cancellation", err)
+	}
+	if postHeaderContext != nil {
+		t.Fatal("canceled post-header deadline returned a live context")
+	}
+	if writer.futureWriteDeadlines != 0 {
+		t.Fatalf("canceled post-header setup installed %d future write deadlines", writer.futureWriteDeadlines)
+	}
+}
+
 func TestFirstHopOrdinaryFirstRequestConsumesConnectionClaim(t *testing.T) {
 	var beginCalls atomic.Int32
 	server, client, connections, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
@@ -1013,6 +1044,46 @@ type firstHopStreamingWriter struct {
 	records *transport.RecordWriter
 	pipe    *io.PipeWriter
 }
+
+type cancellingFirstHopResponseWriter struct {
+	header                 http.Header
+	status                 int
+	cancelOnHeader         context.CancelFunc
+	cancelOnReadDeadline   context.CancelFunc
+	futureWriteDeadlines   int
+	headerCancellationOnce sync.Once
+	readCancellationOnce   sync.Once
+}
+
+func (w *cancellingFirstHopResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	w.headerCancellationOnce.Do(func() {
+		if w.cancelOnHeader != nil {
+			w.cancelOnHeader()
+		}
+	})
+	return w.header
+}
+
+func (*cancellingFirstHopResponseWriter) Write(payload []byte) (int, error) { return len(payload), nil }
+func (w *cancellingFirstHopResponseWriter) WriteHeader(status int)          { w.status = status }
+func (w *cancellingFirstHopResponseWriter) SetReadDeadline(time.Time) error {
+	w.readCancellationOnce.Do(func() {
+		if w.cancelOnReadDeadline != nil {
+			w.cancelOnReadDeadline()
+		}
+	})
+	return nil
+}
+func (w *cancellingFirstHopResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	if deadline.After(time.Now()) {
+		w.futureWriteDeadlines++
+	}
+	return nil
+}
+func (*cancellingFirstHopResponseWriter) FlushError() error { return nil }
 
 type blockingFirstHopRequestBody struct {
 	started   chan struct{}

@@ -486,24 +486,16 @@ func (h *FirstHopHandler) serveCandidate(ctx context.Context, cancel context.Can
 		h.servePreHeaderFailure(w, request)
 		return err
 	}
-	if err := ctx.Err(); err != nil {
+	if err := commitFirstHopCarrierHeaders(ctx, w, h.coverHeader, h.coverStatus, &headersCommitted); err != nil {
 		h.servePreHeaderFailure(w, request)
 		return err
 	}
-	copyFirstHopHeader(w.Header(), h.coverHeader)
-	headersCommitted.Store(true)
-	w.WriteHeader(h.coverStatus)
-	postHeaderContext, stopPostHeader := context.WithTimeout(ctx, h.postHeaderTimeout)
+	postHeaderContext, stopPostHeader, err := beginFirstHopPostHeader(ctx, controller, h.postHeaderTimeout)
+	if err != nil {
+		abortFirstHopAfterHeader(cancel)
+		return err
+	}
 	defer stopPostHeader()
-	postHeaderDeadline := time.Now().Add(h.postHeaderTimeout)
-	if err := controller.SetReadDeadline(postHeaderDeadline); err != nil {
-		abortFirstHopAfterHeader(cancel)
-		return err
-	}
-	if err := controller.SetWriteDeadline(postHeaderDeadline); err != nil {
-		abortFirstHopAfterHeader(cancel)
-		return err
-	}
 	recordWriter, err := transport.NewRecordWriter(w, h.maxRecordBodyBytes)
 	if err != nil {
 		abortFirstHopAfterHeader(cancel)
@@ -563,6 +555,49 @@ func (h *FirstHopHandler) serveCandidate(ctx context.Context, cancel context.Can
 	}
 	writeStream := &firstHopResponseWriteCloser{writer: w, controller: controller, cancel: cancel}
 	return transport.RunPacketDuplex(ctx, request.Body, writeStream, application, h.frameHandler, h.maxRecordBodyBytes)
+}
+
+func commitFirstHopCarrierHeaders(ctx context.Context, writer http.ResponseWriter, header http.Header, status int, committed *atomic.Bool) error {
+	destination := writer.Header()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	copyFirstHopHeader(destination, header)
+	if err := ctx.Err(); err != nil {
+		copyFirstHopHeader(destination, nil)
+		return err
+	}
+	committed.Store(true)
+	writer.WriteHeader(status)
+	return nil
+}
+
+func beginFirstHopPostHeader(ctx context.Context, controller *http.ResponseController, timeout time.Duration) (context.Context, context.CancelFunc, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	postHeaderContext, stopPostHeader := context.WithTimeout(ctx, timeout)
+	fail := func(err error) (context.Context, context.CancelFunc, error) {
+		stopPostHeader()
+		return nil, nil, err
+	}
+	deadline := time.Now().Add(timeout)
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	if err := controller.SetReadDeadline(deadline); err != nil {
+		return fail(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	if err := controller.SetWriteDeadline(deadline); err != nil {
+		return fail(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	return postHeaderContext, stopPostHeader, nil
 }
 
 func (h *FirstHopHandler) isCandidate(request *http.Request) bool {

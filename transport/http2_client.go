@@ -489,10 +489,10 @@ func validateHTTP2ClientCarrierConfig(config HTTP2ClientCarrierConfig) (HTTP2Cli
 	if request.Host != request.URL.Host {
 		return HTTP2ClientCarrierConfig{}, fmt.Errorf("transport: HTTP/2 request authority mismatch")
 	}
-	if request.URL.Path == "" || request.URL.Path[0] != '/' {
+	if request.URL.Path == "" || request.URL.Path[0] != '/' || strings.ContainsAny(request.URL.Path, "?#") {
 		return HTTP2ClientCarrierConfig{}, fmt.Errorf("transport: HTTP/2 carrier path is invalid")
 	}
-	if request.URL.RawQuery != "" || request.URL.Fragment != "" || request.URL.User != nil || request.URL.Opaque != "" || request.URL.ForceQuery {
+	if request.URL.RawPath != "" || request.URL.RawQuery != "" || request.URL.Fragment != "" || request.URL.User != nil || request.URL.Opaque != "" || request.URL.ForceQuery {
 		return HTTP2ClientCarrierConfig{}, fmt.Errorf("transport: HTTP/2 carrier target contains unsupported URL components")
 	}
 	if request.RequestURI != "" || len(request.TransferEncoding) != 0 || len(request.Trailer) != 0 {

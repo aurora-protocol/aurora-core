@@ -116,7 +116,8 @@ Run:
 ```bash
 gofmt -w transport/record.go transport/record_test.go transport/record_fuzz_test.go
 GOCACHE=/private/tmp/aurora-session-cache go test ./transport -run 'TestRecord|TestNewRecord' -count=1
-GOCACHE=/private/tmp/aurora-session-cache go test ./transport -run '^$' -fuzz FuzzRecord -fuzztime=2s
+GOCACHE=/private/tmp/aurora-session-cache go test ./transport -run '^$' -fuzz '^FuzzRecordReader$' -fuzztime=2s
+GOCACHE=/private/tmp/aurora-session-cache go test ./transport -run '^$' -fuzz '^FuzzRecordRoundTrip$' -fuzztime=2s
 GOCACHE=/private/tmp/aurora-session-cache go test -race ./transport
 ```
 
@@ -161,20 +162,19 @@ Use an opaque preparation token that owns cloned material and records the source
 
 ```go
 type PreparedKeyUpdate struct {
-	Frame       protocol.KeyUpdate
-	Next        KeyMaterial
-	sourcePhase uint8
-	sourceKey   []byte
-	committed   bool
+	Frame          protocol.KeyUpdate
+	Next           KeyMaterial
+	sourcePhase    uint8
+	sourceMaterial KeyMaterial
 }
 ```
 
 `PrepareUpdate` calls `expireDrain(now)`, rejects an active drain and phase
 exhaustion, constructs and validates the next frame, derives next material, and
 returns clones without mutating `DirectionState`. `CommitPreparedUpdate`
-requires matching route, hop, direction, phase, and current key bytes before it
-stores previous material, advances phase, starts `MaxDrainWindow`, and records
-the pending update when acknowledgement is required.
+requires matching route, hop, direction, phase, and every current material byte
+before it stores previous material, advances phase, starts `MaxDrainWindow`,
+and records the pending update when acknowledgement is required.
 
 Refactor `InitiateUpdate` to call prepare and commit with one `time.Now()` value.
 
@@ -229,8 +229,8 @@ Use explicit limits in every fixture:
 Limits{
 	MaxQueuedPackets:       8,
 	MaxQueuedBytes:         64 << 10,
-	ControlReservedPackets: 1,
-	ControlReservedBytes:   4 << 10,
+	ControlReservedPackets: 2,
+	ControlReservedBytes:   8 << 10,
 	ReplayWindow:           64,
 }
 ```
@@ -365,11 +365,14 @@ func (a *Application) signalLocked()
 - [ ] **Step 5: Implement received control handling**
 
 After packet open, scan the validated block once. Decode key-update and
-acknowledgement payloads with `wire.Reader`, require EOF, and apply them under
-the session mutex. Generate acknowledgement nonces from the configured random
-reader and enqueue acknowledgements through reserved control capacity. Return a
-new block containing only non-key-control frames; return no block when all
-frames were consumed internally.
+acknowledgement payloads with `wire.Reader` and require EOF. For an update that
+requires an acknowledgement, reserve control capacity before mutating read-key
+state; a reservation failure is terminal because packet replay state has
+already advanced. Apply controls under the session mutex, generate
+acknowledgement nonces from the configured random reader, and commit the
+reserved acknowledgement packet. Return a new block containing only
+non-key-control frames; return no block when all frames were consumed
+internally.
 
 - [ ] **Step 6: Run packet and session verification**
 
@@ -481,8 +484,8 @@ Require `SessionOptions` to bound duration, message count, payload bytes,
 concurrency, queue packets, and queue bytes. Assert zero or excessive values are
 rejected. A 200-message paired run must report sent, received, bytes, duration,
 throughput, p50, p95, peak queued bytes, goroutine delta, and errors. Add
-`testing.AllocsPerRun` bounds for one packet queue/dequeue and one record
-round trip, using measured baseline values plus at most 10 percent headroom.
+`testing.AllocsPerRun` bounds of at most 40 allocations for one packet
+queue/dequeue and at most 6 allocations for one record round trip.
 
 - [ ] **Step 2: Run the focused tests and verify red**
 
@@ -520,7 +523,8 @@ git diff --check
 GOCACHE=/private/tmp/aurora-session-cache go vet ./...
 GOCACHE=/private/tmp/aurora-session-cache go test ./... -count=1
 GOCACHE=/private/tmp/aurora-session-cache go test -race ./...
-GOCACHE=/private/tmp/aurora-session-cache go test ./transport -run '^$' -fuzz FuzzRecord -fuzztime=10s
+GOCACHE=/private/tmp/aurora-session-cache go test ./transport -run '^$' -fuzz '^FuzzRecordReader$' -fuzztime=10s
+GOCACHE=/private/tmp/aurora-session-cache go test ./transport -run '^$' -fuzz '^FuzzRecordRoundTrip$' -fuzztime=10s
 GOCACHE=/private/tmp/aurora-session-cache go test ./perf -run '^$' -bench 'Application|Record|Duplex' -benchtime=200ms -benchmem
 GOOS=linux GOARCH=amd64 go test -c ./session -o /private/tmp/aurora-session-linux.test
 GOOS=windows GOARCH=amd64 go test -c ./session -o /private/tmp/aurora-session-windows.test.exe

@@ -107,8 +107,12 @@ type ClientDriver struct {
 	sessionLimits  session.Limits
 	rekey          session.RekeyPolicy
 	entropy        session.EntropySource
-	hintUseMu      sync.Mutex
-	hintUses       uint16
+	hintUse        *clientAccessHintUse
+}
+
+type clientAccessHintUse struct {
+	mu   sync.Mutex
+	uses uint16
 }
 
 type RelayDriver struct {
@@ -183,6 +187,7 @@ func newClientDriverAt(config ClientDriverConfig, now time.Time) (*ClientDriver,
 		sessionLimits:  config.SessionLimits,
 		rekey:          config.Rekey,
 		entropy:        config.Entropy,
+		hintUse:        &clientAccessHintUse{},
 	}, nil
 }
 

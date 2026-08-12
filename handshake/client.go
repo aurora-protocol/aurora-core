@@ -401,21 +401,27 @@ func (d *ClientDriver) Connect(ctx context.Context, opener ClientCarrierOpener) 
 }
 
 func (d *ClientDriver) reserveAccessHintUse() error {
-	d.hintUseMu.Lock()
-	defer d.hintUseMu.Unlock()
-	if d.hintUses >= d.accessHint.MaxUses {
+	if d == nil || d.hintUse == nil {
+		return fmt.Errorf("handshake: client access hint use state is missing")
+	}
+	d.hintUse.mu.Lock()
+	defer d.hintUse.mu.Unlock()
+	if d.hintUse.uses >= d.accessHint.MaxUses {
 		return fmt.Errorf("handshake: access hint credential usage exhausted")
 	}
-	d.hintUses++
+	d.hintUse.uses++
 	return nil
 }
 
 func (d *ClientDriver) releaseAccessHintUse() {
-	d.hintUseMu.Lock()
-	if d.hintUses > 0 {
-		d.hintUses--
+	if d == nil || d.hintUse == nil {
+		return
 	}
-	d.hintUseMu.Unlock()
+	d.hintUse.mu.Lock()
+	if d.hintUse.uses > 0 {
+		d.hintUse.uses--
+	}
+	d.hintUse.mu.Unlock()
 }
 
 type contextEntropyReader struct {

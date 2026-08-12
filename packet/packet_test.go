@@ -206,6 +206,48 @@ func TestProtectorSealOpen(t *testing.T) {
 	}
 }
 
+func TestDirectionStateCloneOwnsEveryMutableField(t *testing.T) {
+	now := time.Now()
+	state := transactionalDirectionState()
+	update, err := state.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0x91, 16), true, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.ApplyReceivedUpdateAt(registry.SuiteHybrid768AESGCM, protocol.KeyUpdate{
+		RouteInstanceID: state.RouteInstanceID,
+		HopLayer:        state.HopLayer,
+		Direction:       state.Direction,
+		OldKeyPhase:     state.KeyPhase,
+		NewKeyPhase:     state.KeyPhase + 1,
+		UpdateNonce:     bytesOf(0x92, 16),
+		AckRequired:     true,
+		UpdateReason:    1,
+	}, bytesOf(0x93, 16), now); err != nil {
+		t.Fatal(err)
+	}
+	state.pendingSentUpdate = update
+	state.lastReceivedUpdate = bytesOf(0x94, 3)
+	clone := state.Clone()
+	want := snapshotDirectionStateDirect(&state)
+
+	zeroKeyMaterialForTest(&state.Material)
+	zeroKeyMaterialForTest(&state.previousMaterial)
+	zeroKeyMaterialForTest(&state.lastReceivedUpdateResult.Next)
+	state.pendingSentUpdate.UpdateNonce[0] ^= 0xff
+	state.lastReceivedUpdate[0] ^= 0xff
+	state.lastReceivedUpdateResult.ACK.AckNonce[0] ^= 0xff
+
+	requireSameDirectDirectionStateSnapshot(t, snapshotDirectionStateDirect(&clone), want)
+}
+
+func zeroKeyMaterialForTest(material *KeyMaterial) {
+	for _, value := range [][]byte{material.AppSecret, material.Key, material.IV} {
+		for i := range value {
+			value[i] = 0
+		}
+	}
+}
+
 func TestProtectorUsesChaChaSuiteAEAD(t *testing.T) {
 	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
 	p := &Protector{

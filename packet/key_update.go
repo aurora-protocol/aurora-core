@@ -116,6 +116,23 @@ type DirectionState struct {
 	lastReceivedUpdateResult KeyUpdateResult
 }
 
+func (s DirectionState) Clone() DirectionState {
+	return DirectionState{
+		RouteInstanceID:          s.RouteInstanceID,
+		HopLayer:                 s.HopLayer,
+		Direction:                s.Direction,
+		KeyPhase:                 s.KeyPhase,
+		Material:                 cloneKeyMaterial(s.Material),
+		DrainUntil:               s.DrainUntil,
+		previousKeyPhase:         s.previousKeyPhase,
+		previousMaterial:         cloneKeyMaterial(s.previousMaterial),
+		pendingSentUpdateActive:  s.pendingSentUpdateActive,
+		pendingSentUpdate:        cloneKeyUpdate(s.pendingSentUpdate),
+		lastReceivedUpdate:       append([]byte(nil), s.lastReceivedUpdate...),
+		lastReceivedUpdateResult: cloneKeyUpdateResult(s.lastReceivedUpdateResult),
+	}
+}
+
 func (s *DirectionState) InitiateUpdate(suite uint64, updateNonce []byte, ackRequired bool, reason uint64) (protocol.KeyUpdate, error) {
 	now := time.Now()
 	prepared, err := s.PrepareUpdate(suite, updateNonce, ackRequired, reason, now)

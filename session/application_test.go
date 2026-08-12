@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -238,6 +239,82 @@ func TestApplicationRejectsMalformedAndFailedOpenWithoutReplayMutation(t *testin
 	}
 }
 
+func TestApplicationStagesReadStateUntilPacketOpenSucceeds(t *testing.T) {
+	_, relay := newApplicationPair(t)
+	defer relay.Close()
+
+	expiredAt := time.Now().Add(-packet.MaxDrainWindow - time.Second)
+	update := protocol.KeyUpdate{
+		RouteInstanceID: relay.routeInstanceID,
+		HopLayer:        relay.hopLayer,
+		Direction:       relay.readState.Direction,
+		OldKeyPhase:     0,
+		NewKeyPhase:     1,
+		UpdateNonce:     repeatedByte(0x72, 16),
+		UpdateReason:    1,
+	}
+	if _, err := relay.readState.ApplyReceivedUpdateAt(relay.suite, update, nil, expiredAt); err != nil {
+		t.Fatal(err)
+	}
+	before := relay.readState
+
+	protector := packet.Protector{
+		Suite:           relay.suite,
+		RouteInstanceID: relay.routeInstanceID,
+		HopLayer:        relay.hopLayer,
+		Direction:       relay.readState.Direction,
+		KeyPhase:        relay.readState.KeyPhase,
+		Key:             append([]byte(nil), relay.readState.Material.Key...),
+		StaticIV:        append([]byte(nil), relay.readState.Material.IV...),
+	}
+	pkt, err := protector.Seal(testFrameBlock(t, 90, []byte("staged read state")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := pkt
+	bad.AuthTag = append([]byte(nil), pkt.AuthTag...)
+	bad.AuthTag[len(bad.AuthTag)-1] ^= 0x80
+	badEncoded, err := protocol.Encode(bad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.HandlePacket(context.Background(), time.Now(), badEncoded); err == nil {
+		t.Fatalf("bad packet was accepted")
+	}
+	if !reflect.DeepEqual(relay.readState, before) {
+		t.Fatalf("failed packet mutated live read state")
+	}
+
+	encoded, err := protocol.Encode(pkt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.HandlePacket(context.Background(), time.Now(), encoded); err != nil {
+		t.Fatalf("valid packet after failed open: %v", err)
+	}
+	if reflect.DeepEqual(relay.readState, before) {
+		t.Fatalf("successful packet did not commit read-state expiry")
+	}
+	if !relay.readState.DrainUntil.IsZero() {
+		t.Fatalf("successful packet did not expire the drain state")
+	}
+}
+
+func TestApplicationRejectsPacketAboveCanonicalDecodeLimit(t *testing.T) {
+	_, relayConfig := testApplicationConfigs()
+	relayConfig.Limits.MaxQueuedBytes = 32 << 20
+	relay, err := NewApplication(relayConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+
+	overLimit := make([]byte, maxPacketCiphertextBytes+maxPacketEncodingOverhead+1)
+	if _, err := relay.HandlePacket(context.Background(), time.Now(), overLimit); err == nil || !strings.Contains(err.Error(), "packet exceeds configured limit") {
+		t.Fatalf("pre-decode oversized packet error = %v, want configured-limit rejection", err)
+	}
+}
+
 func TestApplicationMaintainsPacketNumbersAcrossQueueOperations(t *testing.T) {
 	client, _ := newApplicationPair(t)
 	defer client.Close()
@@ -271,33 +348,45 @@ func TestApplicationBackpressureReservesControlCapacityAndDoesNotAdvancePacketNu
 			t.Fatalf("QueueFrames(%d): %v", i, err)
 		}
 	}
-	before := client.writePacketNumbers[client.write.KeyPhase]
 	if err := client.QueueFrames(context.Background(), testFrameBlock(t, 40, []byte("reserved capacity"))); !errors.Is(err, ErrBackpressure) {
 		t.Fatalf("full data queue error = %v, want ErrBackpressure", err)
 	}
-	if got := client.writePacketNumbers[client.write.KeyPhase]; got != before {
-		t.Fatalf("packet number after backpressure = %d, want %d", got, before)
-	}
 
-	if _, err := client.NextPacket(context.Background()); err != nil {
+	encoded, err := client.NextPacket(context.Background())
+	if err != nil {
 		t.Fatal(err)
+	}
+	if got := packetNumberForTest(t, encoded); got != 0 {
+		t.Fatalf("first packet number after rejected queue = %d, want 0", got)
 	}
 	if err := client.QueueFrames(context.Background(), testFrameBlock(t, 41, []byte("progress after dequeue"))); err != nil {
 		t.Fatalf("QueueFrames after dequeue: %v", err)
 	}
+	for want := uint64(1); want <= 6; want++ {
+		encoded, err := client.NextPacket(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := packetNumberForTest(t, encoded); got != want {
+			t.Fatalf("packet number after rejected queue = %d, want %d", got, want)
+		}
+	}
 
 	byteLimited, _ := newApplicationPair(t)
 	defer byteLimited.Close()
-	large := bytes.Repeat([]byte{0x5a}, 40<<10)
-	if err := byteLimited.QueueFrames(context.Background(), testFrameBlock(t, 50, large)); err != nil {
-		t.Fatal(err)
-	}
-	before = byteLimited.writePacketNumbers[byteLimited.write.KeyPhase]
-	if err := byteLimited.QueueFrames(context.Background(), testFrameBlock(t, 51, large)); !errors.Is(err, ErrBackpressure) {
+	large := bytes.Repeat([]byte{0x5a}, 60<<10)
+	if err := byteLimited.QueueFrames(context.Background(), testFrameBlock(t, 50, large)); !errors.Is(err, ErrBackpressure) {
 		t.Fatalf("byte-limited queue error = %v, want ErrBackpressure", err)
 	}
-	if got := byteLimited.writePacketNumbers[byteLimited.write.KeyPhase]; got != before {
-		t.Fatalf("packet number after byte backpressure = %d, want %d", got, before)
+	if err := byteLimited.QueueFrames(context.Background(), testFrameBlock(t, 51, []byte("fits after byte rejection"))); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err = byteLimited.NextPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := packetNumberForTest(t, encoded); got != 0 {
+		t.Fatalf("packet number after byte rejection = %d, want 0", got)
 	}
 }
 
@@ -308,19 +397,34 @@ func TestApplicationNextPacketCancellationAndCloseWakeWaiters(t *testing.T) {
 	}
 
 	canceled, cancel := context.WithCancel(context.Background())
+	canceledStarted := make(chan struct{})
+	canceledResults := make(chan error, 1)
+	go func() {
+		close(canceledStarted)
+		_, err := app.NextPacket(canceled)
+		canceledResults <- err
+	}()
+	<-canceledStarted
+	requireNextPacketWaiterPending(t, canceledResults, "cancellation")
 	cancel()
-	if _, err := app.NextPacket(canceled); !errors.Is(err, context.Canceled) {
+	if err := <-canceledResults; !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled NextPacket error = %v, want context.Canceled", err)
 	}
 
 	const waiters = 8
+	started := make(chan struct{}, waiters)
 	results := make(chan error, waiters)
 	for range waiters {
 		go func() {
+			started <- struct{}{}
 			_, err := app.NextPacket(context.Background())
 			results <- err
 		}()
 	}
+	for range waiters {
+		<-started
+	}
+	requireNextPacketWaiterPending(t, results, "close")
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -458,6 +562,24 @@ func nextEncodedTestPacket(t *testing.T, app *Application, flowID uint64) ([]byt
 		t.Fatal(err)
 	}
 	return encoded, want
+}
+
+func packetNumberForTest(t *testing.T, encoded []byte) uint64 {
+	t.Helper()
+	pkt, err := packet.DecodeAuroraPacket(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pkt.PacketNumber
+}
+
+func requireNextPacketWaiterPending(t *testing.T, results <-chan error, operation string) {
+	t.Helper()
+	select {
+	case err := <-results:
+		t.Fatalf("empty NextPacket waiter returned before %s: %v", operation, err)
+	case <-time.After(20 * time.Millisecond):
+	}
 }
 
 func testFrameBlock(t *testing.T, flowID uint64, payload []byte) protocol.FrameBlock {

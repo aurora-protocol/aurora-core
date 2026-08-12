@@ -118,8 +118,6 @@ func NewApplication(cfg Config) (*Application, error) {
 		return nil, err
 	}
 
-	writeMaterial := cloneDirectionConfig(cfg.Write)
-	readMaterial := cloneDirectionConfig(cfg.Read)
 	a := &Application{
 		suite:           cfg.Suite,
 		routeInstanceID: cfg.RouteInstanceID,
@@ -130,12 +128,12 @@ func NewApplication(cfg Config) (*Application, error) {
 			Suite:           cfg.Suite,
 			RouteInstanceID: cfg.RouteInstanceID,
 			HopLayer:        cfg.HopLayer,
-			Direction:       writeMaterial.Direction,
-			Key:             append([]byte(nil), writeMaterial.Key...),
-			StaticIV:        append([]byte(nil), writeMaterial.IV...),
+			Direction:       cfg.Write.Direction,
+			Key:             append([]byte(nil), cfg.Write.Key...),
+			StaticIV:        append([]byte(nil), cfg.Write.IV...),
 		},
-		writeState: newDirectionState(cfg.RouteInstanceID, cfg.HopLayer, writeMaterial),
-		readState:  newDirectionState(cfg.RouteInstanceID, cfg.HopLayer, readMaterial),
+		writeState: newDirectionState(cfg.RouteInstanceID, cfg.HopLayer, cfg.Write),
+		readState:  newDirectionState(cfg.RouteInstanceID, cfg.HopLayer, cfg.Read),
 		receiver: packet.NewReceiver(packet.ReceiverConfig{
 			WindowSize: limits.ReplayWindow,
 		}),
@@ -199,7 +197,7 @@ func (a *Application) HandlePacket(ctx context.Context, now time.Time, encoded [
 	if len(encoded) == 0 {
 		return nil, fmt.Errorf("session: empty packet")
 	}
-	if len(encoded) > a.limits.MaxQueuedBytes {
+	if len(encoded) > a.packetInputLimit() {
 		return nil, fmt.Errorf("session: packet exceeds configured limit")
 	}
 	pkt, err := packet.DecodeAuroraPacket(encoded)
@@ -215,10 +213,12 @@ func (a *Application) HandlePacket(ctx context.Context, now time.Time, encoded [
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	block, err := a.receiver.OpenWithDirectionState(pkt, &a.readState, a.suite, now)
+	candidate := a.readState.Clone()
+	block, err := a.receiver.OpenWithDirectionState(pkt, &candidate, a.suite, now)
 	if err != nil {
 		return nil, err
 	}
+	a.readState = candidate
 	return []protocol.FrameBlock{cloneFrameBlock(block)}, nil
 }
 
@@ -363,6 +363,14 @@ func (a *Application) terminalError() error {
 	return a.terminal
 }
 
+func (a *Application) packetInputLimit() int {
+	canonicalLimit := maxPacketCiphertextBytes + maxPacketEncodingOverhead
+	if a.limits.MaxQueuedBytes < canonicalLimit {
+		return a.limits.MaxQueuedBytes
+	}
+	return canonicalLimit
+}
+
 func normalizeLimits(limits Limits) (Limits, error) {
 	if limits == (Limits{}) {
 		return Limits{
@@ -485,15 +493,6 @@ func checkedLengthAdd(current, additional int) (int, error) {
 		return 0, fmt.Errorf("session: encoded packet length overflow")
 	}
 	return current + additional, nil
-}
-
-func cloneDirectionConfig(cfg DirectionConfig) DirectionConfig {
-	return DirectionConfig{
-		Direction: cfg.Direction,
-		Secret:    append([]byte(nil), cfg.Secret...),
-		Key:       append([]byte(nil), cfg.Key...),
-		IV:        append([]byte(nil), cfg.IV...),
-	}
 }
 
 func cloneFrameBlock(block protocol.FrameBlock) protocol.FrameBlock {

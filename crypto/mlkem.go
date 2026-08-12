@@ -3,11 +3,19 @@ package auroracrypto
 import (
 	"crypto/mlkem"
 	"fmt"
+	"sync"
 
 	"github.com/aurora-protocol/aurora-core/registry"
 )
 
+type MLKEMDecapsulationKey interface {
+	EncapsulationKeyBytes() []byte
+	Decapsulate([]byte) ([]byte, error)
+	Destroy()
+}
+
 type MLKEM768DecapsulationKey struct {
+	mu  sync.Mutex
 	key *mlkem.DecapsulationKey768
 }
 
@@ -28,11 +36,40 @@ func NewMLKEM768DecapsulationKey(seed []byte) (*MLKEM768DecapsulationKey, error)
 }
 
 func (k *MLKEM768DecapsulationKey) EncapsulationKeyBytes() []byte {
-	return k.key.EncapsulationKey().Bytes()
+	if k == nil {
+		return nil
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.key == nil {
+		return nil
+	}
+	return append([]byte(nil), k.key.EncapsulationKey().Bytes()...)
 }
 
 func (k *MLKEM768DecapsulationKey) Decapsulate(ciphertext []byte) ([]byte, error) {
-	return k.key.Decapsulate(ciphertext)
+	if k == nil {
+		return nil, fmt.Errorf("crypto: missing ML-KEM-768 decapsulation key")
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.key == nil {
+		return nil, fmt.Errorf("crypto: ML-KEM-768 decapsulation key destroyed")
+	}
+	shared, err := k.key.Decapsulate(append([]byte(nil), ciphertext...))
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), shared...), nil
+}
+
+func (k *MLKEM768DecapsulationKey) Destroy() {
+	if k == nil {
+		return
+	}
+	k.mu.Lock()
+	k.key = nil
+	k.mu.Unlock()
 }
 
 func EncapsulateMLKEM768(encapsulationKey []byte) (sharedKey, ciphertext []byte, err error) {
@@ -45,6 +82,7 @@ func EncapsulateMLKEM768(encapsulationKey []byte) (sharedKey, ciphertext []byte,
 }
 
 type MLKEM1024DecapsulationKey struct {
+	mu  sync.Mutex
 	key *mlkem.DecapsulationKey1024
 }
 
@@ -65,11 +103,40 @@ func NewMLKEM1024DecapsulationKey(seed []byte) (*MLKEM1024DecapsulationKey, erro
 }
 
 func (k *MLKEM1024DecapsulationKey) EncapsulationKeyBytes() []byte {
-	return k.key.EncapsulationKey().Bytes()
+	if k == nil {
+		return nil
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.key == nil {
+		return nil
+	}
+	return append([]byte(nil), k.key.EncapsulationKey().Bytes()...)
 }
 
 func (k *MLKEM1024DecapsulationKey) Decapsulate(ciphertext []byte) ([]byte, error) {
-	return k.key.Decapsulate(ciphertext)
+	if k == nil {
+		return nil, fmt.Errorf("crypto: missing ML-KEM-1024 decapsulation key")
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.key == nil {
+		return nil, fmt.Errorf("crypto: ML-KEM-1024 decapsulation key destroyed")
+	}
+	shared, err := k.key.Decapsulate(append([]byte(nil), ciphertext...))
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), shared...), nil
+}
+
+func (k *MLKEM1024DecapsulationKey) Destroy() {
+	if k == nil {
+		return
+	}
+	k.mu.Lock()
+	k.key = nil
+	k.mu.Unlock()
 }
 
 func EncapsulateMLKEM1024(encapsulationKey []byte) (sharedKey, ciphertext []byte, err error) {
@@ -79,6 +146,41 @@ func EncapsulateMLKEM1024(encapsulationKey []byte) (sharedKey, ciphertext []byte
 	}
 	sharedKey, ciphertext = ek.Encapsulate()
 	return sharedKey, ciphertext, nil
+}
+
+func GenerateMLKEMForSuite(suite uint64) (MLKEMDecapsulationKey, error) {
+	switch suite {
+	case registry.SuiteHybrid768AESGCM,
+		registry.SuiteHybrid768P256AESGCM,
+		registry.SuiteHybrid768ChaCha20,
+		registry.SuiteHybrid768P256ChaCha20:
+		return GenerateMLKEM768()
+	case registry.SuiteHybrid1024AESGCM,
+		registry.SuiteHybrid1024ChaCha20:
+		return GenerateMLKEM1024()
+	default:
+		return nil, fmt.Errorf("crypto: unsupported ML-KEM suite 0x%x", suite)
+	}
+}
+
+func EncapsulateMLKEMForSuite(suite uint64, encapsulationKey []byte) (sharedKey, ciphertext []byte, err error) {
+	key := append([]byte(nil), encapsulationKey...)
+	switch suite {
+	case registry.SuiteHybrid768AESGCM,
+		registry.SuiteHybrid768P256AESGCM,
+		registry.SuiteHybrid768ChaCha20,
+		registry.SuiteHybrid768P256ChaCha20:
+		sharedKey, ciphertext, err = EncapsulateMLKEM768(key)
+	case registry.SuiteHybrid1024AESGCM,
+		registry.SuiteHybrid1024ChaCha20:
+		sharedKey, ciphertext, err = EncapsulateMLKEM1024(key)
+	default:
+		return nil, nil, fmt.Errorf("crypto: unsupported ML-KEM suite 0x%x", suite)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return append([]byte(nil), sharedKey...), append([]byte(nil), ciphertext...), nil
 }
 
 func ValidateMLKEMEncapsulationKeyForSuite(suite uint64, encapsulationKey []byte) error {

@@ -144,21 +144,21 @@ git commit -m "feat: add verified relay deployment boundary"
 - Produces: `EncapsulateMLKEMForSuite(uint64, []byte) (sharedKey, ciphertext []byte, err error)`.
 - Preserves: all existing concrete 768/1024 constructors and vector behavior.
 
-- [ ] **Step 1: Write failing all-suite randomized tests**
+- [x] **Step 1: Write failing all-suite randomized tests**
 
 For every production suite, generate two independent keys, assert their public bytes differ, encapsulate to each key, decapsulate, and compare shared secrets. Assert returned public/shared/ciphertext slices are caller-owned, `Destroy` is idempotent and prevents later decapsulation, malformed keys/ciphertexts fail, and lab/unknown suites are rejected.
 
-- [ ] **Step 2: Run the focused tests and verify red**
+- [x] **Step 2: Run the focused tests and verify red**
 
 Run: `GOCACHE=/private/tmp/aurora-first-hop-cache go test ./crypto -run 'TestMLKEMForSuite' -count=1`
 
 Expected: FAIL because the suite-generic API does not exist.
 
-- [ ] **Step 3: Add the private-key interface and dispatch without changing primitives**
+- [x] **Step 3: Add the private-key interface and dispatch without changing primitives**
 
 Wrap the existing standard-library key types behind a small interface. Dispatch 768 and 1024 families using the existing suite registry, clone every returned slice, zero wrapper-owned cached bytes in `Destroy`, and return a stable error after destruction. Do not add deterministic seeds to an exported production constructor.
 
-- [ ] **Step 4: Run crypto regression and race tests**
+- [x] **Step 4: Run crypto regression and race tests**
 
 Run:
 
@@ -170,7 +170,7 @@ GOCACHE=/private/tmp/aurora-first-hop-cache go test -race ./crypto -count=1
 
 Expected: all existing vectors and new randomized tests pass.
 
-- [ ] **Step 5: Commit suite-generic hybrid operations**
+- [x] **Step 5: Commit suite-generic hybrid operations**
 
 ```bash
 git add crypto/mlkem.go crypto/mlkem_test.go

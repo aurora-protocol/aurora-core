@@ -90,7 +90,7 @@ func NewFileReplayCache(path string) (*FileReplayCache, error) {
 	return cache, nil
 }
 
-func (*FileReplayCache) Durable() bool { return true }
+func (*FileReplayCache) Durable() bool { return replayCacheFileDurable() }
 
 func (c *FileReplayCache) InsertIfAbsent(key []byte) (bool, error) {
 	if c == nil {

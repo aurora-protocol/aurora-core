@@ -115,6 +115,36 @@ func TestVerifyAndSpendReplayFailsClosedWhenReplayCacheWriteFails(t *testing.T) 
 	}
 }
 
+func TestVerifyAndSpendReplayRetainsTokenSpendWhenBootstrapCacheWriteFails(t *testing.T) {
+	proof, replay, handshakeBinding, admissionContext := replayVerificationFixture(t)
+	tokenCache := NewMemoryReplayCache()
+	_, _, err := VerifyAndSpendReplay(ReplayVerificationInput{
+		AdmissionProof:          proof,
+		ReplayProof:             replay,
+		RouteInstanceID:         0x42,
+		HopIndex:                0,
+		HandshakeBindingContext: handshakeBinding,
+		AdmissionContextHash:    admissionContext,
+		TokenSpentCache:         tokenCache,
+		BootstrapDedupCache:     failingReplayCache{err: errors.New("replay store unavailable")},
+		AllowLabProofs:          true,
+	})
+	if err == nil {
+		t.Fatal("replay verification accepted bootstrap cache write failure")
+	}
+	redemptionHash, hashErr := TokenRedemptionHash(proof)
+	if hashErr != nil {
+		t.Fatal(hashErr)
+	}
+	tokenKey, keyErr := TokenSpentKey(redemptionHash)
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	if !tokenCache.Has(tokenKey) {
+		t.Fatal("replay verification rolled back an authoritative token spend")
+	}
+}
+
 func TestVerifyAndSpendReplayRequiresReplayCaches(t *testing.T) {
 	proof, replay, handshakeBinding, admissionContext := replayVerificationFixture(t)
 	for name, input := range map[string]ReplayVerificationInput{

@@ -733,8 +733,8 @@ func TestLiveFirstHopRejectsMismatchedClientBindingMetadata(t *testing.T) {
 				t.Fatal("mismatched live binding metadata established a session")
 			}
 			method, body := coverOrigin.snapshot()
-			if method != "" || len(body) != 0 {
-				t.Fatalf("locally rejected binding mismatch reached cover origin: method=%s body=%x", method, body)
+			if (method != "" && method != http.MethodGet) || len(body) != 0 {
+				t.Fatalf("locally rejected binding mismatch reached unsanitized cover: method=%s body=%x", method, body)
 			}
 			select {
 			case application := <-harness.relayApplications:

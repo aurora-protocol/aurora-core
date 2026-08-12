@@ -253,9 +253,11 @@ func TestApplicationStagesReadStateUntilPacketOpenSucceeds(t *testing.T) {
 		UpdateNonce:     repeatedByte(0x72, 16),
 		UpdateReason:    1,
 	}
-	if _, err := relay.readState.ApplyReceivedUpdateAt(relay.suite, update, nil, expiredAt); err != nil {
+	result, err := relay.readState.ApplyReceivedUpdateAt(relay.suite, update, nil, expiredAt)
+	if err != nil {
 		t.Fatal(err)
 	}
+	result.Destroy()
 	before := relay.readState
 	supersededMaterial := relay.readState.Material
 
@@ -621,7 +623,7 @@ func (c *observedContext) Done() <-chan struct{} {
 
 func rotateDirectionStateForClose(t *testing.T, state *packet.DirectionState, suite uint64) {
 	t.Helper()
-	if _, err := state.ApplyReceivedUpdateAt(suite, protocol.KeyUpdate{
+	result, err := state.ApplyReceivedUpdateAt(suite, protocol.KeyUpdate{
 		RouteInstanceID: state.RouteInstanceID,
 		HopLayer:        state.HopLayer,
 		Direction:       state.Direction,
@@ -630,9 +632,11 @@ func rotateDirectionStateForClose(t *testing.T, state *packet.DirectionState, su
 		UpdateNonce:     repeatedByte(0x81, 16),
 		AckRequired:     true,
 		UpdateReason:    1,
-	}, repeatedByte(0x82, 16), time.Now()); err != nil {
+	}, repeatedByte(0x82, 16), time.Now())
+	if err != nil {
 		t.Fatal(err)
 	}
+	result.Destroy()
 }
 
 func requireZeroedBytes(t *testing.T, values ...[]byte) {

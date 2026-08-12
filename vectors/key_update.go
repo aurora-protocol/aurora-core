@@ -44,6 +44,7 @@ func GenerateKeyUpdateRealCryptoBundle() (KeyUpdateRealCryptoBundle, error) {
 	if err != nil {
 		return KeyUpdateRealCryptoBundle{}, err
 	}
+	defer result.Destroy()
 	if result.ACK == nil {
 		return KeyUpdateRealCryptoBundle{}, fmt.Errorf("vectors: KEY_UPDATE did not produce required ACK")
 	}

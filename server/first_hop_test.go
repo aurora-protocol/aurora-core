@@ -243,8 +243,8 @@ func TestFirstHopSecondRequestUnblocksPostHeaderRead(t *testing.T) {
 	server, client, connections, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
 		return &handshake.RelayHandshake{}, firstHopTestPrelude1(), nil
 	})
-	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, error) {
-		return nil, nil, errors.New("Finish must not run")
+	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
+		return nil, nil, protocol.PolicyAccept{}, errors.New("Finish must not run")
 	}
 	firstResponse, writer := openFirstHopStreamingRequest(t, client, server.URL+handler.path)
 	defer firstResponse.Body.Close()
@@ -284,8 +284,8 @@ func TestFirstHopPostHeaderTimeoutUnblocksCapsule1Read(t *testing.T) {
 		return &handshake.RelayHandshake{}, firstHopTestPrelude1(), nil
 	})
 	handler.postHeaderTimeout = 50 * time.Millisecond
-	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, error) {
-		return nil, nil, errors.New("Finish must not run")
+	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
+		return nil, nil, protocol.PolicyAccept{}, errors.New("Finish must not run")
 	}
 	response, writer := openFirstHopStreamingRequest(t, client, server.URL+handler.path)
 	defer response.Body.Close()
@@ -513,8 +513,8 @@ func TestFirstHopPostHeaderFailureCancelsWithoutCoverBody(t *testing.T) {
 	handler.coverOrigin = recorder
 	partialCapsule := []byte("partial Capsule2")
 	partialEndpoint := newFirstHopTestEndpoint(nil)
-	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, error) {
-		return partialCapsule, partialEndpoint, errors.New("test Capsule1 failure")
+	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
+		return partialCapsule, partialEndpoint, protocol.PolicyAccept{}, errors.New("test Capsule1 failure")
 	}
 	response, writer := openFirstHopStreamingRequest(t, client, server.URL+handler.path)
 	defer response.Body.Close()
@@ -567,8 +567,8 @@ func TestFirstHopHandsAlignedBodiesToPacketDuplex(t *testing.T) {
 		return &handshake.RelayHandshake{}, firstHopTestPrelude1(), nil
 	})
 	endpoint := newFirstHopTestEndpoint([]byte("server application packet"))
-	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, error) {
-		return []byte("Capsule2"), endpoint, nil
+	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
+		return []byte("Capsule2"), endpoint, protocol.PolicyAccept{}, nil
 	}
 	handler.frameHandler = func(_ context.Context, block protocol.FrameBlock) error {
 		frames <- append([]byte(nil), block.Frames[0].Payload...)
@@ -610,6 +610,267 @@ func TestFirstHopHandsAlignedBodiesToPacketDuplex(t *testing.T) {
 	case <-endpoint.Done():
 	case <-time.After(time.Second):
 		t.Fatal("packet endpoint remained live after request body closed")
+	}
+}
+
+func TestFirstHopBuildsSessionHandlerBeforeCapsule2(t *testing.T) {
+	server, client, _, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
+		return &handshake.RelayHandshake{}, firstHopTestPrelude1(), nil
+	})
+	endpoint := newFirstHopTestEndpoint([]byte("server packet"))
+	selected := protocol.PolicyAccept{
+		SelectedTunnelPersonality: registry.PersonalityProxyFlow,
+		SelectedPolicy:            9,
+		FallbackMethods:           []uint64{registry.MethodWebH2Stream},
+	}
+	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
+		return []byte("Capsule2"), endpoint, selected, nil
+	}
+	handler.frameHandler = nil
+	factoryCalled := make(chan protocol.PolicyAccept, 1)
+	releaseFactory := make(chan struct{})
+	closer := &signalingFirstHopCloser{closed: make(chan struct{})}
+	handler.sessionFactory = func(_ context.Context, application FirstHopSessionApplication, policy protocol.PolicyAccept) (transport.FrameBlockHandler, io.Closer, error) {
+		if application != endpoint {
+			return nil, nil, errors.New("factory received wrong application")
+		}
+		policy.FallbackMethods[0] = registry.MethodWebH1WS
+		factoryCalled <- policy
+		<-releaseFactory
+		return func(context.Context, protocol.FrameBlock) error { return nil }, closer, nil
+	}
+
+	response, writer := openFirstHopStreamingRequest(t, client, server.URL+handler.path)
+	defer response.Body.Close()
+	reader, err := transport.NewRecordReader(response.Body, 8192)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Read(); err != nil {
+		t.Fatalf("read Prelude1: %v", err)
+	}
+	if err := writer.Write([]byte("Capsule1")); err != nil {
+		t.Fatal(err)
+	}
+	capsuleResult := make(chan error, 1)
+	go func() {
+		capsule, err := reader.Read()
+		if err == nil && string(capsule) != "Capsule2" {
+			err = errors.New("wrong Capsule2")
+		}
+		capsuleResult <- err
+	}()
+	select {
+	case policy := <-factoryCalled:
+		if policy.SelectedPolicy != selected.SelectedPolicy || policy.SelectedTunnelPersonality != registry.PersonalityProxyFlow {
+			t.Fatalf("factory policy = %+v", policy)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session factory was not called")
+	}
+	if selected.FallbackMethods[0] != registry.MethodWebH2Stream {
+		t.Fatal("session factory mutated retained selected policy")
+	}
+	select {
+	case err := <-capsuleResult:
+		t.Fatalf("Capsule2 was released before session factory completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFactory)
+	if err := <-capsuleResult; err != nil {
+		t.Fatalf("read Capsule2: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closer.closed:
+	case <-time.After(time.Second):
+		t.Fatal("session closer was not called after duplex shutdown")
+	}
+}
+
+func TestFirstHopDoesNotReleaseCapsule2AfterSessionFactoryTimeout(t *testing.T) {
+	server, client, _, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
+		return &handshake.RelayHandshake{}, firstHopTestPrelude1(), nil
+	})
+	handler.postHeaderTimeout = 30 * time.Millisecond
+	endpoint := newFirstHopTestEndpoint([]byte("server packet"))
+	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
+		return []byte("Capsule2"), endpoint, protocol.PolicyAccept{SelectedTunnelPersonality: registry.PersonalityProxyFlow}, nil
+	}
+	handler.frameHandler = nil
+	closer := &signalingFirstHopCloser{closed: make(chan struct{})}
+	handler.sessionFactory = func(context.Context, FirstHopSessionApplication, protocol.PolicyAccept) (transport.FrameBlockHandler, io.Closer, error) {
+		time.Sleep(60 * time.Millisecond)
+		return func(context.Context, protocol.FrameBlock) error { return nil }, closer, nil
+	}
+	response, writer := openFirstHopStreamingRequest(t, client, server.URL+handler.path)
+	defer response.Body.Close()
+	defer writer.Close()
+	reader, err := transport.NewRecordReader(response.Body, 8192)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Read(); err != nil {
+		t.Fatalf("read Prelude1: %v", err)
+	}
+	if err := writer.Write([]byte("Capsule1")); err != nil {
+		t.Fatal(err)
+	}
+	if capsule, err := reader.Read(); err == nil {
+		t.Fatalf("factory timeout released Capsule2 %q", capsule)
+	}
+	select {
+	case <-closer.closed:
+	case <-time.After(time.Second):
+		t.Fatal("timed-out session factory closer was not called")
+	}
+}
+
+func TestFirstHopSessionFactoryFailureClosesPartialOwnership(t *testing.T) {
+	server, client, _, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
+		return &handshake.RelayHandshake{}, firstHopTestPrelude1(), nil
+	})
+	endpoint := newFirstHopTestEndpoint(nil)
+	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
+		return []byte("Capsule2"), endpoint, protocol.PolicyAccept{SelectedTunnelPersonality: registry.PersonalityProxyFlow}, nil
+	}
+	handler.frameHandler = nil
+	closer := &signalingFirstHopCloser{closed: make(chan struct{})}
+	handler.sessionFactory = func(context.Context, FirstHopSessionApplication, protocol.PolicyAccept) (transport.FrameBlockHandler, io.Closer, error) {
+		return nil, closer, errors.New("session construction failed")
+	}
+
+	response, writer := openFirstHopStreamingRequest(t, client, server.URL+handler.path)
+	defer response.Body.Close()
+	defer writer.Close()
+	reader, err := transport.NewRecordReader(response.Body, 8192)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Read(); err != nil {
+		t.Fatalf("read Prelude1: %v", err)
+	}
+	if err := writer.Write([]byte("Capsule1")); err != nil {
+		t.Fatal(err)
+	}
+	if capsule, err := reader.Read(); err == nil {
+		t.Fatalf("failed session factory released Capsule2 %q", capsule)
+	}
+	select {
+	case <-closer.closed:
+	case <-time.After(time.Second):
+		t.Fatal("failed session factory did not close partial ownership")
+	}
+	select {
+	case <-endpoint.Done():
+	case <-time.After(time.Second):
+		t.Fatal("failed session factory did not close application")
+	}
+}
+
+func TestFirstHopRejectsInvalidSessionFactoryOwnership(t *testing.T) {
+	tests := []struct {
+		name       string
+		build      func(*signalingFirstHopCloser) (transport.FrameBlockHandler, io.Closer)
+		wantClosed bool
+	}{
+		{
+			name: "nil handler",
+			build: func(closer *signalingFirstHopCloser) (transport.FrameBlockHandler, io.Closer) {
+				return nil, closer
+			},
+			wantClosed: true,
+		},
+		{
+			name: "typed nil closer",
+			build: func(*signalingFirstHopCloser) (transport.FrameBlockHandler, io.Closer) {
+				var closer *signalingFirstHopCloser
+				return func(context.Context, protocol.FrameBlock) error { return nil }, closer
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, client, _, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
+				return &handshake.RelayHandshake{}, firstHopTestPrelude1(), nil
+			})
+			endpoint := newFirstHopTestEndpoint(nil)
+			handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
+				return []byte("Capsule2"), endpoint, protocol.PolicyAccept{SelectedTunnelPersonality: registry.PersonalityProxyFlow}, nil
+			}
+			handler.frameHandler = nil
+			closer := &signalingFirstHopCloser{closed: make(chan struct{})}
+			handler.sessionFactory = func(context.Context, FirstHopSessionApplication, protocol.PolicyAccept) (transport.FrameBlockHandler, io.Closer, error) {
+				handler, owner := test.build(closer)
+				return handler, owner, nil
+			}
+
+			response, writer := openFirstHopStreamingRequest(t, client, server.URL+handler.path)
+			defer response.Body.Close()
+			defer writer.Close()
+			reader, err := transport.NewRecordReader(response.Body, 8192)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reader.Read(); err != nil {
+				t.Fatalf("read Prelude1: %v", err)
+			}
+			if err := writer.Write([]byte("Capsule1")); err != nil {
+				t.Fatal(err)
+			}
+			if capsule, err := reader.Read(); err == nil {
+				t.Fatalf("invalid session ownership released Capsule2 %q", capsule)
+			}
+			if test.wantClosed {
+				select {
+				case <-closer.closed:
+				case <-time.After(time.Second):
+					t.Fatal("invalid session owner was not closed")
+				}
+			}
+			select {
+			case <-endpoint.Done():
+			case <-time.After(time.Second):
+				t.Fatal("invalid session ownership did not close application")
+			}
+		})
+	}
+}
+
+func TestFirstHopDoesNotBuildSessionAfterFinishFailure(t *testing.T) {
+	server, client, _, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
+		return &handshake.RelayHandshake{}, firstHopTestPrelude1(), nil
+	})
+	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
+		return nil, nil, protocol.PolicyAccept{}, errors.New("Finish failed")
+	}
+	handler.frameHandler = nil
+	var factoryCalls atomic.Int32
+	handler.sessionFactory = func(context.Context, FirstHopSessionApplication, protocol.PolicyAccept) (transport.FrameBlockHandler, io.Closer, error) {
+		factoryCalls.Add(1)
+		return func(context.Context, protocol.FrameBlock) error { return nil }, io.NopCloser(bytes.NewReader(nil)), nil
+	}
+
+	response, writer := openFirstHopStreamingRequest(t, client, server.URL+handler.path)
+	defer response.Body.Close()
+	defer writer.Close()
+	reader, err := transport.NewRecordReader(response.Body, 8192)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Read(); err != nil {
+		t.Fatalf("read Prelude1: %v", err)
+	}
+	if err := writer.Write([]byte("Capsule1")); err != nil {
+		t.Fatal(err)
+	}
+	if capsule, err := reader.Read(); err == nil {
+		t.Fatalf("Finish failure released Capsule2 %q", capsule)
+	}
+	if got := factoryCalls.Load(); got != 0 {
+		t.Fatalf("session factory called %d times after Finish failure", got)
 	}
 }
 
@@ -656,6 +917,11 @@ func TestFirstHopHandlerRejectsInvalidOptions(t *testing.T) {
 		}},
 		{name: "typed nil cover origin", mutate: func(o *FirstHopOptions) { o.CoverOrigin = (*recordingFirstHopCoverOrigin)(nil) }},
 		{name: "nil frame handler", mutate: func(o *FirstHopOptions) { o.FrameHandler = nil }},
+		{name: "both frame handler sources", mutate: func(o *FirstHopOptions) {
+			o.SessionFactory = func(context.Context, FirstHopSessionApplication, protocol.PolicyAccept) (transport.FrameBlockHandler, io.Closer, error) {
+				return func(context.Context, protocol.FrameBlock) error { return nil }, io.NopCloser(bytes.NewReader(nil)), nil
+			}
+		}},
 		{name: "bad post-header timeout", mutate: func(o *FirstHopOptions) { o.PostHeaderTimeout = -time.Second }},
 	}
 	for _, test := range tests {
@@ -669,6 +935,113 @@ func TestFirstHopHandlerRejectsInvalidOptions(t *testing.T) {
 				t.Fatal("invalid first-hop options accepted")
 			}
 		})
+	}
+}
+
+func TestFirstHopHandlerAcceptsSessionFactoryWithoutStaticHandler(t *testing.T) {
+	options := FirstHopOptions{
+		Driver:    &handshake.RelayDriver{},
+		Authority: "cover.example:443",
+		Path:      "/assets/upload/42",
+		BindingMetadata: handshake.HTTP2BindingMetadata{
+			NormalizedAuthorityHash: make([]byte, 48),
+			PathTemplateID:          make([]byte, 16),
+			RequestClassID:          7,
+			MethodFamilyID:          registry.MethodWebH2Stream,
+		},
+		CoverStatus: http.StatusOK,
+		CoverHeader: http.Header{"Content-Type": {"application/octet-stream"}},
+		Origin:      testFirstHopOrigin{},
+		SessionFactory: func(context.Context, FirstHopSessionApplication, protocol.PolicyAccept) (transport.FrameBlockHandler, io.Closer, error) {
+			return func(context.Context, protocol.FrameBlock) error { return nil }, io.NopCloser(bytes.NewReader(nil)), nil
+		},
+	}
+	if _, err := NewFirstHopHandler(options); err != nil {
+		t.Fatalf("NewFirstHopHandler rejected session factory: %v", err)
+	}
+}
+
+func TestNewFirstHopProxySessionFactoryRejectsInvalidOptions(t *testing.T) {
+	var typedNilDialer *net.Dialer
+	tests := []struct {
+		name    string
+		options FirstHopProxySessionOptions
+	}{
+		{name: "nil dialer", options: FirstHopProxySessionOptions{Resolver: net.DefaultResolver}},
+		{name: "typed nil dialer", options: FirstHopProxySessionOptions{Dialer: typedNilDialer, Resolver: net.DefaultResolver}},
+		{name: "nil resolver", options: FirstHopProxySessionOptions{Dialer: &net.Dialer{}}},
+		{
+			name: "invalid limits",
+			options: FirstHopProxySessionOptions{
+				Dialer:   &net.Dialer{},
+				Resolver: net.DefaultResolver,
+				Limits:   relay.SocketEgressLimits{MaxFlows: -1},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewFirstHopProxySessionFactory(test.options); err == nil {
+				t.Fatal("NewFirstHopProxySessionFactory accepted invalid options")
+			}
+		})
+	}
+}
+
+func TestFirstHopProxySessionFactoryRejectsUnsupportedPersonality(t *testing.T) {
+	factory, err := NewFirstHopProxySessionFactory(FirstHopProxySessionOptions{
+		Dialer:   &net.Dialer{},
+		Resolver: net.DefaultResolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	application := newFirstHopTestEndpoint(nil)
+	handler, owner, err := factory(context.Background(), application, protocol.PolicyAccept{
+		SelectedTunnelPersonality: registry.PersonalityIPLite,
+	})
+	if !errors.Is(err, ErrFirstHopUnsupportedPersonality) || handler != nil || owner != nil {
+		t.Fatalf("unsupported personality result: handler=%v owner=%v err=%v", handler, owner, err)
+	}
+	select {
+	case <-application.Done():
+		t.Fatal("rejected personality closed caller-owned application")
+	default:
+	}
+}
+
+func TestFirstHopProxySessionFactoryBuildsOwnedExitSession(t *testing.T) {
+	factory, err := NewFirstHopProxySessionFactory(FirstHopProxySessionOptions{
+		ExitPolicy: relay.ExitPolicy{AllowPrivate: true},
+		Dialer:     &net.Dialer{},
+		Resolver:   net.DefaultResolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	application := newFirstHopTestEndpoint(nil)
+	handler, owner, err := factory(context.Background(), application, protocol.PolicyAccept{
+		SelectedTunnelPersonality: registry.PersonalityProxyFlow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handler == nil || owner == nil {
+		t.Fatal("proxy session factory returned incomplete ownership")
+	}
+	if err := handler(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}); err != nil {
+		t.Fatalf("handle padding frame: %v", err)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+	select {
+	case <-application.Done():
+		t.Fatal("session owner closed separately-owned application")
+	default:
 	}
 }
 
@@ -825,8 +1198,8 @@ func TestFirstHopHTTPServerShutdownCancelsActiveCarrier(t *testing.T) {
 	handler.begin = func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
 		return &handshake.RelayHandshake{}, firstHopTestPrelude1(), nil
 	}
-	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, error) {
-		return nil, nil, errors.New("Finish must not run")
+	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
+		return nil, nil, protocol.PolicyAccept{}, errors.New("Finish must not run")
 	}
 	server, err := NewFirstHopHTTPServer(listener.Addr().String(), handler, &tls.Config{Certificates: []tls.Certificate{certificate}})
 	if err != nil {
@@ -1179,10 +1552,22 @@ func (*firstHopTestEndpoint) HandlePacket(_ context.Context, _ time.Time, packet
 	return []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding, Payload: append([]byte(nil), packet...)}}}}, nil
 }
 
+func (*firstHopTestEndpoint) QueueFrames(context.Context, protocol.FrameBlock) error { return nil }
+
 func (e *firstHopTestEndpoint) Done() <-chan struct{} { return e.done }
 func (*firstHopTestEndpoint) Err() error              { return errors.New("test endpoint closed") }
 func (e *firstHopTestEndpoint) Close() error {
 	e.once.Do(func() { close(e.done) })
+	return nil
+}
+
+type signalingFirstHopCloser struct {
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (c *signalingFirstHopCloser) Close() error {
+	c.once.Do(func() { close(c.closed) })
 	return nil
 }
 

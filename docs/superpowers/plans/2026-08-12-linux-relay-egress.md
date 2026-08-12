@@ -138,15 +138,15 @@ Run focused tests 100 times, race tests 20 times, and cross-compile relay tests 
 
 **Files:** Modify `server/first_hop.go`; modify `server/first_hop_test.go`; modify `server/first_hop_integration_test.go`.
 
-- [ ] **Step 1: Write failing factory and lifecycle tests**
+- [x] **Step 1: Write failing factory and lifecycle tests**
 
 Add a `FirstHopSessionFactory` receiving the authenticated application and selected `PolicyAccept`. Require exactly one static test handler or session factory. Assert the factory is never called before successful Finished/policy verification, sees an owned selected policy, fails before Capsule2 release, closes after duplex on every error/cancel/shutdown path, and rejects non-proxy personalities in the production egress factory.
 
-- [ ] **Step 2: Preserve policy from relay Finish and install the handler**
+- [x] **Step 2: Preserve policy from relay Finish and install the handler**
 
 Change the private finish result to retain Capsule2, `*session.Application`, and selected policy. Build the per-session frame handler after Finish and before Capsule2 is written. Defer its closer before entering `RunPacketDuplex`. Keep the existing static handler path for focused transport tests, but do not expose it through production construction.
 
-- [ ] **Step 3: Run tests and commit**
+- [x] **Step 3: Run tests and commit**
 
 Run all first-hop tests, 50 repeated live tests, and race tests for `server`, `relay`, `session`, and `transport`. Commit `feat: compose relay egress per session`.
 

@@ -80,6 +80,12 @@ type SocketEgressOptions struct {
 	Limits   SocketEgressLimits
 }
 
+// ValidateSocketEgressLimits checks whether limits can be used to construct an egress.
+func ValidateSocketEgressLimits(limits SocketEgressLimits) error {
+	_, err := normalizeSocketEgressLimits(limits)
+	return err
+}
+
 type SocketEgress struct {
 	ctx      context.Context
 	cancel   context.CancelFunc

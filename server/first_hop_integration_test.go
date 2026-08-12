@@ -1340,16 +1340,16 @@ func startLiveFirstHopHarness(t testing.TB, fixture liveFirstHopFixture, relayDr
 		t.Fatal(err)
 	}
 	productionFinish := handler.finish
-	handler.finish = func(ctx context.Context, state *handshake.RelayHandshake, capsule1 []byte, nowUnix uint64) ([]byte, transport.PacketEndpoint, error) {
-		capsule2, endpoint, finishErr := productionFinish(ctx, state, capsule1, nowUnix)
+	handler.finish = func(ctx context.Context, state *handshake.RelayHandshake, capsule1 []byte, nowUnix uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
+		capsule2, endpoint, policy, finishErr := productionFinish(ctx, state, capsule1, nowUnix)
 		if finishErr == nil {
 			application, ok := endpoint.(*session.Application)
 			if !ok {
-				return nil, nil, fmt.Errorf("live relay endpoint type %T", endpoint)
+				return nil, nil, protocol.PolicyAccept{}, fmt.Errorf("live relay endpoint type %T", endpoint)
 			}
 			relayApplications <- application
 		}
-		return capsule2, endpoint, finishErr
+		return capsule2, endpoint, policy, finishErr
 	}
 	certificateServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	certificate := certificateServer.TLS.Certificates[0]

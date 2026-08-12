@@ -686,17 +686,6 @@ func rotateDirectionStateForClose(t *testing.T, state *packet.DirectionState, su
 	result.Destroy()
 }
 
-func requireZeroedBytes(t *testing.T, values ...[]byte) {
-	t.Helper()
-	for _, value := range values {
-		for _, b := range value {
-			if b != 0 {
-				t.Fatalf("key material was not zeroed")
-			}
-		}
-	}
-}
-
 func requireDestroyedDirectionState(t *testing.T, state packet.DirectionState) {
 	t.Helper()
 	if state.RouteInstanceID != 0 || state.HopLayer != 0 || state.Direction != 0 || state.KeyPhase != 0 || !state.DrainUntil.IsZero() || len(state.Material.AppSecret) != 0 || len(state.Material.Key) != 0 || len(state.Material.IV) != 0 {

@@ -177,6 +177,7 @@ func TestRunPacketDuplexRejectsInvalidArgumentsWithoutStartingPumps(t *testing.T
 	writer := &discardWriteCloser{}
 	for name, run := range map[string]func() error{
 		"nil context": func() error {
+			//lint:ignore SA1012 Verifies the public API's explicit nil-context rejection.
 			return RunPacketDuplex(nil, reader, writer, endpoint, discardFrameBlock, 64)
 		},
 		"nil reader": func() error {

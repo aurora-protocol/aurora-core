@@ -42,6 +42,7 @@ func TestRunSessionRejectsInvalidOptions(t *testing.T) {
 			}
 		})
 	}
+	//lint:ignore SA1012 Verifies the public API's explicit nil-context rejection.
 	if result, err := RunSession(nil, valid); err == nil || result != (SessionResult{}) {
 		t.Fatalf("RunSession(nil) = %+v, %v; want empty result and error", result, err)
 	}

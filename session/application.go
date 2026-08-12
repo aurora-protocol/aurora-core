@@ -458,17 +458,6 @@ func (a *Application) enqueueControlBeforeWriteUpdateLocked(encoded *[]byte) err
 	return nil
 }
 
-func (a *Application) rollbackLastEncodedLocked() {
-	if len(a.queue) == 0 {
-		return
-	}
-	last := len(a.queue) - 1
-	queued := &a.queue[last]
-	a.queuedBytes -= len(queued.encoded)
-	queued.Destroy()
-	a.queue = a.queue[:last]
-}
-
 func (a *Application) reserveLocked(bytes int, control bool) bool {
 	if !a.hasCapacityLocked(bytes, control) {
 		return false

@@ -141,14 +141,21 @@ git commit -m "feat: add bounded carrier record codec"
 **Interfaces:**
 - Produces: `PreparedKeyUpdate`
 - Produces: `(*DirectionState).PrepareUpdate(uint64, []byte, bool, uint64, time.Time) (PreparedKeyUpdate, error)`
+- Produces: `(PreparedKeyUpdate).Frame() protocol.KeyUpdate`
 - Produces: `(*DirectionState).CommitPreparedUpdate(PreparedKeyUpdate, time.Time) error`
+- Produces: `(*DirectionState).ApplyReceivedUpdateAt(uint64, protocol.KeyUpdate, []byte, time.Time) (KeyUpdateResult, error)`
 - Preserves: `(*DirectionState).InitiateUpdate(uint64, []byte, bool, uint64) (protocol.KeyUpdate, error)`
+- Preserves: `(*DirectionState).ApplyReceivedUpdate(uint64, protocol.KeyUpdate, []byte) (KeyUpdateResult, error)`
 
 - [ ] **Step 1: Write failing transactional-state tests**
 
 Add tests proving that prepare does not change phase, material, drain state, or pending acknowledgement; commit changes them exactly once; committing against a changed source phase fails without mutation; committing the same preparation twice fails; preparation rejects active drain and phase `255`; and the existing `InitiateUpdate` behavior remains equivalent to prepare plus commit.
 
-Capture state before each negative call and compare all exported fields plus `PendingKeyUpdateRetransmission` afterward.
+Also prove `Frame` returns an owned clone and cannot change the opaque prepared
+state. Prove `ApplyReceivedUpdateAt` uses its supplied time for drain expiry and
+that the existing receive method is behaviorally equivalent. Capture state
+before each negative call and compare all exported fields plus
+`PendingKeyUpdateRetransmission` afterward.
 
 - [ ] **Step 2: Run the focused tests and verify red**
 
@@ -162,8 +169,8 @@ Use an opaque preparation token that owns cloned material and records the source
 
 ```go
 type PreparedKeyUpdate struct {
-	Frame          protocol.KeyUpdate
-	Next           KeyMaterial
+	frame          protocol.KeyUpdate
+	next           KeyMaterial
 	sourcePhase    uint8
 	sourceMaterial KeyMaterial
 }
@@ -171,12 +178,16 @@ type PreparedKeyUpdate struct {
 
 `PrepareUpdate` calls `expireDrain(now)`, rejects an active drain and phase
 exhaustion, constructs and validates the next frame, derives next material, and
-returns clones without mutating `DirectionState`. `CommitPreparedUpdate`
-requires matching route, hop, direction, phase, and every current material byte
-before it stores previous material, advances phase, starts `MaxDrainWindow`,
-and records the pending update when acknowledgement is required.
+returns an opaque token without mutating `DirectionState`. `Frame` returns a
+deep clone. `CommitPreparedUpdate` requires matching route, hop, direction,
+phase, and every current material byte before it stores previous material,
+advances phase, starts `MaxDrainWindow`, and records the pending update when
+acknowledgement is required.
 
 Refactor `InitiateUpdate` to call prepare and commit with one `time.Now()` value.
+Refactor `ApplyReceivedUpdate` to call `ApplyReceivedUpdateAt` with one
+`time.Now()` value; the `At` method must use that value for duplicate and drain
+decisions without any second clock read.
 
 - [ ] **Step 4: Run packet verification**
 

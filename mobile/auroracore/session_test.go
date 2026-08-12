@@ -119,6 +119,28 @@ func TestNativeIssuerWorkJSONRemainsOpaqueToNativeAdapters(t *testing.T) {
 	}
 }
 
+func TestNativeLocalPacketJSONRemainsOpaqueToNativeAdapters(t *testing.T) {
+	packets := [][]byte{{0x45, 0x00, 0x00, 0x14}}
+	encoded, err := encodeNativeLocalPacketsJSON(packets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded nativeLocalPacketsJSON
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.PacketsBase64) != 1 {
+		t.Fatalf("native local packet JSON count = %d", len(decoded.PacketsBase64))
+	}
+	packet, err := base64.StdEncoding.DecodeString(decoded.PacketsBase64[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(packet, packets[0]) {
+		t.Fatalf("native local packet JSON changed packet: %x", packet)
+	}
+}
+
 func TestNativeSessionRawCompletionDispatch(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	application := nativeTestApplication(t)

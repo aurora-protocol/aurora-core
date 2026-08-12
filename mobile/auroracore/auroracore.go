@@ -55,6 +55,7 @@ const (
 	opNextLocalPacket          = 15
 	opBeginNativeSessionJSON   = 16
 	opCompleteNativeSessionRaw = 17
+	opIngressLocalPacketJSON   = 18
 )
 
 // Result status bytes.
@@ -83,6 +84,10 @@ type nativeIssuerWorkJSON struct {
 	IssuerURL         string `json:"issuer_url"`
 	IssuerCarrierPath string `json:"issuer_carrier_path"`
 	RequestBodyBase64 string `json:"request_body_base64"`
+}
+
+type nativeLocalPacketsJSON struct {
+	PacketsBase64 []string `json:"packets_base64"`
 }
 
 // AuroraCoreCall dispatches a single portable-core operation. in/inLen is the
@@ -319,6 +324,23 @@ func dispatch(op int, in []byte, arg uint64) (byte, []byte) {
 			return statusError, nil
 		}
 		return statusOK, nil
+	case opIngressLocalPacketJSON:
+		if arg == 0 {
+			return statusError, nil
+		}
+		packets, err := nativeSessions.ingressLocalPacket(arg, in)
+		if err != nil {
+			if errors.Is(err, session.ErrBackpressure) {
+				return statusConflict, nil
+			}
+			return statusError, nil
+		}
+		defer zeroNativeLocalPackets(packets)
+		encoded, err := encodeNativeLocalPacketsJSON(packets)
+		if err != nil {
+			return statusError, nil
+		}
+		return statusOK, encoded
 	default:
 		return statusError, nil
 	}
@@ -360,6 +382,28 @@ func encodeNativeIssuerWorkJSON(work nativeIssuerWork) ([]byte, error) {
 		IssuerCarrierPath: work.IssuerCarrierPath,
 		RequestBodyBase64: base64.StdEncoding.EncodeToString(work.RequestBody),
 	})
+}
+
+func encodeNativeLocalPacketsJSON(packets [][]byte) ([]byte, error) {
+	if len(packets) > maximumNativeLocalPacketQueue {
+		return nil, fmt.Errorf("auroracore: native local packet result count exceeds limit")
+	}
+	encodedPackets := make([]string, len(packets))
+	for index, packet := range packets {
+		if len(packet) == 0 || len(packet) > maximumNativeLocalPacketBytes {
+			return nil, fmt.Errorf("auroracore: native local packet is invalid")
+		}
+		encodedPackets[index] = base64.StdEncoding.EncodeToString(packet)
+	}
+	encoded, err := json.Marshal(nativeLocalPacketsJSON{PacketsBase64: encodedPackets})
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) > maximumNativeLocalPacketResult*2 {
+		zeroNativeBytes(encoded)
+		return nil, fmt.Errorf("auroracore: native local packet JSON exceeds size limit")
+	}
+	return encoded, nil
 }
 
 func main() {}

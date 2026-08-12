@@ -367,6 +367,80 @@ func TestNativeSessionDuplexConvertsRawPacketsWithoutExposingCarrierFrames(t *te
 	}
 }
 
+func TestNativeSessionTerminalDuplexReleasesRegistrySlot(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	application := nativeTestApplication(t)
+	adapter, err := client.NewPacketAdapter(application, client.PacketAdapterOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readCarrier, remoteWrite := io.Pipe()
+	_, writeCarrier := io.Pipe()
+	if err := remoteWrite.Close(); err != nil {
+		t.Fatal(err)
+	}
+	packetContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	native := &nativeSession{
+		context:      packetContext,
+		cancel:       cancel,
+		established:  &handshake.EstablishedSession{Application: application, ReadCarrier: readCarrier, WriteCarrier: writeCarrier},
+		adapter:      adapter,
+		localPackets: make(chan []byte, 1),
+	}
+	registry := newNativeSessionRegistry(nativeSessionRegistryOptions{
+		now:    func() time.Time { return now },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x71}, 128)),
+		start: func(context.Context, client.NativeProvisioning, time.Time) (nativeSessionHandshake, handshake.ClientProofRequest, error) {
+			return &nativeTestHandshake{}, nativeTestProofRequest(now), nil
+		},
+	})
+	registry.sessions[1] = native
+	for handle := uint64(2); handle <= maximumNativeSessions; handle++ {
+		registry.sessions[handle] = &nativeSession{}
+	}
+	registry.next = maximumNativeSessions + 1
+
+	waiter := make(chan error, 1)
+	go func() {
+		_, err := registry.nextLocalPacket(context.Background(), 1)
+		waiter <- err
+	}()
+	select {
+	case err := <-waiter:
+		t.Fatalf("local packet wait returned before terminal duplex: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	duplexDone := make(chan struct{})
+	go func() {
+		registry.runNativeDuplex(1, native)
+		close(duplexDone)
+	}()
+	select {
+	case <-duplexDone:
+	case <-time.After(time.Second):
+		t.Fatal("terminal native duplex did not stop")
+	}
+	select {
+	case err := <-waiter:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("local packet wait error = %v, want io.EOF", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("local packet wait did not observe terminal duplex")
+	}
+	if _, err := registry.lookup(1); err == nil {
+		t.Fatal("terminal native duplex retained its registry handle")
+	}
+	work, err := registry.begin(client.NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"})
+	if err != nil {
+		t.Fatalf("terminal native duplex did not release a session slot: %v", err)
+	}
+	if err := registry.close(work.Handle); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNativeSessionLocalPacketWaitStopsWhenClosed(t *testing.T) {
 	packetQueue := make(chan []byte, 1)
 	ctx, cancel := context.WithCancel(context.Background())

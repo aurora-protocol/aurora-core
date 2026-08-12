@@ -306,7 +306,7 @@ func (r *nativeSessionRegistry) complete(handle uint64, issuerResponse []byte) e
 		return fmt.Errorf("auroracore: complete native session: %w", err)
 	}
 	if startDuplex {
-		go r.runNativeDuplex(session)
+		go r.runNativeDuplex(handle, session)
 	}
 	return nil
 }
@@ -515,7 +515,7 @@ func (r *nativeSessionRegistry) nextLocalPacket(ctx context.Context, handle uint
 	}
 }
 
-func (r *nativeSessionRegistry) runNativeDuplex(session *nativeSession) {
+func (r *nativeSessionRegistry) runNativeDuplex(handle uint64, session *nativeSession) {
 	if r == nil || session == nil {
 		return
 	}
@@ -525,7 +525,7 @@ func (r *nativeSessionRegistry) runNativeDuplex(session *nativeSession) {
 	adapter := session.adapter
 	session.mu.Unlock()
 	if packetContext == nil || established == nil || adapter == nil {
-		session.finishDuplex(fmt.Errorf("auroracore: native duplex is unavailable"))
+		r.finishNativeDuplex(handle, session, fmt.Errorf("auroracore: native duplex is unavailable"))
 		return
 	}
 	err := transport.RunPacketDuplex(packetContext, established.ReadCarrier, established.WriteCarrier, established.Application, func(frameContext context.Context, block protocol.FrameBlock) error {
@@ -541,7 +541,20 @@ func (r *nativeSessionRegistry) runNativeDuplex(session *nativeSession) {
 		}
 		return nil
 	}, transport.DefaultMaxRecordBodyBytes)
+	r.finishNativeDuplex(handle, session, err)
+}
+
+func (r *nativeSessionRegistry) finishNativeDuplex(handle uint64, session *nativeSession, err error) {
+	if r == nil || handle == 0 || session == nil {
+		return
+	}
 	session.finishDuplex(err)
+	r.mu.Lock()
+	if r.sessions[handle] == session {
+		delete(r.sessions, handle)
+	}
+	r.mu.Unlock()
+	_ = session.close()
 }
 
 func (s *nativeSession) enqueueLocalPacket(ctx context.Context, packet []byte) error {

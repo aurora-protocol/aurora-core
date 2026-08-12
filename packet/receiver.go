@@ -24,6 +24,40 @@ type Receiver struct {
 	havePacket map[receiverPacketNumberSpace]bool
 }
 
+type PreparedOpen struct {
+	owner *Receiver
+	key   receiverPacketNumberKey
+	block protocol.FrameBlock
+	valid bool
+}
+
+// Block returns an owned copy of the authenticated frame block.
+func (p *PreparedOpen) Block() protocol.FrameBlock {
+	if p == nil || !p.valid {
+		return protocol.FrameBlock{}
+	}
+	return cloneReceiverFrameBlock(p.block)
+}
+
+// TakeBlock transfers ownership of the authenticated frame block to the caller.
+func (p *PreparedOpen) TakeBlock() protocol.FrameBlock {
+	if p == nil || !p.valid {
+		return protocol.FrameBlock{}
+	}
+	block := p.block
+	p.block = protocol.FrameBlock{}
+	return block
+}
+
+// Destroy zeroes and releases authenticated plaintext owned by the preparation.
+func (p *PreparedOpen) Destroy() {
+	if p == nil {
+		return
+	}
+	destroyFrameBlock(&p.block)
+	*p = PreparedOpen{}
+}
+
 type receiverPacketNumberSpace struct {
 	RouteInstanceID uint64
 	HopLayer        uint8
@@ -51,19 +85,47 @@ func NewReceiver(cfg ReceiverConfig) *Receiver {
 }
 
 func (r *Receiver) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
-	return r.openWithProtector(pkt, r.protector)
-}
-
-func (r *Receiver) OpenWithDirectionState(pkt AuroraPacket, state *DirectionState, suite uint64, now time.Time) (protocol.FrameBlock, error) {
-	if state == nil {
-		return protocol.FrameBlock{}, fmt.Errorf("packet: missing direction state")
-	}
-	material, err := state.MaterialForPacket(pkt, now)
+	prepared, err := r.PrepareOpen(pkt)
 	if err != nil {
 		return protocol.FrameBlock{}, err
 	}
+	defer prepared.Destroy()
+	block := prepared.TakeBlock()
+	if err := r.CommitPreparedOpen(&prepared); err != nil {
+		destroyFrameBlock(&block)
+		return protocol.FrameBlock{}, err
+	}
+	return block, nil
+}
+
+func (r *Receiver) OpenWithDirectionState(pkt AuroraPacket, state *DirectionState, suite uint64, now time.Time) (protocol.FrameBlock, error) {
+	prepared, err := r.PrepareOpenWithDirectionState(pkt, state, suite, now)
+	if err != nil {
+		return protocol.FrameBlock{}, err
+	}
+	defer prepared.Destroy()
+	block := prepared.TakeBlock()
+	if err := r.CommitPreparedOpen(&prepared); err != nil {
+		destroyFrameBlock(&block)
+		return protocol.FrameBlock{}, err
+	}
+	return block, nil
+}
+
+func (r *Receiver) PrepareOpen(pkt AuroraPacket) (PreparedOpen, error) {
+	return r.prepareOpenWithProtector(pkt, r.protector)
+}
+
+func (r *Receiver) PrepareOpenWithDirectionState(pkt AuroraPacket, state *DirectionState, suite uint64, now time.Time) (PreparedOpen, error) {
+	if state == nil {
+		return PreparedOpen{}, fmt.Errorf("packet: missing direction state")
+	}
+	material, err := state.MaterialForPacket(pkt, now)
+	if err != nil {
+		return PreparedOpen{}, err
+	}
 	defer material.Destroy()
-	return r.openWithProtector(pkt, Protector{
+	return r.prepareOpenWithProtector(pkt, Protector{
 		Suite:           suite,
 		RouteInstanceID: state.RouteInstanceID,
 		HopLayer:        state.HopLayer,
@@ -74,47 +136,68 @@ func (r *Receiver) OpenWithDirectionState(pkt AuroraPacket, state *DirectionStat
 	})
 }
 
-func (r *Receiver) openWithProtector(pkt AuroraPacket, protector Protector) (protocol.FrameBlock, error) {
+func (r *Receiver) prepareOpenWithProtector(pkt AuroraPacket, protector Protector) (PreparedOpen, error) {
 	r.mu.Lock()
 	if err := r.checkPacketNumberLocked(pkt); err != nil {
 		r.mu.Unlock()
-		return protocol.FrameBlock{}, err
+		return PreparedOpen{}, err
 	}
 	r.mu.Unlock()
 
 	block, err := protector.Open(pkt)
 	if err != nil {
-		return protocol.FrameBlock{}, err
+		return PreparedOpen{}, err
 	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if err := r.checkPacketNumberLocked(pkt); err != nil {
-		return protocol.FrameBlock{}, err
+		r.mu.Unlock()
+		destroyFrameBlock(&block)
+		return PreparedOpen{}, err
 	}
-	r.markPacketNumberLocked(pkt)
-	return block, nil
+	r.mu.Unlock()
+	return PreparedOpen{
+		owner: r,
+		key:   receiverPacketNumberKey{Space: packetNumberSpace(pkt), PacketNumber: pkt.PacketNumber},
+		block: block,
+		valid: true,
+	}, nil
+}
+
+func (r *Receiver) CommitPreparedOpen(prepared *PreparedOpen) error {
+	if prepared == nil || !prepared.valid || prepared.owner != r {
+		return fmt.Errorf("packet: invalid prepared packet open")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.checkPacketNumberKeyLocked(prepared.key); err != nil {
+		return err
+	}
+	r.markPacketNumberKeyLocked(prepared.key)
+	prepared.valid = false
+	return nil
 }
 
 func (r *Receiver) checkPacketNumberLocked(pkt AuroraPacket) error {
-	space := packetNumberSpace(pkt)
-	key := receiverPacketNumberKey{Space: space, PacketNumber: pkt.PacketNumber}
+	return r.checkPacketNumberKeyLocked(receiverPacketNumberKey{Space: packetNumberSpace(pkt), PacketNumber: pkt.PacketNumber})
+}
+
+func (r *Receiver) checkPacketNumberKeyLocked(key receiverPacketNumberKey) error {
 	if _, ok := r.seen[key]; ok {
-		return fmt.Errorf("packet: duplicate packet number %d", pkt.PacketNumber)
+		return fmt.Errorf("packet: duplicate packet number %d", key.PacketNumber)
 	}
-	highest := r.highest[space]
-	if r.havePacket[space] && highest >= r.windowSize && pkt.PacketNumber < highest-r.windowSize {
-		return fmt.Errorf("packet: packet number %d outside receiver window", pkt.PacketNumber)
+	highest := r.highest[key.Space]
+	if r.havePacket[key.Space] && highest >= r.windowSize && key.PacketNumber < highest-r.windowSize {
+		return fmt.Errorf("packet: packet number %d outside receiver window", key.PacketNumber)
 	}
 	return nil
 }
 
-func (r *Receiver) markPacketNumberLocked(pkt AuroraPacket) {
-	space := packetNumberSpace(pkt)
-	key := receiverPacketNumberKey{Space: space, PacketNumber: pkt.PacketNumber}
+func (r *Receiver) markPacketNumberKeyLocked(key receiverPacketNumberKey) {
+	space := key.Space
 	r.seen[key] = struct{}{}
-	if !r.havePacket[space] || pkt.PacketNumber > r.highest[space] {
-		r.highest[space] = pkt.PacketNumber
+	if !r.havePacket[space] || key.PacketNumber > r.highest[space] {
+		r.highest[space] = key.PacketNumber
 		r.havePacket[space] = true
 	}
 	if !r.havePacket[space] || r.highest[space] < r.windowSize {
@@ -126,6 +209,29 @@ func (r *Receiver) markPacketNumberLocked(pkt AuroraPacket) {
 			delete(r.seen, seen)
 		}
 	}
+}
+
+func cloneReceiverFrameBlock(block protocol.FrameBlock) protocol.FrameBlock {
+	cloned := protocol.FrameBlock{Frames: make([]protocol.AuroraFrame, len(block.Frames))}
+	for i, frame := range block.Frames {
+		cloned.Frames[i] = protocol.AuroraFrame{
+			FrameType: frame.FrameType,
+			FlowID:    frame.FlowID,
+			Flags:     frame.Flags,
+			Payload:   append([]byte(nil), frame.Payload...),
+		}
+	}
+	return cloned
+}
+
+func destroyFrameBlock(block *protocol.FrameBlock) {
+	for i := range block.Frames {
+		for j := range block.Frames[i].Payload {
+			block.Frames[i].Payload[j] = 0
+		}
+		block.Frames[i] = protocol.AuroraFrame{}
+	}
+	*block = protocol.FrameBlock{}
 }
 
 func packetNumberSpace(pkt AuroraPacket) receiverPacketNumberSpace {

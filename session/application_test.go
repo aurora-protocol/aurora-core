@@ -40,6 +40,12 @@ func TestNewApplicationRejectsInvalidConfig(t *testing.T) {
 		"partial limits": func(cfg *Config) {
 			cfg.Limits = Limits{MaxQueuedPackets: 8}
 		},
+		"partial rekey policy": func(cfg *Config) {
+			cfg.Rekey = RekeyPolicy{MaxAge: time.Minute}
+		},
+		"negative rekey age": func(cfg *Config) {
+			cfg.Rekey = RekeyPolicy{MaxAge: -time.Minute, MaxBytes: 1, MaxPackets: 1}
+		},
 		"too many packets": func(cfg *Config) {
 			cfg.Limits.MaxQueuedPackets = 4097
 		},
@@ -65,7 +71,7 @@ func TestNewApplicationRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
-func TestNewApplicationNormalizesDefaultLimits(t *testing.T) {
+func TestNewApplicationNormalizesDefaultPolicies(t *testing.T) {
 	client, _ := testApplicationConfigs()
 	client.Limits = Limits{}
 
@@ -84,6 +90,14 @@ func TestNewApplicationNormalizesDefaultLimits(t *testing.T) {
 	}
 	if app.limits != want {
 		t.Fatalf("default limits = %+v, want %+v", app.limits, want)
+	}
+	wantRekey := RekeyPolicy{
+		MaxAge:     30 * time.Minute,
+		MaxBytes:   8 << 30,
+		MaxPackets: (1 << 32) - (1 << 16),
+	}
+	if app.rekey != wantRekey {
+		t.Fatalf("default rekey policy = %+v, want %+v", app.rekey, wantRekey)
 	}
 }
 
@@ -674,6 +688,7 @@ func cloneConfig(in Config) Config {
 		Write:           cloneDirectionConfigForTest(in.Write),
 		Read:            cloneDirectionConfigForTest(in.Read),
 		Limits:          in.Limits,
+		Rekey:           in.Rekey,
 		Random:          in.Random,
 	}
 }

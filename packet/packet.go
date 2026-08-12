@@ -70,6 +70,7 @@ func (p *Protector) Seal(block protocol.FrameBlock) (AuroraPacket, error) {
 	if err != nil {
 		return AuroraPacket{}, err
 	}
+	defer destroyBytes(plaintext)
 	packetNumber := p.NextPacket
 	aad, err := auroracrypto.PacketAD(p.Suite, p.RouteInstanceID, p.HopLayer, p.Direction, p.KeyPhase, packetNumber)
 	if err != nil {
@@ -83,6 +84,7 @@ func (p *Protector) Seal(block protocol.FrameBlock) (AuroraPacket, error) {
 	if err != nil {
 		return AuroraPacket{}, err
 	}
+	defer destroyBytes(sealed)
 	if len(sealed) < 16 {
 		return AuroraPacket{}, fmt.Errorf("packet: sealed payload too short")
 	}
@@ -111,15 +113,18 @@ func (p Protector) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
 		return protocol.FrameBlock{}, err
 	}
 	sealed := append(append([]byte(nil), pkt.Ciphertext...), pkt.AuthTag...)
+	defer destroyBytes(sealed)
 	plaintext, err := auroracrypto.OpenForSuite(p.Suite, p.Key, nonce, aad, sealed)
 	if err != nil {
 		return protocol.FrameBlock{}, err
 	}
+	defer destroyBytes(plaintext)
 	block, err := protocol.DecodeFrameBlock(plaintext)
 	if err != nil {
 		return protocol.FrameBlock{}, err
 	}
 	if err := protocol.ValidateFrameBlockForDirection(block, pkt.Direction); err != nil {
+		destroyFrameBlock(&block)
 		return protocol.FrameBlock{}, err
 	}
 	return block, nil

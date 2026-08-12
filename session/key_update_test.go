@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -76,9 +77,244 @@ func TestApplicationKeyUpdateUsesReservedControlCapacity(t *testing.T) {
 	if err := client.InitiateKeyUpdate(context.Background(), 1); err != nil {
 		t.Fatalf("control update did not use reserved capacity: %v", err)
 	}
-	if client.writeState.KeyPhase != 1 || len(client.queue) != client.limits.MaxQueuedPackets-client.limits.ControlReservedPackets+1 {
-		t.Fatalf("update did not commit through reserved capacity")
+	if client.writeState.KeyPhase != 0 || !client.pendingWriteUpdate || len(client.queue) != client.limits.MaxQueuedPackets-client.limits.ControlReservedPackets+1 {
+		t.Fatalf("update did not enter the emission barrier through reserved capacity")
 	}
+}
+
+func TestApplicationKeyUpdateDrainStartsAtCarrierHandoff(t *testing.T) {
+	client, _ := newKeyUpdateApplicationPair(t)
+	defer client.Close()
+	if err := client.InitiateKeyUpdate(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if client.writeState.KeyPhase != 0 || !client.writeState.DrainUntil.IsZero() || !client.pendingWriteUpdate {
+		t.Fatalf("queued update started its drain before carrier handoff")
+	}
+	before := time.Now()
+	_ = nextApplicationPacket(t, client)
+	if client.writeState.KeyPhase != 1 || client.pendingWriteUpdate {
+		t.Fatalf("carrier handoff did not commit the queued update")
+	}
+	if !client.writeState.DrainUntil.After(before.Add(packet.MaxDrainWindow - time.Second)) {
+		t.Fatalf("drain deadline did not start at carrier handoff: %s", client.writeState.DrainUntil)
+	}
+}
+
+func TestApplicationAutomaticRekeyTriggersBeforeDataQueueing(t *testing.T) {
+	block := testFrameBlock(t, 102, []byte("automatic rekey payload"))
+	reservation, err := encodedPacketReservation(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := map[string]struct {
+		policy     RekeyPolicy
+		queueFirst bool
+		expireAge  bool
+	}{
+		"packet limit": {
+			policy:     RekeyPolicy{MaxAge: time.Hour, MaxBytes: 1 << 20, MaxPackets: 1},
+			queueFirst: true,
+		},
+		"byte limit": {
+			policy:     RekeyPolicy{MaxAge: time.Hour, MaxBytes: uint64(reservation), MaxPackets: 100},
+			queueFirst: true,
+		},
+		"age limit": {
+			policy:    RekeyPolicy{MaxAge: time.Second, MaxBytes: 1 << 20, MaxPackets: 100},
+			expireAge: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			clientConfig, _ := testApplicationConfigs()
+			clientConfig.Rekey = tc.policy
+			clientConfig.Random = bytes.NewReader(repeatedByte(0xd2, 64))
+			client, err := NewApplication(clientConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+
+			if tc.queueFirst {
+				if err := client.QueueFrames(context.Background(), block); err != nil {
+					t.Fatalf("initial QueueFrames: %v", err)
+				}
+				_ = nextApplicationPacket(t, client)
+			}
+			if tc.expireAge {
+				client.mu.Lock()
+				client.writePhaseStartedAt = time.Now().Add(-2 * tc.policy.MaxAge)
+				client.mu.Unlock()
+			}
+
+			if err := client.QueueFrames(context.Background(), block); !errors.Is(err, ErrBackpressure) {
+				t.Fatalf("triggering QueueFrames error = %v, want ErrBackpressure", err)
+			}
+			if !client.pendingWriteUpdate || client.writeState.KeyPhase != 0 {
+				t.Fatalf("automatic rekey did not enter emission barrier")
+			}
+			updateHeader := decodeApplicationPacket(t, nextApplicationPacket(t, client))
+			if updateHeader.KeyPhase != 0 {
+				t.Fatalf("automatic update used phase %d, want 0", updateHeader.KeyPhase)
+			}
+			if err := client.QueueFrames(context.Background(), block); err != nil {
+				t.Fatalf("QueueFrames after automatic update: %v", err)
+			}
+			dataHeader := decodeApplicationPacket(t, nextApplicationPacket(t, client))
+			if dataHeader.KeyPhase != 1 || dataHeader.PacketNumber != 0 {
+				t.Fatalf("post-update data phase/number = %d/%d, want 1/0", dataHeader.KeyPhase, dataHeader.PacketNumber)
+			}
+		})
+	}
+}
+
+func TestApplicationRejectsPacketLargerThanConfiguredRekeyByteLimit(t *testing.T) {
+	block := testFrameBlock(t, 103, []byte("larger than phase budget"))
+	reservation, err := encodedPacketReservation(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientConfig, _ := testApplicationConfigs()
+	clientConfig.Rekey = RekeyPolicy{MaxAge: time.Hour, MaxBytes: uint64(reservation - 1), MaxPackets: 100}
+	client, err := NewApplication(clientConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	if err := client.QueueFrames(context.Background(), block); err == nil || errors.Is(err, ErrBackpressure) {
+		t.Fatalf("oversized phase packet error = %v, want non-retryable limit error", err)
+	}
+	if client.pendingWriteUpdate || len(client.queue) != 0 {
+		t.Fatalf("impossible byte budget started a rekey loop")
+	}
+}
+
+func TestApplicationAutomaticallyUpdatesKeysAtConfiguredLimits(t *testing.T) {
+	cases := map[string]func(*Application, int){
+		"packet count": func(app *Application, _ int) {
+			app.rekey.MaxPackets = 1
+		},
+		"encoded bytes": func(app *Application, nextReservation int) {
+			app.rekey.MaxBytes = app.writePhaseBytes + uint64(nextReservation) - 1
+		},
+		"phase age": func(app *Application, _ int) {
+			app.writePhaseStartedAt = time.Now().Add(-2 * app.rekey.MaxAge)
+		},
+	}
+
+	for name, reachLimit := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg, _ := testApplicationConfigs()
+			cfg.Random = bytes.NewReader(repeatedByte(0x75, 64))
+			cfg.Rekey = RekeyPolicy{
+				MaxAge:     time.Hour,
+				MaxBytes:   1 << 20,
+				MaxPackets: 100,
+			}
+			app, err := NewApplication(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer app.Close()
+
+			first := testFrameBlock(t, 107, []byte("before automatic update"))
+			if err := app.QueueFrames(context.Background(), first); err != nil {
+				t.Fatal(err)
+			}
+			second := testFrameBlock(t, 108, []byte("after automatic update"))
+			secondReservation, err := encodedPacketReservation(second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reachLimit(app, secondReservation)
+
+			if err := app.QueueFrames(context.Background(), second); !errors.Is(err, ErrBackpressure) {
+				t.Fatalf("threshold QueueFrames error = %v, want ErrBackpressure", err)
+			}
+			if !app.pendingWriteUpdate || app.writeState.KeyPhase != 0 || len(app.queue) != 2 {
+				t.Fatalf("threshold did not queue an update behind existing data")
+			}
+
+			firstPacket := decodeApplicationPacket(t, nextApplicationPacket(t, app))
+			if firstPacket.KeyPhase != 0 || firstPacket.PacketNumber != 0 || !app.pendingWriteUpdate {
+				t.Fatalf("pre-update packet phase/number = %d/%d", firstPacket.KeyPhase, firstPacket.PacketNumber)
+			}
+			updatePacket := decodeApplicationPacket(t, nextApplicationPacket(t, app))
+			if updatePacket.KeyPhase != 0 || updatePacket.PacketNumber != 1 || app.pendingWriteUpdate || app.writeState.KeyPhase != 1 {
+				t.Fatalf("automatic update handoff state is inconsistent")
+			}
+
+			if err := app.QueueFrames(context.Background(), second); err != nil {
+				t.Fatalf("retry QueueFrames after automatic update: %v", err)
+			}
+			secondPacket := decodeApplicationPacket(t, nextApplicationPacket(t, app))
+			if secondPacket.KeyPhase != 1 || secondPacket.PacketNumber != 0 {
+				t.Fatalf("post-update packet phase/number = %d/%d, want 1/0", secondPacket.KeyPhase, secondPacket.PacketNumber)
+			}
+		})
+	}
+}
+
+func TestApplicationPendingKeyUpdateBlocksDataWithoutMutation(t *testing.T) {
+	client, _ := newKeyUpdateApplicationPair(t)
+	defer client.Close()
+	if err := client.InitiateKeyUpdate(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	beforeNumbers := client.writePacketNumbers
+	beforeQueuedBytes := client.queuedBytes
+
+	err := client.QueueFrames(context.Background(), testFrameBlock(t, 109, []byte("must wait for update handoff")))
+	if !errors.Is(err, ErrBackpressure) {
+		t.Fatalf("QueueFrames while update pending = %v, want ErrBackpressure", err)
+	}
+	if client.writePacketNumbers != beforeNumbers || client.queuedBytes != beforeQueuedBytes || len(client.queue) != 1 {
+		t.Fatalf("backpressured data mutated packet numbers or queue")
+	}
+}
+
+func TestApplicationCloseDestroysQueuedKeyUpdate(t *testing.T) {
+	client, _ := newKeyUpdateApplicationPair(t)
+	if err := client.InitiateKeyUpdate(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	queuedUpdate := client.queue[0].update
+	before := queuedUpdate.prepared.Frame()
+	defer zeroBytes(before.UpdateNonce)
+	if before.NewKeyPhase != 1 || len(before.UpdateNonce) == 0 {
+		t.Fatalf("queued update was not prepared")
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after := queuedUpdate.prepared.Frame()
+	if !reflect.DeepEqual(after, protocol.KeyUpdate{}) {
+		t.Fatalf("close retained staged key update metadata: %+v", after)
+	}
+	requireTerminalApplication(t, client)
+}
+
+func TestApplicationKeyUpdateCommitFailureEmitsNothingAndTerminates(t *testing.T) {
+	client, _ := newKeyUpdateApplicationPair(t)
+	defer client.Close()
+	if err := client.InitiateKeyUpdate(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	queuedUpdate := client.queue[0].update
+	client.writeState.Material.Key[0] ^= 0xff
+
+	if encoded, err := client.NextPacket(context.Background()); err == nil || encoded != nil {
+		t.Fatalf("NextPacket after source change = %x, %v; want nil and error", encoded, err)
+	}
+	if after := queuedUpdate.prepared.Frame(); !reflect.DeepEqual(after, protocol.KeyUpdate{}) {
+		t.Fatalf("failed commit retained staged key update metadata: %+v", after)
+	}
+	requireTerminalApplication(t, client)
 }
 
 func TestApplicationKeyUpdateBackpressureAndExhaustionDoNotMutate(t *testing.T) {
@@ -93,6 +329,7 @@ func TestApplicationKeyUpdateBackpressureAndExhaustionDoNotMutate(t *testing.T) 
 		before := client.writeState.Clone()
 		defer before.Destroy()
 		beforeNumbers := client.writePacketNumbers
+		beforeRandom := client.random.(*bytes.Reader).Len()
 
 		err := client.InitiateKeyUpdate(context.Background(), 1)
 		if !errors.Is(err, ErrBackpressure) {
@@ -101,6 +338,9 @@ func TestApplicationKeyUpdateBackpressureAndExhaustionDoNotMutate(t *testing.T) 
 		requireDirectionStateEqual(t, client.writeState, before)
 		if client.writePacketNumbers != beforeNumbers {
 			t.Fatalf("backpressure advanced packet numbers")
+		}
+		if client.random.(*bytes.Reader).Len() != beforeRandom {
+			t.Fatalf("backpressure consumed key-update entropy")
 		}
 	})
 
@@ -111,6 +351,7 @@ func TestApplicationKeyUpdateBackpressureAndExhaustionDoNotMutate(t *testing.T) 
 		client.write.KeyPhase = 255
 		before := client.writeState.Clone()
 		defer before.Destroy()
+		beforeRandom := client.random.(*bytes.Reader).Len()
 
 		if err := client.InitiateKeyUpdate(context.Background(), 1); err == nil {
 			t.Fatalf("phase-exhausted update succeeded")
@@ -118,6 +359,9 @@ func TestApplicationKeyUpdateBackpressureAndExhaustionDoNotMutate(t *testing.T) 
 		requireDirectionStateEqual(t, client.writeState, before)
 		if len(client.queue) != 0 {
 			t.Fatalf("phase-exhausted update queued a packet")
+		}
+		if client.random.(*bytes.Reader).Len() != beforeRandom {
+			t.Fatalf("phase exhaustion consumed key-update entropy")
 		}
 	})
 
@@ -140,6 +384,42 @@ func TestApplicationKeyUpdateBackpressureAndExhaustionDoNotMutate(t *testing.T) 
 			t.Fatalf("random failure queued a packet")
 		}
 	})
+}
+
+func TestApplicationKeyUpdateEntropyReadDoesNotHoldSessionLock(t *testing.T) {
+	clientConfig, _ := testApplicationConfigs()
+	random := newBlockingNonceReader()
+	clientConfig.Random = random
+	client, err := NewApplication(clientConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- client.InitiateKeyUpdate(context.Background(), 1)
+	}()
+	<-random.started
+
+	block := testFrameBlock(t, 130, []byte("queue while entropy blocks"))
+	queueResult := make(chan error, 1)
+	go func() {
+		queueResult <- client.QueueFrames(context.Background(), block)
+	}()
+	select {
+	case err := <-queueResult:
+		if err != nil {
+			t.Fatalf("QueueFrames while entropy blocked: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("entropy reader held the session lock")
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(random.release)
+	if err := <-result; !errors.Is(err, ErrClosed) {
+		t.Fatalf("InitiateKeyUpdate after close = %v, want ErrClosed", err)
+	}
 }
 
 func TestApplicationQueueFramesRejectsSessionOwnedKeyControlsWithoutMutation(t *testing.T) {
@@ -180,8 +460,8 @@ func TestApplicationQueueFramesRejectsSessionOwnedKeyControlsWithoutMutation(t *
 	defer before.Destroy()
 	beforeNumbers := client.writePacketNumbers
 	for _, block := range blocks {
-		if err := client.QueueFrames(context.Background(), block); err == nil {
-			t.Fatalf("QueueFrames accepted session-owned control 0x%x", block.Frames[0].FrameType)
+		if err := client.QueueFrames(context.Background(), block); !errors.Is(err, ErrSessionControl) {
+			t.Fatalf("QueueFrames control 0x%x error = %v, want ErrSessionControl", block.Frames[0].FrameType, err)
 		}
 	}
 	requireDirectionStateEqual(t, client.writeState, before)
@@ -367,7 +647,51 @@ func TestApplicationKeyUpdateOppositeDirectionsDoNotBlock(t *testing.T) {
 	}
 }
 
-func TestApplicationKeyUpdateACKBackpressureTerminatesSession(t *testing.T) {
+func TestApplicationReceivedUpdateQueuesACKBeforeLocalUpdate(t *testing.T) {
+	client, relay := newKeyUpdateApplicationPair(t)
+	defer client.Close()
+	defer relay.Close()
+
+	if err := client.InitiateKeyUpdate(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := relay.InitiateKeyUpdate(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	relayUpdate := nextApplicationPacket(t, relay)
+	if got, err := client.HandlePacket(context.Background(), time.Now(), relayUpdate); err != nil || got != nil {
+		t.Fatalf("received update while local update pending = %#v, %v; want nil, nil", got, err)
+	}
+	if client.terminal != nil || client.readState.KeyPhase != 1 || !client.pendingWriteUpdate || len(client.queue) != 2 {
+		t.Fatalf("received update did not preserve the local emission barrier")
+	}
+
+	clientACK := nextApplicationPacket(t, client)
+	ackHeader := decodeApplicationPacket(t, clientACK)
+	if ackHeader.KeyPhase != 0 || ackHeader.PacketNumber != 1 || !client.pendingWriteUpdate || client.writeState.KeyPhase != 0 {
+		t.Fatalf("prioritized ACK phase/number = %d/%d", ackHeader.KeyPhase, ackHeader.PacketNumber)
+	}
+	if got, err := relay.HandlePacket(context.Background(), time.Now(), clientACK); err != nil || got != nil {
+		t.Fatalf("HandlePacket(prioritized ACK) = %#v, %v; want nil, nil", got, err)
+	}
+	if !relay.writeState.DrainUntil.IsZero() {
+		t.Fatalf("prioritized ACK did not finish the peer write drain")
+	}
+
+	localUpdate := nextApplicationPacket(t, client)
+	localHeader := decodeApplicationPacket(t, localUpdate)
+	if localHeader.KeyPhase != 0 || localHeader.PacketNumber != 0 {
+		t.Fatalf("local update phase/number = %d/%d, want 0/0", localHeader.KeyPhase, localHeader.PacketNumber)
+	}
+	if got, err := relay.HandlePacket(context.Background(), time.Now(), localUpdate); err != nil || got != nil {
+		t.Fatalf("HandlePacket(local update) = %#v, %v; want nil, nil", got, err)
+	}
+	if client.writeState.KeyPhase != 1 || relay.readState.KeyPhase != 1 {
+		t.Fatalf("local update did not advance both endpoints")
+	}
+}
+
+func TestApplicationKeyUpdateACKBackpressureLeavesReplayRetryable(t *testing.T) {
 	client, relay := newKeyUpdateApplicationPair(t)
 	defer client.Close()
 	for i := 0; i < relay.limits.MaxQueuedPackets; i++ {
@@ -379,62 +703,23 @@ func TestApplicationKeyUpdateACKBackpressureTerminatesSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := relay.HandlePacket(context.Background(), time.Now(), nextApplicationPacket(t, client)); !errors.Is(err, ErrBackpressure) {
+	updatePacket := nextApplicationPacket(t, client)
+	beforeRandom := relay.random.(*bytes.Reader).Len()
+	if _, err := relay.HandlePacket(context.Background(), time.Now(), updatePacket); !errors.Is(err, ErrBackpressure) {
 		t.Fatalf("ACK backpressure error = %v, want ErrBackpressure", err)
 	}
-	requireTerminalApplication(t, relay)
-}
-
-func TestApplicationQueueFramesRejectsSessionOwnedKeyControls(t *testing.T) {
-	client, _ := newKeyUpdateApplicationPair(t)
-	defer client.Close()
-
-	update := protocol.KeyUpdate{
-		RouteInstanceID: client.routeInstanceID,
-		HopLayer:        client.hopLayer,
-		Direction:       client.write.Direction,
-		OldKeyPhase:     0,
-		NewKeyPhase:     1,
-		UpdateNonce:     repeatedByte(0xb1, 16),
-		AckRequired:     true,
-		UpdateReason:    1,
+	if relay.terminal != nil || relay.readState.KeyPhase != 0 {
+		t.Fatalf("retryable ACK backpressure terminated or mutated the session")
 	}
-	ack := protocol.KeyUpdateACK{
-		RouteInstanceID: client.routeInstanceID,
-		HopLayer:        client.hopLayer,
-		AckedDirection:  client.readState.Direction,
-		AckedKeyPhase:   1,
-		AckNonce:        repeatedByte(0xb2, 16),
+	if relay.random.(*bytes.Reader).Len() != beforeRandom {
+		t.Fatalf("ACK backpressure consumed acknowledgement entropy")
 	}
-	requestPayload, err := protocol.Encode(protocol.KeyUpdateRequest{
-		RouteInstanceID:    client.routeInstanceID,
-		HopLayer:           client.hopLayer,
-		RequestedDirection: client.write.Direction,
-		RequestNonce:       repeatedByte(0xb3, 16),
-		RequestReason:      1,
-	})
-	if err != nil {
-		t.Fatal(err)
+	_ = nextApplicationPacket(t, relay)
+	if got, err := relay.HandlePacket(context.Background(), time.Now(), updatePacket); err != nil || got != nil {
+		t.Fatalf("retry after capacity release = %#v, %v; want nil, nil", got, err)
 	}
-
-	blocks := map[string]protocol.FrameBlock{
-		"update":          keyUpdateBlock(t, update),
-		"acknowledgement": keyUpdateACKBlock(t, ack),
-		"request": {Frames: []protocol.AuroraFrame{{
-			FrameType: registry.FrameKeyUpdateRequest,
-			Payload:   requestPayload,
-		}}},
-	}
-	for name, block := range blocks {
-		t.Run(name, func(t *testing.T) {
-			beforeNumbers := client.writePacketNumbers
-			if err := client.QueueFrames(context.Background(), block); !errors.Is(err, ErrSessionControl) {
-				t.Fatalf("QueueFrames() error = %v, want ErrSessionControl", err)
-			}
-			if len(client.queue) != 0 || client.writePacketNumbers != beforeNumbers || client.writeState.KeyPhase != 0 {
-				t.Fatalf("rejected key control mutated application state")
-			}
-		})
+	if relay.readState.KeyPhase != 1 {
+		t.Fatalf("retry did not commit the received update")
 	}
 }
 
@@ -508,10 +793,134 @@ func TestScanKeyControlsAcceptsMixedControlsInEitherOrder(t *testing.T) {
 	}
 }
 
-func TestApplicationKeyUpdateACKRandomFailureTerminatesSession(t *testing.T) {
+func TestApplicationAppliesMixedKeyUpdateAndACKAtomically(t *testing.T) {
+	for name, updateFirst := range map[string]bool{
+		"update then ack": true,
+		"ack then update": false,
+	} {
+		t.Run(name, func(t *testing.T) {
+			client, relay := newKeyUpdateApplicationPair(t)
+			defer client.Close()
+			defer relay.Close()
+			if err := relay.InitiateKeyUpdate(context.Background(), 1); err != nil {
+				t.Fatal(err)
+			}
+			_ = nextApplicationPacket(t, relay)
+
+			update := protocol.KeyUpdate{
+				RouteInstanceID: client.routeInstanceID,
+				HopLayer:        client.hopLayer,
+				Direction:       client.write.Direction,
+				OldKeyPhase:     0,
+				NewKeyPhase:     1,
+				UpdateNonce:     repeatedByte(0xc3, 16),
+				AckRequired:     true,
+				UpdateReason:    1,
+			}
+			ack := protocol.KeyUpdateACK{
+				RouteInstanceID: relay.routeInstanceID,
+				HopLayer:        relay.hopLayer,
+				AckedDirection:  relay.write.Direction,
+				AckedKeyPhase:   relay.writeState.KeyPhase,
+				AckNonce:        repeatedByte(0xc4, 16),
+			}
+			updateFrame := keyUpdateBlock(t, update).Frames[0]
+			ackFrame := keyUpdateACKBlock(t, ack).Frames[0]
+			frames := []protocol.AuroraFrame{ackFrame, updateFrame}
+			if updateFirst {
+				frames[0], frames[1] = frames[1], frames[0]
+			}
+			write := cloneApplicationProtector(client.write)
+			defer destroyApplicationProtector(&write)
+			encoded := sealApplicationPacket(t, &write, protocol.FrameBlock{Frames: frames})
+
+			if got, err := relay.HandlePacket(context.Background(), time.Now(), encoded); err != nil || got != nil {
+				t.Fatalf("HandlePacket(mixed controls) = %#v, %v; want nil, nil", got, err)
+			}
+			if relay.readState.KeyPhase != 1 || !relay.writeState.DrainUntil.IsZero() || len(relay.queue) != 1 {
+				t.Fatalf("mixed controls did not atomically update read and acknowledge write")
+			}
+			response := decodeApplicationPacket(t, nextApplicationPacket(t, relay))
+			if response.KeyPhase != 1 || response.PacketNumber != 0 {
+				t.Fatalf("mixed-control response phase/number = %d/%d, want 1/0", response.KeyPhase, response.PacketNumber)
+			}
+		})
+	}
+}
+
+func TestScanKeyControlsRejectsDuplicateStateChangingControls(t *testing.T) {
+	update := protocol.KeyUpdate{
+		RouteInstanceID: 7,
+		HopLayer:        1,
+		Direction:       0,
+		OldKeyPhase:     0,
+		NewKeyPhase:     1,
+		UpdateNonce:     repeatedByte(0xc5, 16),
+	}
+	ack := protocol.KeyUpdateACK{
+		RouteInstanceID: 7,
+		HopLayer:        1,
+		AckedDirection:  1,
+		AckedKeyPhase:   1,
+	}
+	for name, frame := range map[string]protocol.AuroraFrame{
+		"updates":          keyUpdateBlock(t, update).Frames[0],
+		"acknowledgements": keyUpdateACKBlock(t, ack).Frames[0],
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := scanKeyControls(protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame, frame}}); err == nil {
+				t.Fatalf("duplicate %s succeeded", name)
+			}
+		})
+	}
+}
+
+func TestKeyControlsDestroyZeroesCopiedFramePayloads(t *testing.T) {
+	payload := []byte("copied application payload")
+	controls := keyControls{frames: []protocol.AuroraFrame{{Payload: payload}}}
+	controls.Destroy()
+	for _, value := range payload {
+		if value != 0 {
+			t.Fatalf("destroy retained copied frame payload")
+		}
+	}
+	if controls.frames != nil {
+		t.Fatalf("destroy retained frame metadata")
+	}
+}
+
+func TestApplicationConsumesRepeatedValidKeyUpdateRequests(t *testing.T) {
+	client, relay := newKeyUpdateApplicationPair(t)
+	defer client.Close()
+	defer relay.Close()
+	requestPayload, err := protocol.Encode(protocol.KeyUpdateRequest{
+		RouteInstanceID:    client.routeInstanceID,
+		HopLayer:           client.hopLayer,
+		RequestedDirection: relay.write.Direction,
+		RequestNonce:       repeatedByte(0xc6, 16),
+		RequestReason:      1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.AuroraFrame{FrameType: registry.FrameKeyUpdateRequest, Payload: requestPayload}
+	write := cloneApplicationProtector(client.write)
+	defer destroyApplicationProtector(&write)
+	encoded := sealApplicationPacket(t, &write, protocol.FrameBlock{Frames: []protocol.AuroraFrame{request, request}})
+
+	if got, err := relay.HandlePacket(context.Background(), time.Now(), encoded); err != nil || got != nil {
+		t.Fatalf("HandlePacket(repeated requests) = %#v, %v; want nil, nil", got, err)
+	}
+	if relay.readState.KeyPhase != 0 || len(relay.queue) != 0 {
+		t.Fatalf("advisory requests mutated key state or queued a response")
+	}
+}
+
+func TestApplicationKeyUpdateACKRandomFailureLeavesReplayRetryable(t *testing.T) {
 	clientConfig, relayConfig := testApplicationConfigs()
 	clientConfig.Random = bytes.NewReader(repeatedByte(0x91, 256))
-	relayConfig.Random = bytes.NewReader(repeatedByte(0xa1, 15))
+	relayRandom := bytes.NewBuffer(repeatedByte(0xa1, 15))
+	relayConfig.Random = relayRandom
 	client, err := NewApplication(clientConfig)
 	if err != nil {
 		t.Fatal(err)
@@ -526,10 +935,22 @@ func TestApplicationKeyUpdateACKRandomFailureTerminatesSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := relay.HandlePacket(context.Background(), time.Now(), nextApplicationPacket(t, client)); err == nil {
+	updatePacket := nextApplicationPacket(t, client)
+	if _, err := relay.HandlePacket(context.Background(), time.Now(), updatePacket); err == nil {
 		t.Fatalf("ACK random failure succeeded")
 	}
-	requireTerminalApplication(t, relay)
+	if relay.terminal != nil || relay.readState.KeyPhase != 0 {
+		t.Fatalf("retryable ACK random failure terminated or mutated the session")
+	}
+	if _, err := relayRandom.Write(repeatedByte(0xa2, 16)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := relay.HandlePacket(context.Background(), time.Now(), updatePacket); err != nil || got != nil {
+		t.Fatalf("retry after random refill = %#v, %v; want nil, nil", got, err)
+	}
+	if relay.readState.KeyPhase != 1 {
+		t.Fatalf("retry did not commit the received update")
+	}
 }
 
 func newKeyUpdateApplicationPair(t *testing.T) (*Application, *Application) {
@@ -669,4 +1090,26 @@ func requireTerminalApplication(t *testing.T, app *Application) {
 	if _, err := app.NextPacket(context.Background()); err == nil {
 		t.Fatalf("terminal application emitted a packet")
 	}
+}
+
+type blockingNonceReader struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingNonceReader() *blockingNonceReader {
+	return &blockingNonceReader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (r *blockingNonceReader) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.started) })
+	<-r.release
+	for i := range p {
+		p[i] = 0xd1
+	}
+	return len(p), nil
 }

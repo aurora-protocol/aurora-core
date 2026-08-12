@@ -172,30 +172,45 @@ Its public operations are:
 ```text
 QueueFrames(ctx, FrameBlock) error
 NextPacket(ctx) (encodedPacket, error)
-HandlePacket(now, encodedPacket) ([]FrameBlock, error)
+HandlePacket(ctx, now, encodedPacket) ([]FrameBlock, error)
 InitiateKeyUpdate(ctx, reason) error
 Close() error
 ```
 
 Queueing validates the complete frame block and reserves conservative byte and
-packet capacity before state mutation. Packet sealing and packet-number
-advancement occur only while that reservation is held; a sealing failure
-releases it, and successful sealing commits the exact encoded size. A full
-queue returns a typed backpressure error; it never grows and never silently
-drops stream data. Realtime datagram expiry is handled by the existing flow
-scheduler before queueing.
+packet capacity before state mutation. Session-owned key controls cannot enter
+through the application-frame API. Packet sealing and packet-number advancement
+occur only while a reservation is held; a sealing failure releases it, and
+successful sealing commits the exact encoded size. A full queue returns typed
+backpressure; it never grows and never silently drops stream data. Default and
+configurable age, encoded-byte, and packet-count triggers schedule a key update
+before accepting more application data. External route, method, security,
+policy, and server triggers invoke the same explicit update operation. Realtime
+datagram expiry is handled by the existing flow scheduler before queueing.
 
 Opening checks canonical encoding, route metadata, packet-number replay, AEAD,
-frame direction, and key-update consistency before emitting frames. Duplicate
-or stale packets do not mutate flow state. Received key updates rotate only the
-read direction and enqueue an acknowledgement using the write direction.
-Locally initiated updates are sealed with the old write material, then activate
-the new write material with the existing bounded drain and retransmission
-rules. Key phases cannot wrap.
+frame direction, and key-update consistency before emitting frames. Replay
+acceptance is prepared after authentication but committed only after all
+semantic controls and any required response are ready. Temporary response
+capacity or entropy failures leave replay and key state unchanged so the exact
+packet can be retried; authenticated semantic failures terminate the session.
+Received key updates rotate only the read direction and enqueue an
+acknowledgement using the current write direction. Simultaneous opposite-
+direction updates remain independent, including when an acknowledgement must
+be placed ahead of a queued local update.
 
-The object has one lifecycle owner. Close is idempotent, wakes blocked callers,
-zeroes owned key slices where practical, and guarantees that no operation can
-emit data after terminal failure.
+Locally initiated updates are sealed with old write material and queued with an
+opaque prepared-state token. The new write material and bounded drain become
+active only when `NextPacket` hands that exact update to the carrier. While the
+token is pending, application data is backpressured, control responses may be
+inserted ahead of it, and close or terminal failure destroys both ciphertext
+and staged key material. Key phases cannot wrap.
+
+The object has one lifecycle owner. Inbound processing is serialized separately
+from outbound update preparation, and entropy reads do not hold the main state
+lock. Close is idempotent, wakes blocked callers, zeroes owned plaintext, queued
+ciphertext, staged state, and key slices where practical, and guarantees that
+no operation can emit data after terminal failure.
 
 ### Relay Egress
 

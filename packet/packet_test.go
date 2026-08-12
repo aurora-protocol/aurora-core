@@ -647,6 +647,121 @@ func TestReceiverRejectsDuplicatePacketNumber(t *testing.T) {
 	}
 }
 
+func TestReceiverPreparedOpenCommitsReplayTransactionally(t *testing.T) {
+	protector := Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 0x61,
+		HopLayer:        1,
+		Direction:       0,
+		Key:             bytesOf(0x62, 32),
+		StaticIV:        bytesOf(0x63, 12),
+	}
+	pkt, err := protector.Seal(protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := NewReceiver(ReceiverConfig{Protector: Protector{
+		Suite:           protector.Suite,
+		RouteInstanceID: protector.RouteInstanceID,
+		HopLayer:        protector.HopLayer,
+		Direction:       protector.Direction,
+		Key:             append([]byte(nil), protector.Key...),
+		StaticIV:        append([]byte(nil), protector.StaticIV...),
+	}, WindowSize: 64})
+
+	first, err := receiver.PrepareOpen(pkt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Destroy()
+	second, err := receiver.PrepareOpen(pkt)
+	if err != nil {
+		t.Fatalf("uncommitted packet was treated as replay: %v", err)
+	}
+	defer second.Destroy()
+	if err := receiver.CommitPreparedOpen(&first); err != nil {
+		t.Fatalf("commit prepared packet: %v", err)
+	}
+	if err := receiver.CommitPreparedOpen(&first); err == nil {
+		t.Fatalf("prepared packet committed twice")
+	}
+	if err := receiver.CommitPreparedOpen(&second); err == nil {
+		t.Fatalf("second preparation bypassed committed replay state")
+	}
+	if _, err := receiver.PrepareOpen(pkt); err == nil {
+		t.Fatalf("committed packet prepared again")
+	}
+}
+
+func TestReceiverPreparedOpenOwnsAndDestroysPlaintext(t *testing.T) {
+	protector := Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 0x64,
+		HopLayer:        1,
+		Direction:       0,
+		Key:             bytesOf(0x65, 32),
+		StaticIV:        bytesOf(0x66, 12),
+	}
+	pkt, err := protector.Seal(protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding, Payload: []byte("owned plaintext")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := NewReceiver(ReceiverConfig{Protector: protector, WindowSize: 64})
+	prepared, err := receiver.PrepareOpen(pkt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := prepared.Block()
+	if len(block.Frames) != 1 || !bytes.Equal(block.Frames[0].Payload, []byte("owned plaintext")) {
+		t.Fatalf("unexpected prepared block: %+v", block)
+	}
+	held := prepared.block.Frames[0].Payload
+	block.Frames[0].Payload[0] ^= 0xff
+	if bytes.Equal(block.Frames[0].Payload, prepared.block.Frames[0].Payload) {
+		t.Fatalf("prepared block escaped through returned clone")
+	}
+	prepared.Destroy()
+	requireZeroedByteSlices(t, held)
+	if prepared.valid || prepared.owner != nil || len(prepared.block.Frames) != 0 {
+		t.Fatalf("prepared open was not cleared")
+	}
+}
+
+func TestReceiverPreparedOpenTransfersPlaintextOwnership(t *testing.T) {
+	protector := Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 0x67,
+		HopLayer:        1,
+		Direction:       0,
+		Key:             bytesOf(0x68, 32),
+		StaticIV:        bytesOf(0x69, 12),
+	}
+	pkt, err := protector.Seal(protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding, Payload: []byte("transferred plaintext")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := NewReceiver(ReceiverConfig{Protector: protector, WindowSize: 64})
+	prepared, err := receiver.PrepareOpen(pkt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := prepared.TakeBlock()
+	if len(block.Frames) != 1 || !bytes.Equal(block.Frames[0].Payload, []byte("transferred plaintext")) {
+		t.Fatalf("unexpected transferred block: %+v", block)
+	}
+	if again := prepared.TakeBlock(); len(again.Frames) != 0 {
+		t.Fatalf("prepared plaintext transferred twice")
+	}
+	if err := receiver.CommitPreparedOpen(&prepared); err != nil {
+		t.Fatal(err)
+	}
+	prepared.Destroy()
+	if !bytes.Equal(block.Frames[0].Payload, []byte("transferred plaintext")) {
+		t.Fatalf("destroying preparation changed transferred plaintext")
+	}
+	destroyFrameBlock(&block)
+}
+
 func TestReceiverRejectsPacketsOutsideDrainWindow(t *testing.T) {
 	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
 	protector := &Protector{

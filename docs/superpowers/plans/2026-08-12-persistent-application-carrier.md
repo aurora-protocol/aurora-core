@@ -302,8 +302,9 @@ A nonzero `Limits` value must specify every field. Enforce
 `64 <= ReplayWindow <= 1 << 20`.
 
 The application owns cloned key material, a `packet.Receiver`, per-phase write
-packet numbers, an ordered `[][]byte` queue, exact queued bytes, one buffered
-state-change channel, one closed channel, and one terminal error under a mutex.
+packet numbers, an ordered queue of encoded packets and optional prepared
+update tokens, exact queued bytes, one buffered state-change channel, one
+closed channel, and one terminal error under a mutex.
 
 `QueueFrames` validates before locking, computes a conservative encoded packet
 reservation, checks context cancellation, and returns `ErrBackpressure`
@@ -315,12 +316,14 @@ capacity, and signals producers.
 
 - [ ] **Step 5: Implement strict packet opening and terminal close**
 
-`HandlePacket` rejects empty and over-limit input before decode, uses
-`packet.Receiver.OpenWithDirectionState`, and returns a one-element owned block
-slice only after complete validation. Any cryptographic or protocol error is
-returned without closing the session; a caller chooses whether that peer error
-is terminal. `Close` is idempotent, sets `ErrClosed`, zeroes owned key slices,
-closes the notification channel exactly once, and wakes all waiters.
+`HandlePacket` rejects empty and over-limit input before decode, prepares an
+authenticated open without committing replay, and returns owned application
+frames only after complete validation. Cryptographic failures do not advance
+replay. Authenticated key-control semantic failures become terminal, while
+explicitly classified temporary control-resource failures remain retryable.
+`Close` is idempotent, sets `ErrClosed`, zeroes owned plaintext, staged state,
+queued bytes, and key slices, closes the notification channel exactly once, and
+wakes all waiters.
 
 - [ ] **Step 6: Run unit and race tests**
 
@@ -379,10 +382,14 @@ Expected: FAIL because session key-update orchestration is absent.
 
 - [ ] **Step 4: Implement control-reserved queueing and transactional send**
 
-`InitiateKeyUpdate` reads 16 random bytes with `io.ReadFull`, reserves control
-capacity, calls `PrepareUpdate`, encodes one key-update frame, seals it with the
-current protector and old phase, commits the preparation only after queue
-insertion succeeds, and releases the reservation on every error.
+`InitiateKeyUpdate` reserves control capacity before reading 16 random bytes,
+but releases the main session lock during entropy I/O. It calls `PrepareUpdate`,
+encodes one key-update frame, seals it with the current protector and old phase,
+and queues the ciphertext with the opaque preparation token. Queue insertion
+does not commit the key state. `NextPacket` commits the token and starts the
+drain immediately before handing that exact ciphertext to the carrier. Normal
+data is backpressured while a token is pending, and every error or close path
+destroys the token and releases its reservation.
 
 Use these internal helpers so normal and control queue accounting cannot drift:
 
@@ -394,26 +401,32 @@ func (a *Application) signalLocked()
 
 - [ ] **Step 5: Implement received control handling**
 
-After packet open, scan the validated block once. Decode key-update and
-acknowledgement payloads with `wire.Reader` and require EOF. For an update that
-requires an acknowledgement, reserve control capacity before mutating read-key
-state; a reservation failure is terminal because packet replay state has
-already advanced. Apply controls under the session mutex, generate
-acknowledgement nonces from the configured random reader, and commit the
-reserved acknowledgement packet. Return a new block containing only
-non-key-control frames; return no block when all frames were consumed
-internally.
+After a prepared packet open, scan the validated block once. Decode key-update
+and acknowledgement payloads with `wire.Reader` and require EOF. For an update
+that requires an acknowledgement, reserve control capacity before mutating
+read-key state, release the main lock during serialized entropy I/O, and seal
+the response before committing replay. Capacity and entropy failures remain
+retryable because replay and directional states are still staged. Return an
+owned block containing only non-key-control frames; return no block when all
+frames were consumed internally.
 
 Stage both directional states before applying a mixed update/acknowledgement
 block, permit at most one update and one acknowledgement per packet, and commit
-the staged states only after every control validates and any required
-acknowledgement packet is sealed and inserted. Ignore the optional update
-request frame after validation rather than forwarding it to the flow
-dispatcher. Any semantic, randomness, or queue failure after authenticated
-packet opening becomes the single terminal session error, clears queued bytes,
-wakes waiters, and destroys live plus staged key material. Destroy every owned
-prepared update, returned update result, and temporary packet material on all
-paths.
+replay plus staged states only after every control validates and any required
+acknowledgement packet is ready. A response may be inserted ahead of a queued
+local update so simultaneous opposite-direction updates cannot block one
+another. Consume optional update-request frames after validation rather than
+forwarding them to the flow dispatcher. Semantic failures become the single
+terminal session error; temporary reserved-capacity and entropy failures are
+retryable. Destroy every owned prepared open, prepared update, returned update
+result, copied frame, plaintext, and temporary packet buffer on all paths.
+
+Automatic age, encoded-byte, and packet-count policies use the same update path
+and default to the protocol trigger values. A packet whose conservative encoded
+reservation exceeds the configured per-phase byte budget is rejected as a
+non-retryable configuration error instead of entering an update loop. Route,
+method, security, policy, and server events remain explicit callers of
+`InitiateKeyUpdate` at their ownership boundaries.
 
 - [ ] **Step 6: Run packet and session verification**
 

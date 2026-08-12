@@ -21,14 +21,18 @@ var (
 	ErrBackpressure   = errors.New("session: queue backpressure")
 	ErrClosed         = errors.New("session: closed")
 	ErrSessionControl = errors.New("session: key control requires orchestration")
+	errRekeyRequired  = errors.New("session: key update required")
 )
 
 const (
-	defaultMaxQueuedPackets       = 256
-	defaultMaxQueuedBytes         = 4 << 20
-	defaultControlReservedPackets = 2
-	defaultControlReservedBytes   = 16 << 10
-	defaultReplayWindow           = 1024
+	defaultMaxQueuedPackets              = 256
+	defaultMaxQueuedBytes                = 4 << 20
+	defaultControlReservedPackets        = 2
+	defaultControlReservedBytes          = 16 << 10
+	defaultReplayWindow                  = 1024
+	defaultRekeyMaxAge                   = 30 * time.Minute
+	defaultRekeyMaxBytes          uint64 = 8 << 30
+	defaultRekeyMaxPackets        uint64 = (1 << 32) - (1 << 16)
 
 	maxQueuedPackets = 4096
 	maxQueuedBytes   = 64 << 20
@@ -54,6 +58,7 @@ type Config struct {
 	Write           DirectionConfig
 	Read            DirectionConfig
 	Limits          Limits
+	Rekey           RekeyPolicy
 	Random          io.Reader
 }
 
@@ -65,25 +70,38 @@ type Limits struct {
 	ReplayWindow           uint64
 }
 
+type RekeyPolicy struct {
+	MaxAge     time.Duration
+	MaxBytes   uint64
+	MaxPackets uint64
+}
+
 type Application struct {
-	mu sync.Mutex
+	mu            sync.Mutex
+	readMu        sync.Mutex
+	writeUpdateMu sync.Mutex
+	randomMu      sync.Mutex
 
 	suite           uint64
 	routeInstanceID uint64
 	hopLayer        uint8
 	limits          Limits
+	rekey           RekeyPolicy
 	random          io.Reader
 
-	write              packet.Protector
-	writeState         packet.DirectionState
-	readState          packet.DirectionState
-	receiver           *packet.Receiver
-	writePacketNumbers [256]uint64
+	write               packet.Protector
+	writeState          packet.DirectionState
+	readState           packet.DirectionState
+	receiver            *packet.Receiver
+	writePacketNumbers  [256]uint64
+	writePhaseStartedAt time.Time
+	writePhaseBytes     uint64
 
-	queue           [][]byte
-	queuedBytes     int
-	reservedPackets int
-	reservedBytes   int
+	queue              []queuedPacket
+	queuedBytes        int
+	reservedPackets    int
+	reservedBytes      int
+	pendingWriteUpdate bool
 
 	changed  chan struct{}
 	closed   chan struct{}
@@ -92,6 +110,10 @@ type Application struct {
 
 func NewApplication(cfg Config) (*Application, error) {
 	limits, err := normalizeLimits(cfg.Limits)
+	if err != nil {
+		return nil, err
+	}
+	rekey, err := normalizeRekeyPolicy(cfg.Rekey)
 	if err != nil {
 		return nil, err
 	}
@@ -121,11 +143,13 @@ func NewApplication(cfg Config) (*Application, error) {
 	}
 
 	a := &Application{
-		suite:           cfg.Suite,
-		routeInstanceID: cfg.RouteInstanceID,
-		hopLayer:        cfg.HopLayer,
-		limits:          limits,
-		random:          randomSource,
+		suite:               cfg.Suite,
+		routeInstanceID:     cfg.RouteInstanceID,
+		hopLayer:            cfg.HopLayer,
+		limits:              limits,
+		rekey:               rekey,
+		random:              randomSource,
+		writePhaseStartedAt: time.Now(),
 		write: packet.Protector{
 			Suite:           cfg.Suite,
 			RouteInstanceID: cfg.RouteInstanceID,
@@ -152,7 +176,14 @@ func (a *Application) QueueFrames(ctx context.Context, block protocol.FrameBlock
 			return fmt.Errorf("%w: frame type 0x%x", ErrSessionControl, frame.FrameType)
 		}
 	}
-	return a.queueBlock(ctx, block, false)
+	err := a.queueBlock(ctx, block, false)
+	if errors.Is(err, errRekeyRequired) {
+		if err := a.InitiateKeyUpdate(ctx, 0); err != nil && !errors.Is(err, ErrBackpressure) {
+			return err
+		}
+		return ErrBackpressure
+	}
+	return err
 }
 
 func (a *Application) NextPacket(ctx context.Context) ([]byte, error) {
@@ -166,14 +197,28 @@ func (a *Application) NextPacket(ctx context.Context) ([]byte, error) {
 			a.mu.Unlock()
 			return nil, err
 		}
+		if err := ctx.Err(); err != nil {
+			a.mu.Unlock()
+			return nil, err
+		}
 		if len(a.queue) > 0 {
-			encoded := a.queue[0]
-			a.queue[0] = nil
+			queued := &a.queue[0]
+			if queued.update != nil {
+				if err := a.writeState.CommitPreparedUpdate(queued.update.prepared, time.Now()); err != nil {
+					returnErr := a.failLocked(fmt.Errorf("session: commit emitted key update: %w", err))
+					a.mu.Unlock()
+					return nil, returnErr
+				}
+				a.activateWriteStateLocked()
+				a.pendingWriteUpdate = false
+			}
+			encoded := append([]byte(nil), queued.encoded...)
+			a.queuedBytes -= len(queued.encoded)
+			queued.Destroy()
 			a.queue = a.queue[1:]
-			a.queuedBytes -= len(encoded)
 			a.signalLocked()
 			a.mu.Unlock()
-			return append([]byte(nil), encoded...), nil
+			return encoded, nil
 		}
 		changed := a.changed
 		closed := a.closed
@@ -208,6 +253,8 @@ func (a *Application) HandlePacket(ctx context.Context, now time.Time, encoded [
 	if len(encoded) > a.packetInputLimit() {
 		return nil, fmt.Errorf("session: packet exceeds configured limit")
 	}
+	a.readMu.Lock()
+	defer a.readMu.Unlock()
 	pkt, err := packet.DecodeAuroraPacket(encoded)
 	if err != nil {
 		return nil, err
@@ -222,14 +269,22 @@ func (a *Application) HandlePacket(ctx context.Context, now time.Time, encoded [
 		return nil, err
 	}
 	candidate := a.readState.Clone()
-	block, err := a.receiver.OpenWithDirectionState(pkt, &candidate, a.suite, now)
+	preparedOpen, err := a.receiver.PrepareOpenWithDirectionState(pkt, &candidate, a.suite, now)
 	if err != nil {
 		candidate.Destroy()
 		return nil, err
 	}
-	blocks, err := a.handleKeyControlsLocked(now, pkt.KeyPhase, block, &candidate)
+	defer preparedOpen.Destroy()
+	block := preparedOpen.TakeBlock()
+	defer zeroFrameBlock(block)
+	blocks, err := a.handleKeyControlsLocked(now, pkt.KeyPhase, block, &candidate, func() error {
+		return a.receiver.CommitPreparedOpen(&preparedOpen)
+	})
 	if err != nil {
 		candidate.Destroy()
+		if isRetryableControlError(err) {
+			return nil, err
+		}
 		return nil, a.failLocked(err)
 	}
 	previous := a.readState
@@ -256,19 +311,21 @@ func (a *Application) terminateLocked(err error) {
 		err = ErrClosed
 	}
 	a.terminal = err
-	for i, encoded := range a.queue {
-		zeroBytes(encoded)
-		a.queue[i] = nil
+	for i := range a.queue {
+		a.queue[i].Destroy()
 	}
 	a.queue = nil
 	a.queuedBytes = 0
 	a.reservedPackets = 0
 	a.reservedBytes = 0
+	a.pendingWriteUpdate = false
 	zeroBytes(a.write.Key)
 	zeroBytes(a.write.StaticIV)
 	a.writeState.Destroy()
 	a.readState.Destroy()
 	a.writePacketNumbers = [256]uint64{}
+	a.writePhaseBytes = 0
+	a.writePhaseStartedAt = time.Time{}
 	a.signalLocked()
 	close(a.closed)
 }
@@ -303,6 +360,17 @@ func (a *Application) queueBlock(ctx context.Context, block protocol.FrameBlock,
 	if a.terminal != nil {
 		return a.terminal
 	}
+	if !control && a.pendingWriteUpdate {
+		return ErrBackpressure
+	}
+	if !control {
+		if uint64(reservation) > a.rekey.MaxBytes {
+			return fmt.Errorf("session: packet reservation exceeds rekey byte limit")
+		}
+		if a.needsKeyUpdateLocked(time.Now(), reservation) {
+			return errRekeyRequired
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -311,10 +379,14 @@ func (a *Application) queueBlock(ctx context.Context, block protocol.FrameBlock,
 	}
 	defer a.releaseReservationLocked(reservation)
 
-	encoded, phase, nextPacket, sealedNext, err := a.sealCurrentWriteBlockLocked(cloneFrameBlock(block))
+	ownedBlock := cloneFrameBlock(block)
+	defer zeroFrameBlock(ownedBlock)
+	encoded, phase, nextPacket, sealedNext, err := a.sealCurrentWriteBlockLocked(ownedBlock)
 	if err != nil {
 		return err
 	}
+	defer func() { zeroBytes(encoded) }()
+	encodedBytes := len(encoded)
 	if len(encoded) > reservation {
 		a.write.NextPacket = nextPacket
 		return fmt.Errorf("session: encoded packet exceeds reservation")
@@ -324,21 +396,42 @@ func (a *Application) queueBlock(ctx context.Context, block protocol.FrameBlock,
 		return err
 	}
 	a.releaseReservationLocked(reservation)
-	if err := a.enqueueEncodedLocked(encoded, control); err != nil {
+	if err := a.enqueueEncodedLocked(&encoded, control); err != nil {
 		a.write.NextPacket = nextPacket
 		return err
 	}
 	a.writePacketNumbers[phase] = sealedNext
+	a.recordQueuedPacketLocked(encodedBytes)
 	a.signalLocked()
 	return nil
 }
 
-func (a *Application) enqueueEncodedLocked(encoded []byte, control bool) error {
-	if !a.hasCapacityLocked(len(encoded), control) {
+func (a *Application) enqueueEncodedLocked(encoded *[]byte, control bool) error {
+	if encoded == nil || !a.hasCapacityLocked(len(*encoded), control) {
 		return ErrBackpressure
 	}
-	a.queue = append(a.queue, append([]byte(nil), encoded...))
-	a.queuedBytes += len(encoded)
+	a.queue = append(a.queue, queuedPacket{encoded: *encoded})
+	a.queuedBytes += len(*encoded)
+	*encoded = nil
+	return nil
+}
+
+func (a *Application) enqueueControlBeforeWriteUpdateLocked(encoded *[]byte) error {
+	if encoded == nil || !a.hasCapacityLocked(len(*encoded), true) {
+		return ErrBackpressure
+	}
+	index := len(a.queue)
+	for i := range a.queue {
+		if a.queue[i].update != nil {
+			index = i
+			break
+		}
+	}
+	a.queue = append(a.queue, queuedPacket{})
+	copy(a.queue[index+1:], a.queue[index:])
+	a.queue[index] = queuedPacket{encoded: *encoded}
+	a.queuedBytes += len(*encoded)
+	*encoded = nil
 	return nil
 }
 
@@ -347,11 +440,10 @@ func (a *Application) rollbackLastEncodedLocked() {
 		return
 	}
 	last := len(a.queue) - 1
-	encoded := a.queue[last]
-	a.queue[last] = nil
+	queued := &a.queue[last]
+	a.queuedBytes -= len(queued.encoded)
+	queued.Destroy()
 	a.queue = a.queue[:last]
-	a.queuedBytes -= len(encoded)
-	zeroBytes(encoded)
 }
 
 func (a *Application) reserveLocked(bytes int, control bool) bool {
@@ -438,6 +530,44 @@ func normalizeLimits(limits Limits) (Limits, error) {
 		return Limits{}, fmt.Errorf("session: invalid replay window")
 	}
 	return limits, nil
+}
+
+func normalizeRekeyPolicy(policy RekeyPolicy) (RekeyPolicy, error) {
+	if policy == (RekeyPolicy{}) {
+		return RekeyPolicy{
+			MaxAge:     defaultRekeyMaxAge,
+			MaxBytes:   defaultRekeyMaxBytes,
+			MaxPackets: defaultRekeyMaxPackets,
+		}, nil
+	}
+	if policy.MaxAge <= 0 || policy.MaxBytes == 0 || policy.MaxPackets == 0 {
+		return RekeyPolicy{}, fmt.Errorf("session: rekey policy must specify positive age, byte, and packet limits")
+	}
+	if policy.MaxPackets > wire.MaxVarint {
+		return RekeyPolicy{}, fmt.Errorf("session: rekey packet limit exceeds canonical range")
+	}
+	return policy, nil
+}
+
+func (a *Application) needsKeyUpdateLocked(now time.Time, nextBytes int) bool {
+	if !a.writePhaseStartedAt.IsZero() && !now.Before(a.writePhaseStartedAt.Add(a.rekey.MaxAge)) {
+		return true
+	}
+	if a.writePhaseBytes >= a.rekey.MaxBytes || uint64(nextBytes) > a.rekey.MaxBytes-a.writePhaseBytes {
+		return true
+	}
+	return a.writePacketNumbers[a.write.KeyPhase] >= a.rekey.MaxPackets
+}
+
+func (a *Application) recordQueuedPacketLocked(encodedBytes int) {
+	if encodedBytes <= 0 {
+		return
+	}
+	if uint64(encodedBytes) > ^uint64(0)-a.writePhaseBytes {
+		a.writePhaseBytes = ^uint64(0)
+		return
+	}
+	a.writePhaseBytes += uint64(encodedBytes)
 }
 
 func validateDirectionConfig(label string, cfg DirectionConfig, secretLength, keyLength int) error {

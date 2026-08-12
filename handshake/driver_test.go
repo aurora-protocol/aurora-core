@@ -150,6 +150,34 @@ func TestRelayDriverDeploymentReturnsBoundVerifiedDeployment(t *testing.T) {
 	}
 }
 
+func TestStaticAccessHintResolverOwnsAndMatchesCredentials(t *testing.T) {
+	credential := validClientDriverConfig(t, time.Now()).AccessHint
+	issuerID := append([]byte(nil), credential.HintIssuerID...)
+	relayBucketID := append([]byte(nil), credential.RelayBucketID...)
+	hintSelector := append([]byte(nil), credential.HintSelector...)
+	wantSecret := append([]byte(nil), credential.HintSecret...)
+	resolver, err := NewStaticAccessHintResolver([]admission.AccessHintCredential{credential})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential.HintSecret[0] ^= 0xff
+	resolved, err := resolver.ResolveAccessHint(context.Background(), issuerID, relayBucketID, credential.HintEpochID, hintSelector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(resolved.HintSecret, wantSecret) {
+		t.Fatal("resolver retained caller access hint secret")
+	}
+	resolved.HintSecret[0] ^= 0xff
+	again, err := resolver.ResolveAccessHint(context.Background(), issuerID, relayBucketID, credential.HintEpochID, hintSelector)
+	if err != nil || !bytes.Equal(again.HintSecret, wantSecret) {
+		t.Fatal("resolver returned aliased access hint credential")
+	}
+	if _, err := resolver.ResolveAccessHint(context.Background(), issuerID, relayBucketID, credential.HintEpochID+1, hintSelector); err == nil {
+		t.Fatal("resolver accepted unrelated access hint lookup")
+	}
+}
+
 func TestDriverConstructorsOwnMutableInputs(t *testing.T) {
 	config := validClientDriverConfig(t, time.Now())
 	wantSecret := append([]byte(nil), config.AccessHint.HintSecret...)

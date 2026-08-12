@@ -34,6 +34,18 @@ type prefixOnlyReader struct {
 	reads  int
 }
 
+type typedNilReader struct{}
+
+func (*typedNilReader) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+type typedNilWriter struct{}
+
+func (*typedNilWriter) Write([]byte) (int, error) {
+	return 0, io.ErrClosedPipe
+}
+
 func (r *prefixOnlyReader) Read(p []byte) (int, error) {
 	r.reads++
 	if r.reads > 1 {
@@ -130,6 +142,20 @@ func TestNewRecordRejectsInvalidReadersWritersAndMaximums(t *testing.T) {
 	}
 	if _, err := NewRecordWriter(&bytes.Buffer{}, 0xffffff+1); err == nil {
 		t.Fatal("NewRecordWriter accepted a maximum above unsigned-24")
+	}
+}
+
+func TestNewRecordRejectsTypedNilReader(t *testing.T) {
+	var reader *typedNilReader
+	if _, err := NewRecordReader(reader, 16); err == nil {
+		t.Fatal("NewRecordReader accepted a typed-nil reader")
+	}
+}
+
+func TestNewRecordRejectsTypedNilWriter(t *testing.T) {
+	var writer *typedNilWriter
+	if _, err := NewRecordWriter(writer, 16); err == nil {
+		t.Fatal("NewRecordWriter accepted a typed-nil writer")
 	}
 }
 

@@ -3,6 +3,7 @@ package transport
 import (
 	"errors"
 	"io"
+	"reflect"
 	"sync"
 )
 
@@ -37,7 +38,7 @@ func NewRecordReader(r io.Reader, max uint32) (*RecordReader, error) {
 	if err != nil {
 		return nil, err
 	}
-	if r == nil {
+	if isNilLike(r) {
 		return nil, errNilRecordReader
 	}
 	return &RecordReader{r: r, max: max}, nil
@@ -67,7 +68,7 @@ func NewRecordWriter(w io.Writer, max uint32) (*RecordWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	if w == nil {
+	if isNilLike(w) {
 		return nil, errNilRecordWriter
 	}
 	return &RecordWriter{w: w, max: max}, nil
@@ -98,6 +99,19 @@ func normalizeRecordMaximum(max uint32) (uint32, error) {
 		return 0, errInvalidRecordMaximum
 	}
 	return max, nil
+}
+
+func isNilLike(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }
 
 func writeRecordBytes(w io.Writer, p []byte) error {

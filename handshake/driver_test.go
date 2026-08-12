@@ -265,6 +265,12 @@ type testDurableReplayCache struct {
 
 func (testDurableReplayCache) Durable() bool { return true }
 
+type testVerifiedDeploymentFixture struct {
+	deployment     trust.VerifiedRelayDeployment
+	epochClassical *ecdsa.PrivateKey
+	epochPQ        *mldsa65.PrivateKey
+}
+
 func validClientDriverConfig(t *testing.T, verifiedAt time.Time) ClientDriverConfig {
 	t.Helper()
 	return ClientDriverConfig{
@@ -331,10 +337,20 @@ func testSessionLimits() session.Limits {
 
 func testVerifiedDeployment(t *testing.T, verifiedAt time.Time) trust.VerifiedRelayDeployment {
 	t.Helper()
-	return testVerifiedDeploymentUntil(t, verifiedAt, verifiedAt.Add(time.Hour))
+	return testVerifiedDeploymentFixtureUntil(t, verifiedAt, verifiedAt.Add(time.Hour)).deployment
 }
 
 func testVerifiedDeploymentUntil(t *testing.T, verifiedAt, replayValidUntil time.Time) trust.VerifiedRelayDeployment {
+	t.Helper()
+	return testVerifiedDeploymentFixtureUntil(t, verifiedAt, replayValidUntil).deployment
+}
+
+func newTestVerifiedDeploymentFixture(t *testing.T, verifiedAt time.Time) testVerifiedDeploymentFixture {
+	t.Helper()
+	return testVerifiedDeploymentFixtureUntil(t, verifiedAt, verifiedAt.Add(time.Hour))
+}
+
+func testVerifiedDeploymentFixtureUntil(t *testing.T, verifiedAt, replayValidUntil time.Time) testVerifiedDeploymentFixture {
 	t.Helper()
 	now := uint64(verifiedAt.Unix())
 	longtermClassical, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -353,7 +369,7 @@ func testVerifiedDeploymentUntil(t *testing.T, verifiedAt, replayValidUntil time
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochPQPublic, _, err := mldsa65.GenerateKey(rand.Reader)
+	epochPQPublic, epochPQPrivate, err := mldsa65.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,7 +503,11 @@ func testVerifiedDeploymentUntil(t *testing.T, verifiedAt, replayValidUntil time
 	if err != nil {
 		t.Fatal(err)
 	}
-	return verified
+	return testVerifiedDeploymentFixture{
+		deployment:     verified,
+		epochClassical: epochClassical,
+		epochPQ:        epochPQPrivate,
+	}
 }
 
 func testECDSAPublicRecord(t *testing.T, key *ecdsa.PrivateKey) protocol.PublicKeyRecord {

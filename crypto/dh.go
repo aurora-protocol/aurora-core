@@ -4,6 +4,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"fmt"
+	"sync"
 
 	"github.com/aurora-protocol/aurora-core/registry"
 )
@@ -15,6 +16,7 @@ const (
 )
 
 type ECDHPrivateKey struct {
+	mu        sync.Mutex
 	suite     uint64
 	curveName string
 	key       *ecdh.PrivateKey
@@ -61,6 +63,8 @@ func (k *ECDHPrivateKey) Suite() uint64 {
 	if k == nil {
 		return 0
 	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	return k.suite
 }
 
@@ -68,26 +72,43 @@ func (k *ECDHPrivateKey) CurveName() string {
 	if k == nil {
 		return ""
 	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	return k.curveName
 }
 
 func (k *ECDHPrivateKey) PrivateKeyBytes() []byte {
-	if k == nil || k.key == nil {
+	if k == nil {
+		return nil
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.key == nil {
 		return nil
 	}
 	return append([]byte(nil), k.key.Bytes()...)
 }
 
 func (k *ECDHPrivateKey) PublicKeyBytes() []byte {
-	if k == nil || k.key == nil {
+	if k == nil {
+		return nil
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.key == nil {
 		return nil
 	}
 	return append([]byte(nil), k.key.PublicKey().Bytes()...)
 }
 
 func (k *ECDHPrivateKey) SharedSecret(peerPublicKey []byte) ([]byte, error) {
-	if k == nil || k.key == nil {
+	if k == nil {
 		return nil, fmt.Errorf("crypto: missing ECDH private key")
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.key == nil {
+		return nil, fmt.Errorf("crypto: ECDH private key destroyed")
 	}
 	peer, err := k.key.Curve().NewPublicKey(append([]byte(nil), peerPublicKey...))
 	if err != nil {
@@ -98,6 +119,17 @@ func (k *ECDHPrivateKey) SharedSecret(peerPublicKey []byte) ([]byte, error) {
 		return nil, err
 	}
 	return append([]byte(nil), secret...), nil
+}
+
+func (k *ECDHPrivateKey) Destroy() {
+	if k == nil {
+		return
+	}
+	k.mu.Lock()
+	k.key = nil
+	k.suite = 0
+	k.curveName = ""
+	k.mu.Unlock()
 }
 
 func ecdhCurveForSuite(suite uint64) (ecdh.Curve, string, error) {

@@ -413,32 +413,35 @@ git commit -m "feat: define production handshake dependencies"
 **Files:**
 - Create: `handshake/client.go`
 - Create: `handshake/client_test.go`
-- Modify: `handshake/session.go`
+- Modify: `handshake/driver.go`
+- Modify: `handshake/driver_test.go`
+- Modify: `crypto/dh.go`
+- Modify: `crypto/dh_test.go`
 
 **Interfaces:**
 - Consumes: Task 4 contracts, randomized hybrid helpers, existing signature/Finished/key-schedule functions, and `session.NewApplication`.
 - Produces: `(*ClientDriver).Connect(context.Context, ClientCarrierOpener) (*EstablishedSession, error)`.
 - Preserves: existing `ClientSession` state-machine methods and tests.
 
-- [ ] **Step 1: Write the failing happy-path state test**
+- [x] **Step 1: Write the failing happy-path state test**
 
 Use a scripted carrier with a real live-binding value, real randomized ECDH/ML-KEM, real ECDSA and ML-DSA Prelude1 signatures, a production-shaped Blind RSA proof provider, and a valid PolicyAccept. Assert the records are exactly `Prelude0`, sealed `Capsule1`, then application packets; the returned application writes direction `0`, reads direction `1`, uses hop layer `0`, and interoperates with a separately built relay application.
 
 Assert generated client nonce, cover random, replay nonce, ECDH public key, and ML-KEM public key differ across 32 runs. Decode every sent Prelude0 and verify descriptor/template/class fields and access hint against the returned live binding.
 
-- [ ] **Step 2: Write failing disclosure-order and downgrade tests**
+- [x] **Step 2: Write failing disclosure-order and downgrade tests**
 
 Instrument `ClientProofProvider` with a call counter and retain every carrier write. For malformed Prelude1, selected suite not offered, descriptor/template mismatch, bad hybrid share, bad classical signature, missing/bad required PQ signature, and canceled context, assert the provider is never called and no Capsule1 record exists.
 
 For valid Prelude1 followed by malformed/bad-tag Capsule2, wrong route instance, wrong ServerFinished, selected version/suite/method/policy/route/shape/personality outside the offer, or an invalid virtual-address assignment, assert Capsule1 may have been sent but no application session or streams are released. Every failure must close the carrier and destroy ephemeral key material.
 
-- [ ] **Step 3: Run the client tests and verify red**
+- [x] **Step 3: Run the client tests and verify red**
 
 Run: `GOCACHE=/private/tmp/aurora-first-hop-cache go test ./handshake -run 'TestClientDriver' -count=1`
 
 Expected: FAIL because `ClientDriver.Connect` does not exist.
 
-- [ ] **Step 4: Implement Prelude0 only after the live binding exists**
+- [x] **Step 4: Implement Prelude0 only after the live binding exists**
 
 `Connect` must:
 
@@ -455,13 +458,13 @@ Expected: FAIL because `ClientDriver.Connect` does not exist.
 
 Require `Prelude0.RequestClassID` to match the verified request class. Never place proof, replay, policy, transport hints, route ID, target metadata, or application bytes in the opener, headers, or Prelude0.
 
-- [ ] **Step 5: Verify Prelude1 before requesting proofs**
+- [x] **Step 5: Verify Prelude1 before requesting proofs**
 
 Read and strictly decode one canonical Prelude1 with no trailing bytes. Call `ClientSession.VerifyCoverPrelude1` first. Only after success, derive ECDH and ML-KEM shared secrets, handshake secrets, and the first-hop route ID. Build an `admission.ContextInput` with hop `0`, the actual encrypted policy/hints values, verified hashes, and live binding. Call `ClientProofProvider.BuildProofs` only after this point.
 
 Validate provider output before sealing: structural proof/replay checks, admission redemption hash equals the computed context in constant time, replay epoch/window exactly match the verified descriptor, token redemption hash and replay context recompute exactly, and proof expiry is before neither `now` nor replay validity.
 
-- [ ] **Step 6: Seal Capsule1 and finish the client application state**
+- [x] **Step 6: Seal Capsule1 and finish the client application state**
 
 Build Capsule1 with route ID and caller-owned policy/hints, compute ClientFinished over the unsigned capsule, envelope-pad before the final Finished computation, seal, and write one record. Read/open Capsule2, validate route ID and `PolicyAccept.ValidateForOffer`, recompute and constant-time verify ServerFinished, then derive application secrets.
 
@@ -482,7 +485,7 @@ session.Config{
 
 Acquire aligned application streams only after `session.NewApplication` succeeds. On every return path, zero locally owned shared secrets, handshake secrets, plaintext capsules, and temporary keys where practical.
 
-- [ ] **Step 7: Run client verification and repeated randomized tests**
+- [x] **Step 7: Run client verification and repeated randomized tests**
 
 Run:
 
@@ -497,7 +500,7 @@ Expected: all randomized and failure-order cases pass with no race report.
 - [ ] **Step 8: Commit the client driver**
 
 ```bash
-git add handshake/client.go handshake/client_test.go handshake/session.go
+git add crypto/dh.go crypto/dh_test.go handshake/client.go handshake/client_test.go handshake/driver.go handshake/driver_test.go docs/superpowers/plans/2026-08-12-live-first-hop-handshake.md
 git commit -m "feat: add authenticated first-hop client driver"
 ```
 

@@ -107,6 +107,8 @@ type ClientDriver struct {
 	sessionLimits  session.Limits
 	rekey          session.RekeyPolicy
 	entropy        session.EntropySource
+	hintUseMu      sync.Mutex
+	hintUses       uint16
 }
 
 type RelayDriver struct {

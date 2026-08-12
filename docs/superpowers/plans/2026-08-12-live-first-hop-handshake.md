@@ -900,7 +900,7 @@ Generate repository and package coverage; require the repository floor to remain
 
 Search all changed core files and commits for protocol specification version text, external inspiration-project names, user paths or identity, unfinished-work markers, fixed carrier paths, protocol markers in visible headers, and AI attribution. Expected: no match except required protocol-domain strings already defined by canonical formulas.
 
-- [ ] **Step 6: Request two independent code reviews and fix every P0-P3 finding**
+- [x] **Step 6: Request two independent code reviews and fix every P0-P3 finding**
 
 Reviewer one focuses on cryptographic ordering, transcript/binding correctness, admission/replay atomicity, downgrade resistance, secret lifetime, and cover-neutral failures. Reviewer two focuses on HTTP/2 connection semantics, cancellation/deadlocks/leaks, bounded allocation, request/response ownership, API compatibility, and test quality.
 

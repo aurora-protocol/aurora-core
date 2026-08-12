@@ -102,15 +102,15 @@ Run `go test ./relay -run 'TestSocketEgress(Target|Options|Policy|Limits)' -coun
 
 **Files:** Modify `relay/socket_egress.go`; modify `relay/socket_egress_test.go`.
 
-- [ ] **Step 1: Write failing loopback TCP tests**
+- [x] **Step 1: Write failing loopback TCP tests**
 
 Use an injected policy that permits test loopback. Cover bounded dial, ordered writes, partial writes, write deadlines, destination-to-backward `STREAM_DATA`, EOF-to-`FLOW_CLOSE`, normal peer close with `CloseWrite`, reset close, duplicate close, blocked destination, per-flow buffer bounds, flow limit release, and session cancellation while dialing/reading/writing.
 
-- [ ] **Step 2: Implement one owned TCP flow object**
+- [x] **Step 2: Implement one owned TCP flow object**
 
 Create the socket during `ExitEventFlowOpened`, insert only after successful dial and final cancellation checks, then start exactly one bounded read pump. Serialize writes, refresh idle deadlines, retain at most one configured read buffer per flow, queue backward frames with bounded retry, and remove/close each flow exactly once. Normal peer close half-closes when supported and allows the read side to drain; terminal/reset/resource closes release immediately.
 
-- [ ] **Step 3: Stress lifecycle and commit**
+- [x] **Step 3: Stress lifecycle and commit**
 
 Run focused tests 100 times and race tests 20 times, including a goroutine-count stabilization assertion after repeated open/close. Commit `feat: relay tcp proxy flows`.
 

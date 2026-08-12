@@ -52,7 +52,7 @@ func (d *ClientDriver) Connect(ctx context.Context, opener ClientCarrierOpener) 
 	if err := clientState.MarkDescriptorLoaded(); err != nil {
 		return nil, err
 	}
-	entropy := clientEntropyReader{ctx: ctx, source: d.entropy}
+	entropy := contextEntropyReader{ctx: ctx, source: d.entropy}
 	clientCoverRandom := make([]byte, 32)
 	defer zeroBindingBytes(clientCoverRandom)
 	if _, err := io.ReadFull(entropy, clientCoverRandom); err != nil {
@@ -418,12 +418,12 @@ func (d *ClientDriver) releaseAccessHintUse() {
 	d.hintUseMu.Unlock()
 }
 
-type clientEntropyReader struct {
+type contextEntropyReader struct {
 	ctx    context.Context
 	source session.EntropySource
 }
 
-func (r clientEntropyReader) Read(p []byte) (int, error) {
+func (r contextEntropyReader) Read(p []byte) (int, error) {
 	if err := contextError(r.ctx); err != nil {
 		return 0, err
 	}

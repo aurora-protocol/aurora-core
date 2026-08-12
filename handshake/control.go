@@ -43,6 +43,7 @@ func OpenCoverCapsule1(ctx ControlCapsuleContext, sealed []byte) (protocol.Cover
 	if err != nil {
 		return protocol.CoverCapsule1Plain{}, failure.NewError(failure.BadAEADTag, "handshake: CoverCapsule1 AEAD open failed: %w", err)
 	}
+	defer zeroBindingBytes(plaintext)
 	plain, err := decodeCoverCapsule1Plain(plaintext)
 	if err != nil {
 		return protocol.CoverCapsule1Plain{}, failure.NewError(failure.MalformedCapsule, "handshake: malformed CoverCapsule1 plaintext: %w", err)
@@ -68,6 +69,7 @@ func OpenCoverCapsule2(ctx ControlCapsuleContext, sealed []byte) (protocol.Cover
 	if err != nil {
 		return protocol.CoverCapsule2Plain{}, failure.NewError(failure.BadAEADTag, "handshake: CoverCapsule2 AEAD open failed: %w", err)
 	}
+	defer zeroBindingBytes(plaintext)
 	plain, err := decodeCoverCapsule2Plain(plaintext)
 	if err != nil {
 		return protocol.CoverCapsule2Plain{}, failure.NewError(failure.MalformedCapsule, "handshake: malformed CoverCapsule2 plaintext: %w", err)
@@ -94,6 +96,7 @@ func OpenRouteCapsule1(ctx ControlCapsuleContext, sealed []byte) (protocol.Route
 	if err != nil {
 		return protocol.RouteCapsule1Plain{}, failure.NewError(failure.BadAEADTag, "handshake: RouteCapsule1 AEAD open failed: %w", err)
 	}
+	defer zeroBindingBytes(plaintext)
 	plain, err := decodeRouteCapsule1Plain(plaintext)
 	if err != nil {
 		return protocol.RouteCapsule1Plain{}, failure.NewError(failure.MalformedCapsule, "handshake: malformed RouteCapsule1 plaintext: %w", err)
@@ -120,6 +123,7 @@ func OpenRouteCapsule2(ctx ControlCapsuleContext, sealed []byte) (protocol.Route
 	if err != nil {
 		return protocol.RouteCapsule2Plain{}, failure.NewError(failure.BadAEADTag, "handshake: RouteCapsule2 AEAD open failed: %w", err)
 	}
+	defer zeroBindingBytes(plaintext)
 	plain, err := decodeRouteCapsule2Plain(plaintext)
 	if err != nil {
 		return protocol.RouteCapsule2Plain{}, failure.NewError(failure.MalformedCapsule, "handshake: malformed RouteCapsule2 plaintext: %w", err)

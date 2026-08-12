@@ -511,14 +511,16 @@ git commit -m "feat: add authenticated first-hop client driver"
 **Files:**
 - Create: `handshake/relay.go`
 - Create: `handshake/relay_test.go`
-- Modify: `handshake/session.go`
+- Modify: `handshake/client.go`
+- Modify: `handshake/control.go`
+- Modify: `handshake/driver.go`
 
 **Interfaces:**
 - Consumes: Task 4 relay dependencies, `VerifyAndSpendAccessHintAt`, `VerifyAndSpendReplay`, existing control/Finished/key-schedule functions, and `session.NewApplication`.
 - Produces: `(*RelayDriver).Begin(context.Context, FirstHopBinding, protocol.CoverPrelude0, uint64) (*RelayHandshake, protocol.CoverPrelude1, error)`.
 - Produces: `(*RelayHandshake).Finish(context.Context, []byte, uint64) ([]byte, *session.Application, protocol.PolicyAccept, error)` and idempotent `Close()`.
 
-- [ ] **Step 1: Write failing Begin ordering tests**
+- [x] **Step 1: Write failing Begin ordering tests**
 
 Instrument the exact hint resolver, spent-hint cache, and signers with an ordered event log. Assert one successful Begin records:
 
@@ -533,7 +535,7 @@ return Prelude1
 
 Assert malformed Prelude0, bad descriptor/template/class, no shared suite, malformed hybrid share, resolver zero/multiple/error simulation, credential tuple mismatch, expired credential, bad hint, cache error, duplicate hint, signer error, and canceled context return no Prelude1 and no live `RelayHandshake`. Verify a bad structural Prelude0 does not spend a hint, while a valid one spends exactly once before either signer can expose bytes.
 
-- [ ] **Step 2: Write failing Finish ordering and replay tests**
+- [x] **Step 2: Write failing Finish ordering and replay tests**
 
 For a real sealed Capsule1, instrument admission verification, token cache, bootstrap cache, policy selection, application construction, and Capsule2 write readiness. Assert ordering:
 
@@ -550,19 +552,19 @@ application construction
 
 Add cases for bad tag, malformed plaintext, route mismatch, wrong ClientFinished, expired/wrong-scope proof, wrong admission context, wrong replay epoch/window/hash, token replay with a fresh replay nonce, cache uncertainty, policy denial/downgrade, and session-constructor failure. Assert no application is returned and no post-failure method can reuse the handshake.
 
-- [ ] **Step 3: Run the relay tests and verify red**
+- [x] **Step 3: Run the relay tests and verify red**
 
 Run: `GOCACHE=/private/tmp/aurora-first-hop-cache go test ./handshake -run 'TestRelayDriver|TestRelayHandshake' -count=1`
 
 Expected: FAIL because relay Begin/Finish do not exist.
 
-- [ ] **Step 4: Implement exact Prelude0 validation and one-time hint spending**
+- [x] **Step 4: Implement exact Prelude0 validation and one-time hint spending**
 
 `Begin` must strictly validate canonical structure, version, descriptor/template hashes, selected gateway-owned class, suite offer intersection, method support, nonce/random lengths, hint namespace fields, and hybrid client shares. Resolve exactly the tuple from Prelude0; compare every returned credential namespace field and expiry; call `VerifyAndSpendAccessHintAt` with `HandshakeBindingContext`, never bare stream binding.
 
 After spending, generate fresh server ECDH material, encapsulate to the client ML-KEM key, construct and envelope-pad unsigned Prelude1, hash the transcript using the live cover-stream binding, sign with both configured epoch signers, and re-check final envelope bounds. Derive relay-side shared and handshake secrets and return an opaque single-use `RelayHandshake` that owns them. A signer failure after hint spend is fail-closed; it must not roll back or reuse the hint.
 
-- [ ] **Step 5: Implement Capsule1 verification, policy, and application creation**
+- [x] **Step 5: Implement Capsule1 verification, policy, and application creation**
 
 `Finish` opens the control capsule and checks route ID before any verifier call. Recompute ClientFinished and compare in constant time. Recompute `AdmissionContextHash`, compare it to the proof redemption context in constant time, verify replay epoch/window against authenticated descriptor state, then call the external admission verifier. Only after verifier success call `VerifyAndSpendReplay`; any cache error or duplicate terminates the handshake.
 
@@ -583,7 +585,7 @@ session.Config{
 
 Return ciphertext and application together so the HTTP adapter can write Capsule2 before handing application traffic to a callback. `Close` and every terminal error must destroy retained secrets and make repeated Begin/Finish use fail.
 
-- [ ] **Step 6: Run relay verification and repeated randomized tests**
+- [x] **Step 6: Run relay verification and repeated randomized tests**
 
 Run:
 
@@ -598,7 +600,7 @@ Expected: exact ordering, replay, and terminal-lifecycle tests pass.
 - [ ] **Step 7: Commit the relay driver**
 
 ```bash
-git add handshake/relay.go handshake/relay_test.go handshake/session.go
+git add handshake/client.go handshake/control.go handshake/driver.go handshake/relay.go handshake/relay_test.go docs/superpowers/plans/2026-08-12-live-first-hop-handshake.md
 git commit -m "feat: add fail-closed first-hop relay driver"
 ```
 

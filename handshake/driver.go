@@ -125,6 +125,7 @@ type RelayDriver struct {
 	sessionLimits     session.Limits
 	rekey             session.RekeyPolicy
 	entropy           session.EntropySource
+	newApplication    func(session.Config) (*session.Application, error)
 }
 
 type EstablishedSession struct {
@@ -246,6 +247,7 @@ func newRelayDriver(config RelayDriverConfig, now time.Time, requireDurable bool
 		sessionLimits:     config.SessionLimits,
 		rekey:             config.Rekey,
 		entropy:           config.Entropy,
+		newApplication:    session.NewApplication,
 	}, nil
 }
 

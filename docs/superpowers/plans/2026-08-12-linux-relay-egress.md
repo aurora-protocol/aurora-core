@@ -84,15 +84,15 @@ Run `go test ./relay -run 'TestExitSession' -count=20` and `go test -race ./rela
 
 **Files:** Create `relay/socket_egress.go`; create `relay/socket_egress_test.go`.
 
-- [ ] **Step 1: Write failing target and constructor tests**
+- [x] **Step 1: Write failing target and constructor tests**
 
 Cover nil context/sink/dialer/resolver, invalid limits, duplicate and zero flow IDs, maximum flows, IPv4/IPv6 formatting, domain canonicalization, resolver cancellation, empty answers, mixed public/private answers, all-denied answers, and deterministic selection. Assert an IP-authoritative UDP flow makes zero resolver calls.
 
-- [ ] **Step 2: Implement strict options and resolution**
+- [x] **Step 2: Implement strict options and resolution**
 
 Add `SocketEgressLimits` with nonzero normalized defaults and hard maxima for flows, TCP read bytes, UDP datagram bytes, dial/write/idle durations, and queue retry interval. Inject narrow `ContextDialer` and `IPResolver` interfaces. Resolve domain targets once, filter every answer through `ExitPolicy`, sort canonical `netip.Addr` values, choose deterministically, and dial the literal selected address. Return stable sentinel errors without target text.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 Run `go test ./relay -run 'TestSocketEgress(Target|Options|Policy|Limits)' -count=20` and the race equivalent. Commit `feat: bound relay destination selection`.
 

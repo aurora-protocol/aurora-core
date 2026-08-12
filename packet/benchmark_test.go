@@ -11,6 +11,7 @@ import (
 func BenchmarkProtectorSeal1200(b *testing.B) {
 	protector, block := benchmarkProtectorAndBlock(b)
 	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		protector.NextPacket = 0
 		packet, err := protector.Seal(block)
@@ -30,6 +31,7 @@ func BenchmarkProtectorOpen1200(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		opened, err := protector.Open(sealed)
 		if err != nil {

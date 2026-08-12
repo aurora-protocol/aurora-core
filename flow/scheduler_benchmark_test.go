@@ -13,6 +13,7 @@ func BenchmarkSchedulerEnqueueDequeue1200(b *testing.B) {
 	}
 	scheduler := NewScheduler(SchedulerOptions{MaxBufferedBytes: 1200})
 	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if err := scheduler.Enqueue(chunk); err != nil {
 			b.Fatal(err)

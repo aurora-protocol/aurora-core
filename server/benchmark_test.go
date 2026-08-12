@@ -11,6 +11,7 @@ import (
 func BenchmarkPacketBatchEncode(b *testing.B) {
 	batch := benchmarkPacketBatch()
 	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := EncodePacketBatch(batch); err != nil {
 			b.Fatal(err)
@@ -24,6 +25,7 @@ func BenchmarkPacketBatchDecode(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		batch, err := DecodePacketBatch(encoded)
 		if err != nil {
@@ -46,6 +48,7 @@ func BenchmarkHarnessPacketCarrier(b *testing.B) {
 	}
 	body := EncodeCarrier(CarrierPacketBatch, encodedBatch)
 	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		req := httptest.NewRequest(http.MethodPost, DefaultPacketExchangePath, bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/octet-stream")

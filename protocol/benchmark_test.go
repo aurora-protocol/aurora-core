@@ -8,6 +8,7 @@ import (
 func BenchmarkFrameBlockEncode1200(b *testing.B) {
 	block := benchmarkStreamDataFrameBlock(b)
 	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := Encode(block); err != nil {
 			b.Fatal(err)
@@ -22,6 +23,7 @@ func BenchmarkFrameBlockDecode1200(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		decoded, err := DecodeFrameBlock(encoded)
 		if err != nil {

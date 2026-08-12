@@ -1,0 +1,536 @@
+package session
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"reflect"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/aurora-protocol/aurora-core/packet"
+	"github.com/aurora-protocol/aurora-core/protocol"
+	"github.com/aurora-protocol/aurora-core/registry"
+)
+
+func TestNewApplicationRejectsInvalidConfig(t *testing.T) {
+	client, _ := testApplicationConfigs()
+
+	cases := map[string]func(*Config){
+		"unsupported suite": func(cfg *Config) {
+			cfg.Suite = 0x1234
+		},
+		"reserved write direction": func(cfg *Config) {
+			cfg.Write.Direction = 2
+		},
+		"matching directions": func(cfg *Config) {
+			cfg.Read.Direction = cfg.Write.Direction
+		},
+		"short write secret": func(cfg *Config) {
+			cfg.Write.Secret = cfg.Write.Secret[:47]
+		},
+		"short read key": func(cfg *Config) {
+			cfg.Read.Key = cfg.Read.Key[:31]
+		},
+		"short write IV": func(cfg *Config) {
+			cfg.Write.IV = cfg.Write.IV[:11]
+		},
+		"partial limits": func(cfg *Config) {
+			cfg.Limits = Limits{MaxQueuedPackets: 8}
+		},
+		"too many packets": func(cfg *Config) {
+			cfg.Limits.MaxQueuedPackets = 4097
+		},
+		"too few reserved packets": func(cfg *Config) {
+			cfg.Limits.ControlReservedPackets = 1
+		},
+		"reserved bytes reach maximum": func(cfg *Config) {
+			cfg.Limits.ControlReservedBytes = cfg.Limits.MaxQueuedBytes
+		},
+		"small replay window": func(cfg *Config) {
+			cfg.Limits.ReplayWindow = 63
+		},
+	}
+
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := cloneConfig(client)
+			mutate(&cfg)
+			if app, err := NewApplication(cfg); err == nil || app != nil {
+				t.Fatalf("NewApplication() = %v, %v; want nil application and error", app, err)
+			}
+		})
+	}
+}
+
+func TestNewApplicationNormalizesDefaultLimits(t *testing.T) {
+	client, _ := testApplicationConfigs()
+	client.Limits = Limits{}
+
+	app, err := NewApplication(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+
+	want := Limits{
+		MaxQueuedPackets:       256,
+		MaxQueuedBytes:         4 << 20,
+		ControlReservedPackets: 2,
+		ControlReservedBytes:   16 << 10,
+		ReplayWindow:           1024,
+	}
+	if app.limits != want {
+		t.Fatalf("default limits = %+v, want %+v", app.limits, want)
+	}
+}
+
+func TestApplicationOwnsConfigurationMaterial(t *testing.T) {
+	clientConfig, relayConfig := testApplicationConfigs()
+	relay, err := NewApplication(relayConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	client, err := NewApplication(clientConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	zeroDirectionConfig(&clientConfig.Write)
+	zeroDirectionConfig(&clientConfig.Read)
+
+	want := testFrameBlock(t, 1, []byte("owned material"))
+	if err := client.QueueFrames(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := client.NextPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := relay.HandlePacket(context.Background(), time.Now(), encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(opened, []protocol.FrameBlock{want}) {
+		t.Fatalf("opened blocks = %#v, want %#v", opened, []protocol.FrameBlock{want})
+	}
+}
+
+func TestApplicationRoundTripOwnsFrameInput(t *testing.T) {
+	client, relay := newApplicationPair(t)
+	defer client.Close()
+	defer relay.Close()
+
+	block := testFrameBlock(t, 7, []byte("original frame payload"))
+	want := cloneFrameBlockForTest(block)
+	if err := client.QueueFrames(context.Background(), block); err != nil {
+		t.Fatal(err)
+	}
+	block.Frames[0].Payload[0] ^= 0xff
+
+	encoded, err := client.NextPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := relay.HandlePacket(context.Background(), time.Now(), encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(opened, []protocol.FrameBlock{want}) {
+		t.Fatalf("opened blocks = %#v, want %#v", opened, []protocol.FrameBlock{want})
+	}
+}
+
+func TestApplicationRejectsReplayAndMetadataMismatch(t *testing.T) {
+	metadata := []struct {
+		name   string
+		mutate func(*packet.AuroraPacket)
+	}{
+		{
+			name: "route",
+			mutate: func(pkt *packet.AuroraPacket) {
+				pkt.RouteInstanceID++
+			},
+		},
+		{
+			name: "direction",
+			mutate: func(pkt *packet.AuroraPacket) {
+				pkt.Direction = 2
+			},
+		},
+		{
+			name: "key phase",
+			mutate: func(pkt *packet.AuroraPacket) {
+				pkt.KeyPhase++
+			},
+		},
+	}
+
+	for _, tc := range metadata {
+		t.Run(tc.name, func(t *testing.T) {
+			client, relay := newApplicationPair(t)
+			defer client.Close()
+			defer relay.Close()
+
+			encoded, want := nextEncodedTestPacket(t, client, 11)
+			decoded, err := packet.DecodeAuroraPacket(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(&decoded)
+			wrong, err := protocol.Encode(decoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := relay.HandlePacket(context.Background(), time.Now(), wrong); err == nil {
+				t.Fatalf("metadata mismatch was accepted")
+			}
+			opened, err := relay.HandlePacket(context.Background(), time.Now(), encoded)
+			if err != nil {
+				t.Fatalf("valid packet after metadata rejection: %v", err)
+			}
+			if !reflect.DeepEqual(opened, []protocol.FrameBlock{want}) {
+				t.Fatalf("opened blocks = %#v, want %#v", opened, []protocol.FrameBlock{want})
+			}
+		})
+	}
+
+	client, relay := newApplicationPair(t)
+	defer client.Close()
+	defer relay.Close()
+	encoded, _ := nextEncodedTestPacket(t, client, 12)
+	if _, err := relay.HandlePacket(context.Background(), time.Now(), encoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.HandlePacket(context.Background(), time.Now(), encoded); err == nil {
+		t.Fatalf("packet replay was accepted")
+	}
+}
+
+func TestApplicationRejectsMalformedAndFailedOpenWithoutReplayMutation(t *testing.T) {
+	client, relay := newApplicationPair(t)
+	defer client.Close()
+	defer relay.Close()
+
+	if _, err := relay.HandlePacket(context.Background(), time.Now(), []byte{0}); err == nil {
+		t.Fatalf("malformed canonical packet was accepted")
+	}
+	tooLarge := make([]byte, relay.limits.MaxQueuedBytes+1)
+	if _, err := relay.HandlePacket(context.Background(), time.Now(), tooLarge); err == nil {
+		t.Fatalf("over-limit packet was accepted")
+	}
+
+	encoded, want := nextEncodedTestPacket(t, client, 13)
+	tampered := append([]byte(nil), encoded...)
+	tampered[len(tampered)-1] ^= 0x80
+	if _, err := relay.HandlePacket(context.Background(), time.Now(), tampered); err == nil {
+		t.Fatalf("tampered packet was accepted")
+	}
+	opened, err := relay.HandlePacket(context.Background(), time.Now(), encoded)
+	if err != nil {
+		t.Fatalf("valid packet after failed open: %v", err)
+	}
+	if !reflect.DeepEqual(opened, []protocol.FrameBlock{want}) {
+		t.Fatalf("opened blocks = %#v, want %#v", opened, []protocol.FrameBlock{want})
+	}
+}
+
+func TestApplicationMaintainsPacketNumbersAcrossQueueOperations(t *testing.T) {
+	client, _ := newApplicationPair(t)
+	defer client.Close()
+
+	for i := uint64(0); i < 2; i++ {
+		if err := client.QueueFrames(context.Background(), testFrameBlock(t, i+20, []byte("packet number"))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for want := uint64(0); want < 2; want++ {
+		encoded, err := client.NextPacket(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := packet.DecodeAuroraPacket(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decoded.PacketNumber != want {
+			t.Fatalf("packet number = %d, want %d", decoded.PacketNumber, want)
+		}
+	}
+}
+
+func TestApplicationBackpressureReservesControlCapacityAndDoesNotAdvancePacketNumber(t *testing.T) {
+	client, _ := newApplicationPair(t)
+	defer client.Close()
+
+	for i := 0; i < 6; i++ {
+		if err := client.QueueFrames(context.Background(), testFrameBlock(t, uint64(i+30), []byte("fill packet capacity"))); err != nil {
+			t.Fatalf("QueueFrames(%d): %v", i, err)
+		}
+	}
+	before := client.writePacketNumbers[client.write.KeyPhase]
+	if err := client.QueueFrames(context.Background(), testFrameBlock(t, 40, []byte("reserved capacity"))); !errors.Is(err, ErrBackpressure) {
+		t.Fatalf("full data queue error = %v, want ErrBackpressure", err)
+	}
+	if got := client.writePacketNumbers[client.write.KeyPhase]; got != before {
+		t.Fatalf("packet number after backpressure = %d, want %d", got, before)
+	}
+
+	if _, err := client.NextPacket(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.QueueFrames(context.Background(), testFrameBlock(t, 41, []byte("progress after dequeue"))); err != nil {
+		t.Fatalf("QueueFrames after dequeue: %v", err)
+	}
+
+	byteLimited, _ := newApplicationPair(t)
+	defer byteLimited.Close()
+	large := bytes.Repeat([]byte{0x5a}, 40<<10)
+	if err := byteLimited.QueueFrames(context.Background(), testFrameBlock(t, 50, large)); err != nil {
+		t.Fatal(err)
+	}
+	before = byteLimited.writePacketNumbers[byteLimited.write.KeyPhase]
+	if err := byteLimited.QueueFrames(context.Background(), testFrameBlock(t, 51, large)); !errors.Is(err, ErrBackpressure) {
+		t.Fatalf("byte-limited queue error = %v, want ErrBackpressure", err)
+	}
+	if got := byteLimited.writePacketNumbers[byteLimited.write.KeyPhase]; got != before {
+		t.Fatalf("packet number after byte backpressure = %d, want %d", got, before)
+	}
+}
+
+func TestApplicationNextPacketCancellationAndCloseWakeWaiters(t *testing.T) {
+	app, err := NewApplication(testApplicationConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := app.NextPacket(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled NextPacket error = %v, want context.Canceled", err)
+	}
+
+	const waiters = 8
+	results := make(chan error, waiters)
+	for range waiters {
+		go func() {
+			_, err := app.NextPacket(context.Background())
+			results <- err
+		}()
+	}
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	for range waiters {
+		if err := <-results; !errors.Is(err, ErrClosed) {
+			t.Fatalf("waiting NextPacket error = %v, want ErrClosed", err)
+		}
+	}
+	if err := app.QueueFrames(context.Background(), testFrameBlock(t, 60, []byte("closed"))); !errors.Is(err, ErrClosed) {
+		t.Fatalf("QueueFrames after Close = %v, want ErrClosed", err)
+	}
+	if _, err := app.HandlePacket(context.Background(), time.Now(), []byte{0}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("HandlePacket after Close = %v, want ErrClosed", err)
+	}
+	requireZeroedApplicationMaterial(t, app)
+}
+
+func TestApplicationQueueDequeueCloseRace(t *testing.T) {
+	app, err := NewApplication(testApplicationConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		workers.Add(1)
+		go func(id int) {
+			defer workers.Done()
+			<-start
+			for n := 0; n < 100; n++ {
+				err := app.QueueFrames(ctx, testFrameBlock(t, uint64(70+id), []byte("race")))
+				if err != nil && !errors.Is(err, ErrBackpressure) && !errors.Is(err, ErrClosed) && !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("QueueFrames: %v", err)
+					return
+				}
+			}
+		}(i)
+	}
+	for range 4 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			for {
+				_, err := app.NextPacket(ctx)
+				if err == nil {
+					continue
+				}
+				if !errors.Is(err, ErrClosed) && !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("NextPacket: %v", err)
+				}
+				return
+			}
+		}()
+	}
+	close(start)
+	time.Sleep(10 * time.Millisecond)
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+	workers.Wait()
+}
+
+func testApplicationConfigs() (Config, Config) {
+	clientWrite := DirectionConfig{
+		Direction: 0,
+		Secret:    repeatedByte(0x11, 48),
+		Key:       repeatedByte(0x12, 32),
+		IV:        repeatedByte(0x13, 12),
+	}
+	clientRead := DirectionConfig{
+		Direction: 1,
+		Secret:    repeatedByte(0x21, 48),
+		Key:       repeatedByte(0x22, 32),
+		IV:        repeatedByte(0x23, 12),
+	}
+	limits := Limits{
+		MaxQueuedPackets:       8,
+		MaxQueuedBytes:         64 << 10,
+		ControlReservedPackets: 2,
+		ControlReservedBytes:   8 << 10,
+		ReplayWindow:           64,
+	}
+	return Config{
+			Suite:           registry.SuiteHybrid768AESGCM,
+			RouteInstanceID: 0x42,
+			HopLayer:        1,
+			Write:           cloneDirectionConfigForTest(clientWrite),
+			Read:            cloneDirectionConfigForTest(clientRead),
+			Limits:          limits,
+		}, Config{
+			Suite:           registry.SuiteHybrid768AESGCM,
+			RouteInstanceID: 0x42,
+			HopLayer:        1,
+			Write:           cloneDirectionConfigForTest(clientRead),
+			Read:            cloneDirectionConfigForTest(clientWrite),
+			Limits:          limits,
+		}
+}
+
+func testApplicationConfig() Config {
+	client, _ := testApplicationConfigs()
+	return client
+}
+
+func newApplicationPair(t *testing.T) (*Application, *Application) {
+	t.Helper()
+	clientConfig, relayConfig := testApplicationConfigs()
+	client, err := NewApplication(clientConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, err := NewApplication(relayConfig)
+	if err != nil {
+		client.Close()
+		t.Fatal(err)
+	}
+	return client, relay
+}
+
+func nextEncodedTestPacket(t *testing.T, app *Application, flowID uint64) ([]byte, protocol.FrameBlock) {
+	t.Helper()
+	want := testFrameBlock(t, flowID, []byte("packet payload"))
+	if err := app.QueueFrames(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := app.NextPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded, want
+}
+
+func testFrameBlock(t *testing.T, flowID uint64, payload []byte) protocol.FrameBlock {
+	t.Helper()
+	frame, err := protocol.NewStreamDataFrame(flowID, payload, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}
+}
+
+func cloneConfig(in Config) Config {
+	return Config{
+		Suite:           in.Suite,
+		RouteInstanceID: in.RouteInstanceID,
+		HopLayer:        in.HopLayer,
+		Write:           cloneDirectionConfigForTest(in.Write),
+		Read:            cloneDirectionConfigForTest(in.Read),
+		Limits:          in.Limits,
+		Random:          in.Random,
+	}
+}
+
+func cloneDirectionConfigForTest(in DirectionConfig) DirectionConfig {
+	return DirectionConfig{
+		Direction: in.Direction,
+		Secret:    append([]byte(nil), in.Secret...),
+		Key:       append([]byte(nil), in.Key...),
+		IV:        append([]byte(nil), in.IV...),
+	}
+}
+
+func cloneFrameBlockForTest(in protocol.FrameBlock) protocol.FrameBlock {
+	out := protocol.FrameBlock{Frames: make([]protocol.AuroraFrame, len(in.Frames))}
+	for i, frame := range in.Frames {
+		out.Frames[i] = protocol.AuroraFrame{
+			FrameType: frame.FrameType,
+			FlowID:    frame.FlowID,
+			Flags:     frame.Flags,
+			Payload:   append([]byte(nil), frame.Payload...),
+		}
+	}
+	return out
+}
+
+func zeroDirectionConfig(cfg *DirectionConfig) {
+	for _, b := range [][]byte{cfg.Secret, cfg.Key, cfg.IV} {
+		for i := range b {
+			b[i] = 0
+		}
+	}
+}
+
+func requireZeroedApplicationMaterial(t *testing.T, app *Application) {
+	t.Helper()
+	for _, b := range [][]byte{
+		app.write.Key,
+		app.write.StaticIV,
+		app.writeState.Material.AppSecret,
+		app.writeState.Material.Key,
+		app.writeState.Material.IV,
+		app.readState.Material.AppSecret,
+		app.readState.Material.Key,
+		app.readState.Material.IV,
+	} {
+		for _, v := range b {
+			if v != 0 {
+				t.Fatalf("application material was not zeroed")
+			}
+		}
+	}
+}
+
+func repeatedByte(value byte, length int) []byte {
+	return bytes.Repeat([]byte{value}, length)
+}

@@ -50,6 +50,62 @@ func TestRunPacketDuplexCancellationUnblocksIdlePumps(t *testing.T) {
 	requireGoroutinesSettled(t, baseline)
 }
 
+func TestRunPacketDuplexEndpointCloseUnblocksIdlePumps(t *testing.T) {
+	baseline := runtime.NumGoroutine()
+	reader := newBlockingReadCloser()
+	writer := &discardWriteCloser{}
+	endpoint := newDuplexTestEndpoint()
+	result := make(chan error, 1)
+	go func() {
+		result <- RunPacketDuplex(context.Background(), reader, writer, endpoint, discardFrameBlock, 64)
+	}()
+	awaitSignal(t, reader.started, "reader start")
+	awaitSignal(t, endpoint.nextStarted, "endpoint writer start")
+	if err := endpoint.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := awaitDuplexResult(t, result); !errors.Is(err, session.ErrClosed) {
+		t.Fatalf("RunPacketDuplex endpoint-close error = %v, want ErrClosed", err)
+	}
+	if reader.closeCalls.Load() != 1 || writer.closeCalls.Load() != 1 || endpoint.closeCalls.Load() != 2 {
+		t.Fatalf("endpoint-close cleanup counts reader=%d writer=%d endpoint=%d", reader.closeCalls.Load(), writer.closeCalls.Load(), endpoint.closeCalls.Load())
+	}
+	requireGoroutinesSettled(t, baseline)
+}
+
+func TestRunPacketDuplexEndpointCloseUnblocksCarrierWrite(t *testing.T) {
+	baseline := runtime.NumGoroutine()
+	reader := newBlockingReadCloser()
+	writer := newBlockingWriteCloser()
+	endpoint := newDuplexTestEndpoint()
+	endpoint.packets <- []byte("blocked packet")
+	result := make(chan error, 1)
+	go func() {
+		result <- RunPacketDuplex(context.Background(), reader, writer, endpoint, discardFrameBlock, 64)
+	}()
+	awaitSignal(t, writer.started, "blocked carrier write")
+	if err := endpoint.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, session.ErrClosed) {
+			t.Fatalf("RunPacketDuplex endpoint-close error = %v, want ErrClosed", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		_ = reader.Close()
+		_ = writer.Close()
+		<-result
+		t.Fatalf("endpoint close did not unblock the carrier write")
+	}
+	if reader.closeCalls.Load() != 1 || writer.closeCalls.Load() != 1 || endpoint.closeCalls.Load() != 2 {
+		t.Fatalf("endpoint-close cleanup counts reader=%d writer=%d endpoint=%d", reader.closeCalls.Load(), writer.closeCalls.Load(), endpoint.closeCalls.Load())
+	}
+	requireGoroutinesSettled(t, baseline)
+}
+
 func TestRunPacketDuplexCancellationUnblocksCarrierWrite(t *testing.T) {
 	baseline := runtime.NumGoroutine()
 	reader := newBlockingReadCloser()
@@ -191,6 +247,11 @@ func TestRunPacketDuplexRejectsInvalidArgumentsWithoutStartingPumps(t *testing.T
 		},
 		"typed nil endpoint": func() error {
 			return RunPacketDuplex(context.Background(), reader, writer, typedNilEndpoint, discardFrameBlock, 64)
+		},
+		"nil endpoint lifecycle": func() error {
+			endpoint := newDuplexTestEndpoint()
+			endpoint.closed = nil
+			return RunPacketDuplex(context.Background(), reader, writer, endpoint, discardFrameBlock, 64)
 		},
 		"nil handler": func() error {
 			return RunPacketDuplex(context.Background(), reader, writer, endpoint, nil, 64)
@@ -481,6 +542,17 @@ func (e *duplexTestEndpoint) HandlePacket(_ context.Context, _ time.Time, packet
 		return nil, nil
 	}
 	return e.handle(packet), nil
+}
+
+func (e *duplexTestEndpoint) Done() <-chan struct{} { return e.closed }
+
+func (e *duplexTestEndpoint) Err() error {
+	select {
+	case <-e.closed:
+		return session.ErrClosed
+	default:
+		return nil
+	}
 }
 
 func (e *duplexTestEndpoint) Close() error {

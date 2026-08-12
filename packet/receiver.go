@@ -24,6 +24,12 @@ type Receiver struct {
 	havePacket map[receiverPacketNumberSpace]bool
 }
 
+// ReceiverStats reports replay-window memory use.
+type ReceiverStats struct {
+	PacketNumberSpaces int
+	SeenPackets        int
+}
+
 type PreparedOpen struct {
 	owner *Receiver
 	key   receiverPacketNumberKey
@@ -84,6 +90,32 @@ func NewReceiver(cfg ReceiverConfig) *Receiver {
 	}
 }
 
+// Stats returns an atomic snapshot of replay-window memory use.
+func (r *Receiver) Stats() ReceiverStats {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return ReceiverStats{PacketNumberSpaces: len(r.havePacket), SeenPackets: len(r.seen)}
+}
+
+// ForgetPacketNumberSpace removes replay state for an erased key phase.
+func (r *Receiver) ForgetPacketNumberSpace(routeInstanceID uint64, hopLayer, direction, keyPhase uint8) {
+	space := receiverPacketNumberSpace{
+		RouteInstanceID: routeInstanceID,
+		HopLayer:        hopLayer,
+		Direction:       direction,
+		KeyPhase:        keyPhase,
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.highest, space)
+	delete(r.havePacket, space)
+	for key := range r.seen {
+		if key.Space == space {
+			delete(r.seen, key)
+		}
+	}
+}
+
 func (r *Receiver) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
 	prepared, err := r.PrepareOpen(pkt)
 	if err != nil {
@@ -99,6 +131,7 @@ func (r *Receiver) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
 }
 
 func (r *Receiver) OpenWithDirectionState(pkt AuroraPacket, state *DirectionState, suite uint64, now time.Time) (protocol.FrameBlock, error) {
+	previousPhase, drainDeadline, hadDrain := state.DrainInfo()
 	prepared, err := r.PrepareOpenWithDirectionState(pkt, state, suite, now)
 	if err != nil {
 		return protocol.FrameBlock{}, err
@@ -110,6 +143,9 @@ func (r *Receiver) OpenWithDirectionState(pkt AuroraPacket, state *DirectionStat
 		return protocol.FrameBlock{}, err
 	}
 	state.ExpireDrainAt(now)
+	if hadDrain && now.After(drainDeadline) && state.DrainUntil.IsZero() {
+		r.ForgetPacketNumberSpace(state.RouteInstanceID, state.HopLayer, state.Direction, previousPhase)
+	}
 	return block, nil
 }
 

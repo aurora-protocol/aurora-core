@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -25,5 +26,24 @@ func TestDecodeFrameBlockRejectsCountExceedingRemainingAtVectorBoundary(t *testi
 	}
 	if !strings.Contains(err.Error(), "frame count") {
 		t.Fatalf("frame block count failure was not reported at vector boundary: %v", err)
+	}
+}
+
+func TestDecodeFrameBlockRejectsResourceExhaustingFrameCountBeforeAllocation(t *testing.T) {
+	prefix, err := wire.EncodeVarint(4097)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := append(prefix, bytes.Repeat([]byte{0}, 4097)...)
+	_, err = DecodeFrameBlock(encoded)
+	if err == nil || !strings.Contains(err.Error(), "frame count exceeds limit") {
+		t.Fatalf("resource-exhausting frame count error = %v, want limit rejection", err)
+	}
+}
+
+func TestValidateFrameBlockRejectsResourceExhaustingFrameCount(t *testing.T) {
+	block := FrameBlock{Frames: make([]AuroraFrame, MaxFrameBlockFrames+1)}
+	if err := ValidateFrameBlock(block); err == nil || !strings.Contains(err.Error(), "frame count exceeds limit") {
+		t.Fatalf("resource-exhausting outbound frame count error = %v, want limit rejection", err)
 	}
 }

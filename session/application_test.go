@@ -58,6 +58,10 @@ func TestNewApplicationRejectsInvalidConfig(t *testing.T) {
 		"small replay window": func(cfg *Config) {
 			cfg.Limits.ReplayWindow = 63
 		},
+		"typed nil entropy source": func(cfg *Config) {
+			var source *blockingNonceReader
+			cfg.Entropy = source
+		},
 	}
 
 	for name, mutate := range cases {
@@ -711,7 +715,7 @@ func cloneConfig(in Config) Config {
 		Read:            cloneDirectionConfigForTest(in.Read),
 		Limits:          in.Limits,
 		Rekey:           in.Rekey,
-		Random:          in.Random,
+		Entropy:         in.Entropy,
 	}
 }
 

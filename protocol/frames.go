@@ -7,6 +7,9 @@ import (
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
+// MaxFrameBlockFrames bounds decoded frame metadata independently of packet bytes.
+const MaxFrameBlockFrames = 4096
+
 type AuroraFrame struct {
 	FrameType uint64
 	FlowID    uint64
@@ -44,6 +47,9 @@ func (b FrameBlock) EncodeTo(e *wire.Encoder) {
 func DecodeFrameBlock(encoded []byte) (FrameBlock, error) {
 	r := wire.NewReader(encoded)
 	count := r.ReadVectorCount("frame")
+	if count > MaxFrameBlockFrames {
+		return FrameBlock{}, fmt.Errorf("protocol: frame count exceeds limit %d", MaxFrameBlockFrames)
+	}
 	block := FrameBlock{Frames: make([]AuroraFrame, 0, count)}
 	for i := uint64(0); i < count; i++ {
 		block.Frames = append(block.Frames, DecodeAuroraFrame(r))
@@ -58,6 +64,9 @@ func DecodeFrameBlock(encoded []byte) (FrameBlock, error) {
 }
 
 func ValidateFrameBlock(block FrameBlock) error {
+	if len(block.Frames) > MaxFrameBlockFrames {
+		return fmt.Errorf("protocol: frame count exceeds limit %d", MaxFrameBlockFrames)
+	}
 	for _, frame := range block.Frames {
 		if err := ValidateFrameType(frame.FrameType); err != nil {
 			return err

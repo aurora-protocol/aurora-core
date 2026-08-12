@@ -279,7 +279,11 @@ type Config struct {
 	Write           DirectionConfig
 	Read            DirectionConfig
 	Limits          Limits
-	Random          io.Reader
+	Entropy         EntropySource
+}
+
+type EntropySource interface {
+	ReadContext(context.Context, []byte) error
 }
 ```
 
@@ -304,19 +308,22 @@ A nonzero `Limits` value must specify every field. Enforce
 The application owns cloned key material, a `packet.Receiver`, per-phase write
 packet numbers, an ordered queue of encoded packets and optional prepared
 update tokens, exact queued bytes, one buffered state-change channel, one
-closed channel, and one terminal error under a mutex.
+closed channel, lifecycle-owned drain timers, and one terminal error under a
+mutex.
 
 `QueueFrames` validates before locking, computes a conservative encoded packet
 reservation, checks context cancellation, and returns `ErrBackpressure`
 immediately when capacity is unavailable. It seals only while capacity is
-reserved, commits exact bytes, and signals readers. Data frames cannot consume
-control-reserved capacity. `NextPacket` waits for a packet, close, or context
+reserved, releases only that caller's reservation, commits exact bytes, and
+signals readers. Data frames cannot consume control-reserved capacity.
+`NextPacket` waits for a packet, close, or context
 cancellation; after a dequeue it returns an owned packet, releases exact
 capacity, and signals producers.
 
 - [ ] **Step 5: Implement strict packet opening and terminal close**
 
-`HandlePacket` rejects empty and over-limit input before decode, prepares an
+`HandlePacket` rejects empty and over-limit input before decode. Frame-block
+decode rejects more than 4,096 frames before allocating metadata. It prepares an
 authenticated open without committing replay, and returns owned application
 frames only after complete validation. Cryptographic failures do not advance
 replay. Authenticated key-control semantic failures become terminal, while
@@ -428,6 +435,14 @@ non-retryable configuration error instead of entering an update loop. Route,
 method, security, policy, and server events remain explicit callers of
 `InitiateKeyUpdate` at their ownership boundaries.
 
+Entropy injection uses a context-aware source contract. Caller cancellation or
+application close interrupts a pending read and releases its exact reservation.
+Once an update reaches carrier handoff, lifecycle-owned timers erase
+unacknowledged prior write keys and prior read keys at drain expiry even without
+later traffic; read expiry also removes the old packet-number space from replay
+maps. Retransmission remains optional, while lost acknowledgements are bounded
+by the same drain deadline.
+
 - [ ] **Step 6: Run packet and session verification**
 
 Run:
@@ -484,6 +499,8 @@ Define transport-owned interfaces to avoid importing the concrete session type:
 type PacketEndpoint interface {
 	NextPacket(context.Context) ([]byte, error)
 	HandlePacket(context.Context, time.Time, []byte) ([]protocol.FrameBlock, error)
+	Done() <-chan struct{}
+	Err() error
 	Close() error
 }
 
@@ -491,12 +508,13 @@ type FrameBlockHandler func(context.Context, protocol.FrameBlock) error
 ```
 
 `RunPacketDuplex` derives a cancellable context, creates one `RecordReader` and
-one `RecordWriter`, runs exactly one read pump and one write pump, cancels on
-the first non-context error, closes both carrier halves and the endpoint once,
+one `RecordWriter`, runs exactly one read pump and one write pump, and observes
+the endpoint's terminal lifecycle independently of both pumps. It cancels on
+the first non-context error, closes both carrier halves and the endpoint,
 waits for both pumps, and returns the first stable error. Closing the carrier
-halves is what unblocks an idle read or blocked write after cancellation. The
-reader calls the handler in record order and never retains a block; the writer
-emits complete records in packet order.
+halves unblocks an idle read or blocked write after cancellation or independent
+endpoint close. The reader calls the handler in record order and never retains
+a block; the writer emits complete records in packet order.
 
 - [ ] **Step 4: Run transport and session race tests**
 
@@ -552,7 +570,8 @@ Expected: FAIL because session evidence and benchmarks do not exist.
 Use paired sessions and fragmented `io.Pipe` wrappers, monotonic timing, the
 existing percentile helper, and exact atomic counters. Cancel at the configured
 deadline, join all goroutines, and reject results unless sent equals received
-and errors are zero. Do not serialize payload bytes into the result.
+and errors are zero. Latency starts before queue backpressure retries so it
+includes admission wait. Do not serialize payload bytes into the result.
 
 - [ ] **Step 4: Add representative benchmarks**
 

@@ -181,15 +181,19 @@ Queueing validates the complete frame block and reserves conservative byte and
 packet capacity before state mutation. Session-owned key controls cannot enter
 through the application-frame API. Packet sealing and packet-number advancement
 occur only while a reservation is held; a sealing failure releases it, and
-successful sealing commits the exact encoded size. A full queue returns typed
-backpressure; it never grows and never silently drops stream data. Default and
+successful sealing commits the exact encoded size. Each caller releases only
+its own reservation while concurrent control work may hold separate capacity.
+A full queue returns typed backpressure; it never grows and never silently
+drops stream data. Default and
 configurable age, encoded-byte, and packet-count triggers schedule a key update
 before accepting more application data. External route, method, security,
 policy, and server triggers invoke the same explicit update operation. Realtime
 datagram expiry is handled by the existing flow scheduler before queueing.
 
 Opening checks canonical encoding, route metadata, packet-number replay, AEAD,
-frame direction, and key-update consistency before emitting frames. Replay
+frame direction, and key-update consistency before emitting frames. Frame
+metadata is capped at 4,096 entries before slice allocation, independently of
+the encrypted packet byte limit. Replay
 acceptance is prepared after authentication but committed only after all
 semantic controls and any required response are ready. Temporary response
 capacity or entropy failures leave replay and key state unchanged so the exact
@@ -207,10 +211,17 @@ inserted ahead of it, and close or terminal failure destroys both ciphertext
 and staged key material. Key phases cannot wrap.
 
 The object has one lifecycle owner. Inbound processing is serialized separately
-from outbound update preparation, and entropy reads do not hold the main state
-lock. Close is idempotent, wakes blocked callers, zeroes owned plaintext, queued
-ciphertext, staged state, and key slices where practical, and guarantees that
-no operation can emit data after terminal failure.
+from outbound update preparation. Entropy sources are context-aware and
+serialized without holding the main state lock. The default source uses one
+process-wide broker so caller or session cancellation does not create blocked
+per-request workers. Authenticated key-control transactions pin the directional
+state they validated while entropy is acquired. Drain timers erase prior write
+and read keys after the bounded window even when the session is idle; delayed
+timer execution is reconciled before the next transition, and read-key expiry
+also purges that phase's replay-window maps. Close is idempotent, wakes blocked
+callers, zeroes owned plaintext, queued ciphertext, staged state, and key
+slices where practical, and guarantees that no operation can emit data after
+terminal failure.
 
 ### Relay Egress
 
@@ -267,7 +278,7 @@ then is removed from production builds.
 - Session cancellation closes the request body, response body, egress sockets,
   queues, and worker goroutines exactly once.
 - The relay caps concurrent sessions, flows per session, aggregate queued
-  bytes, record size, frame count, and destination I/O rate.
+  bytes, record size, frame count, replay spaces, and destination I/O rate.
 - A protocol failure becomes one terminal session error; secondary close errors
   never replace it.
 - Diagnostics use stable failure classes and counters only. They exclude

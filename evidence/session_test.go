@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/aurora-protocol/aurora-core/protocol"
 )
 
 func TestRunSessionRejectsInvalidOptions(t *testing.T) {
@@ -125,5 +127,60 @@ func TestSessionLatencyPercentilesUseNearestRank(t *testing.T) {
 	p50, p95 := sessionLatencyPercentiles([]time.Duration{5, 1, 4, 2, 3})
 	if p50 != 3 || p95 != 5 {
 		t.Fatalf("percentiles = %s/%s, want 3ns/5ns", p50, p95)
+	}
+}
+
+func TestQueueMessageLatencyStartsBeforeBackpressureRetries(t *testing.T) {
+	options := SessionOptions{
+		Duration:     5 * time.Second,
+		Messages:     1,
+		PayloadBytes: 32,
+		Concurrency:  1,
+		QueuePackets: 3,
+		QueueBytes:   128 << 10,
+	}
+	client, relay, err := newSessionEvidencePair(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	defer relay.Close()
+	state := newSessionEvidenceState(options)
+	fillFrame, err := protocol.NewStreamDataFrame(2, []byte{0x51}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroEvidenceBytes(fillFrame.Payload)
+	if err := client.QueueFrames(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{fillFrame}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- state.queueMessage(ctx, client, 0)
+	}()
+
+	var first time.Time
+	deadline := time.Now().Add(time.Second)
+	for first.IsZero() && time.Now().Before(deadline) {
+		state.mu.Lock()
+		first = state.sentAt[0]
+		state.mu.Unlock()
+		time.Sleep(100 * time.Microsecond)
+	}
+	if first.IsZero() {
+		t.Fatalf("queueMessage did not record a latency start")
+	}
+	time.Sleep(3 * time.Millisecond)
+	state.mu.Lock()
+	second := state.sentAt[0]
+	state.mu.Unlock()
+	if !second.Equal(first) {
+		t.Fatalf("backpressure retry moved latency start from %s to %s", first, second)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("queueMessage cancellation = %v, want context.Canceled", err)
 	}
 }

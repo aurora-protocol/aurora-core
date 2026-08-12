@@ -2,11 +2,8 @@ package session
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
-	"io"
-	"reflect"
 	"sync"
 	"time"
 
@@ -59,7 +56,7 @@ type Config struct {
 	Read            DirectionConfig
 	Limits          Limits
 	Rekey           RekeyPolicy
-	Random          io.Reader
+	Entropy         EntropySource
 }
 
 type Limits struct {
@@ -88,14 +85,17 @@ type Application struct {
 	mu            sync.Mutex
 	readMu        sync.Mutex
 	writeUpdateMu sync.Mutex
-	randomMu      sync.Mutex
 
 	suite           uint64
 	routeInstanceID uint64
 	hopLayer        uint8
 	limits          Limits
 	rekey           RekeyPolicy
-	random          io.Reader
+	entropy         EntropySource
+	entropyGate     chan struct{}
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
+	clock           applicationClock
 
 	write               packet.Protector
 	writeState          packet.DirectionState
@@ -105,13 +105,19 @@ type Application struct {
 	writePhaseStartedAt time.Time
 	writePhaseBytes     uint64
 
-	queue              []queuedPacket
-	queuedBytes        int
-	reservedPackets    int
-	reservedBytes      int
-	pendingWriteUpdate bool
-	peakQueuedPackets  int
-	peakQueuedBytes    int
+	queue                []queuedPacket
+	queuedBytes          int
+	reservedPackets      int
+	reservedBytes        int
+	pendingWriteUpdate   bool
+	peakQueuedPackets    int
+	peakQueuedBytes      int
+	writeDrainStop       func() bool
+	readDrainStop        func() bool
+	writeDrainGeneration uint64
+	readDrainGeneration  uint64
+	writeDrainPins       int
+	readDrainPins        int
 
 	changed  chan struct{}
 	closed   chan struct{}
@@ -119,6 +125,13 @@ type Application struct {
 }
 
 func NewApplication(cfg Config) (*Application, error) {
+	return newApplicationWithClock(cfg, systemApplicationClock{})
+}
+
+func newApplicationWithClock(cfg Config, clock applicationClock) (*Application, error) {
+	if clock == nil {
+		return nil, fmt.Errorf("session: nil application clock")
+	}
 	limits, err := normalizeLimits(cfg.Limits)
 	if err != nil {
 		return nil, err
@@ -147,10 +160,11 @@ func NewApplication(cfg Config) (*Application, error) {
 	if cfg.Write.Direction == cfg.Read.Direction {
 		return nil, fmt.Errorf("session: write and read directions must differ")
 	}
-	randomSource, err := normalizeRandom(cfg.Random)
+	entropy, err := normalizeEntropy(cfg.Entropy)
 	if err != nil {
 		return nil, err
 	}
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 
 	a := &Application{
 		suite:               cfg.Suite,
@@ -158,8 +172,12 @@ func NewApplication(cfg Config) (*Application, error) {
 		hopLayer:            cfg.HopLayer,
 		limits:              limits,
 		rekey:               rekey,
-		random:              randomSource,
-		writePhaseStartedAt: time.Now(),
+		entropy:             entropy,
+		entropyGate:         make(chan struct{}, 1),
+		lifecycleCtx:        lifecycleCtx,
+		lifecycleCancel:     lifecycleCancel,
+		clock:               clock,
+		writePhaseStartedAt: clock.Now(),
 		write: packet.Protector{
 			Suite:           cfg.Suite,
 			RouteInstanceID: cfg.RouteInstanceID,
@@ -176,6 +194,7 @@ func NewApplication(cfg Config) (*Application, error) {
 		changed: make(chan struct{}, 1),
 		closed:  make(chan struct{}),
 	}
+	a.entropyGate <- struct{}{}
 	return a, nil
 }
 
@@ -214,12 +233,14 @@ func (a *Application) NextPacket(ctx context.Context) ([]byte, error) {
 		if len(a.queue) > 0 {
 			queued := &a.queue[0]
 			if queued.update != nil {
-				if err := a.writeState.CommitPreparedUpdate(queued.update.prepared, time.Now()); err != nil {
+				now := a.clock.Now()
+				if err := a.writeState.CommitPreparedUpdate(queued.update.prepared, now); err != nil {
 					returnErr := a.failLocked(fmt.Errorf("session: commit emitted key update: %w", err))
 					a.mu.Unlock()
 					return nil, returnErr
 				}
-				a.activateWriteStateLocked()
+				a.activateWriteStateLocked(now)
+				a.scheduleWriteDrainLocked()
 				a.pendingWriteUpdate = false
 			}
 			encodedBytes := len(queued.encoded)
@@ -291,7 +312,7 @@ func (a *Application) HandlePacket(ctx context.Context, now time.Time, encoded [
 	defer preparedOpen.Destroy()
 	block := preparedOpen.TakeBlock()
 	defer func() { zeroFrameBlock(block) }()
-	blocks, err := a.handleKeyControlsLocked(now, pkt.KeyPhase, &block, func() error {
+	blocks, err := a.handleKeyControlsLocked(ctx, now, pkt.KeyPhase, &block, func() error {
 		return a.receiver.CommitPreparedOpen(&preparedOpen)
 	})
 	if err != nil {
@@ -300,7 +321,7 @@ func (a *Application) HandlePacket(ctx context.Context, now time.Time, encoded [
 		}
 		return nil, a.failLocked(err)
 	}
-	a.readState.ExpireDrainAt(now)
+	a.expireReadDrainLocked(now)
 	return blocks, nil
 }
 
@@ -313,6 +334,12 @@ func (a *Application) Close() error {
 	a.terminateLocked(ErrClosed)
 	return nil
 }
+
+// Done closes when the application becomes terminal.
+func (a *Application) Done() <-chan struct{} { return a.closed }
+
+// Err returns the terminal error after Done closes and nil while active.
+func (a *Application) Err() error { return a.terminalError() }
 
 // Stats returns an atomic snapshot. Peak values remain available after Close.
 func (a *Application) Stats() Stats {
@@ -334,6 +361,8 @@ func (a *Application) terminateLocked(err error) {
 		err = ErrClosed
 	}
 	a.terminal = err
+	a.lifecycleCancel()
+	a.stopDrainTimersLocked()
 	for i := range a.queue {
 		a.queue[i].Destroy()
 	}
@@ -390,7 +419,7 @@ func (a *Application) queueBlock(ctx context.Context, block protocol.FrameBlock,
 		if uint64(reservation) > a.rekey.MaxBytes {
 			return fmt.Errorf("session: packet reservation exceeds rekey byte limit")
 		}
-		if a.needsKeyUpdateLocked(time.Now(), reservation) {
+		if a.needsKeyUpdateLocked(a.clock.Now(), reservation) {
 			return errRekeyRequired
 		}
 	}
@@ -400,7 +429,12 @@ func (a *Application) queueBlock(ctx context.Context, block protocol.FrameBlock,
 	if !a.reserveLocked(reservation, control) {
 		return ErrBackpressure
 	}
-	defer a.releaseReservationLocked(reservation)
+	reservationHeld := true
+	defer func() {
+		if reservationHeld {
+			a.releaseReservationLocked(reservation)
+		}
+	}()
 
 	encoded, phase, nextPacket, sealedNext, err := a.sealCurrentWriteBlockLocked(block)
 	if err != nil {
@@ -417,6 +451,7 @@ func (a *Application) queueBlock(ctx context.Context, block protocol.FrameBlock,
 		return err
 	}
 	a.releaseReservationLocked(reservation)
+	reservationHeld = false
 	if err := a.enqueueEncodedLocked(&encoded, control); err != nil {
 		a.write.NextPacket = nextPacket
 		return err
@@ -605,20 +640,6 @@ func validateDirectionConfig(label string, cfg DirectionConfig, secretLength, ke
 		return fmt.Errorf("session: %s IV length %d, want 12", label, len(cfg.IV))
 	}
 	return nil
-}
-
-func normalizeRandom(randomSource io.Reader) (io.Reader, error) {
-	if randomSource == nil {
-		return rand.Reader, nil
-	}
-	value := reflect.ValueOf(randomSource)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		if value.IsNil() {
-			return nil, fmt.Errorf("session: nil random reader")
-		}
-	}
-	return randomSource, nil
 }
 
 func newDirectionState(routeInstanceID uint64, hopLayer uint8, cfg DirectionConfig) packet.DirectionState {

@@ -10,15 +10,20 @@ import (
 )
 
 var (
-	errNilDuplexContext  = errors.New("transport: nil duplex context")
-	errNilPacketEndpoint = errors.New("transport: nil packet endpoint")
-	errNilFrameHandler   = errors.New("transport: nil frame block handler")
+	errNilDuplexContext       = errors.New("transport: nil duplex context")
+	errNilPacketEndpoint      = errors.New("transport: nil packet endpoint")
+	errNilPacketEndpointDone  = errors.New("transport: nil packet endpoint lifecycle")
+	errPacketEndpointFinished = errors.New("transport: packet endpoint finished without an error")
+	errNilFrameHandler        = errors.New("transport: nil frame block handler")
 )
 
-// PacketEndpoint returns owned packets and must copy inbound bytes it retains.
+// PacketEndpoint returns owned packets, copies inbound bytes it retains, and
+// closes Done on terminal failure. Err returns that failure after Done closes.
 type PacketEndpoint interface {
 	NextPacket(context.Context) ([]byte, error)
 	HandlePacket(context.Context, time.Time, []byte) ([]protocol.FrameBlock, error)
+	Done() <-chan struct{}
+	Err() error
 	Close() error
 }
 
@@ -41,6 +46,10 @@ func RunPacketDuplex(ctx context.Context, readCarrier io.ReadCloser, writeCarrie
 	}
 	if handler == nil {
 		return errNilFrameHandler
+	}
+	endpointDone := endpoint.Done()
+	if endpointDone == nil {
+		return errNilPacketEndpointDone
 	}
 	if _, err := normalizeRecordMaximum(maxRecordBodyBytes); err != nil {
 		return err
@@ -68,6 +77,11 @@ func RunPacketDuplex(ctx context.Context, readCarrier io.ReadCloser, writeCarrie
 	select {
 	case <-ctx.Done():
 		triggerErr = ctx.Err()
+	case <-endpointDone:
+		triggerErr = endpoint.Err()
+		if triggerErr == nil {
+			triggerErr = errPacketEndpointFinished
+		}
 	case triggerErr = <-results:
 		collected = 1
 		if ctx.Err() != nil {

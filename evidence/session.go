@@ -261,11 +261,11 @@ func (s *sessionEvidenceState) queueMessage(ctx context.Context, endpoint *sessi
 	}
 	defer zeroEvidenceBytes(frame.Payload)
 	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}
+	started := time.Now()
+	s.mu.Lock()
+	s.sentAt[id] = started
+	s.mu.Unlock()
 	for {
-		started := time.Now()
-		s.mu.Lock()
-		s.sentAt[id] = started
-		s.mu.Unlock()
 		err := endpoint.QueueFrames(ctx, block)
 		if err == nil {
 			s.sent.Add(1)

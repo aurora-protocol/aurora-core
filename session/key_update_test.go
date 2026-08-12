@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"reflect"
 	"sync"
 	"testing"
@@ -131,7 +132,7 @@ func TestApplicationAutomaticRekeyTriggersBeforeDataQueueing(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			clientConfig, _ := testApplicationConfigs()
 			clientConfig.Rekey = tc.policy
-			clientConfig.Random = bytes.NewReader(repeatedByte(0xd2, 64))
+			clientConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0xd2, 64)))
 			client, err := NewApplication(clientConfig)
 			if err != nil {
 				t.Fatal(err)
@@ -209,7 +210,7 @@ func TestApplicationAutomaticallyUpdatesKeysAtConfiguredLimits(t *testing.T) {
 	for name, reachLimit := range cases {
 		t.Run(name, func(t *testing.T) {
 			cfg, _ := testApplicationConfigs()
-			cfg.Random = bytes.NewReader(repeatedByte(0x75, 64))
+			cfg.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0x75, 64)))
 			cfg.Rekey = RekeyPolicy{
 				MaxAge:     time.Hour,
 				MaxBytes:   1 << 20,
@@ -329,7 +330,7 @@ func TestApplicationKeyUpdateBackpressureAndExhaustionDoNotMutate(t *testing.T) 
 		before := client.writeState.Clone()
 		defer before.Destroy()
 		beforeNumbers := client.writePacketNumbers
-		beforeRandom := client.random.(*bytes.Reader).Len()
+		beforeRandom := remainingReaderEntropy(t, client.entropy)
 
 		err := client.InitiateKeyUpdate(context.Background(), 1)
 		if !errors.Is(err, ErrBackpressure) {
@@ -339,7 +340,7 @@ func TestApplicationKeyUpdateBackpressureAndExhaustionDoNotMutate(t *testing.T) 
 		if client.writePacketNumbers != beforeNumbers {
 			t.Fatalf("backpressure advanced packet numbers")
 		}
-		if client.random.(*bytes.Reader).Len() != beforeRandom {
+		if remainingReaderEntropy(t, client.entropy) != beforeRandom {
 			t.Fatalf("backpressure consumed key-update entropy")
 		}
 	})
@@ -351,7 +352,7 @@ func TestApplicationKeyUpdateBackpressureAndExhaustionDoNotMutate(t *testing.T) 
 		client.write.KeyPhase = 255
 		before := client.writeState.Clone()
 		defer before.Destroy()
-		beforeRandom := client.random.(*bytes.Reader).Len()
+		beforeRandom := remainingReaderEntropy(t, client.entropy)
 
 		if err := client.InitiateKeyUpdate(context.Background(), 1); err == nil {
 			t.Fatalf("phase-exhausted update succeeded")
@@ -360,14 +361,14 @@ func TestApplicationKeyUpdateBackpressureAndExhaustionDoNotMutate(t *testing.T) 
 		if len(client.queue) != 0 {
 			t.Fatalf("phase-exhausted update queued a packet")
 		}
-		if client.random.(*bytes.Reader).Len() != beforeRandom {
+		if remainingReaderEntropy(t, client.entropy) != beforeRandom {
 			t.Fatalf("phase exhaustion consumed key-update entropy")
 		}
 	})
 
 	t.Run("random source", func(t *testing.T) {
 		clientConfig, _ := testApplicationConfigs()
-		clientConfig.Random = bytes.NewReader(repeatedByte(0x71, 15))
+		clientConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0x71, 15)))
 		client, err := NewApplication(clientConfig)
 		if err != nil {
 			t.Fatal(err)
@@ -389,7 +390,8 @@ func TestApplicationKeyUpdateBackpressureAndExhaustionDoNotMutate(t *testing.T) 
 func TestApplicationKeyUpdateEntropyReadDoesNotHoldSessionLock(t *testing.T) {
 	clientConfig, _ := testApplicationConfigs()
 	random := newBlockingNonceReader()
-	clientConfig.Random = random
+	defer random.unblock()
+	clientConfig.Entropy = random
 	client, err := NewApplication(clientConfig)
 	if err != nil {
 		t.Fatal(err)
@@ -416,9 +418,79 @@ func TestApplicationKeyUpdateEntropyReadDoesNotHoldSessionLock(t *testing.T) {
 	if err := client.Close(); err != nil {
 		t.Fatal(err)
 	}
-	close(random.release)
-	if err := <-result; !errors.Is(err, ErrClosed) {
-		t.Fatalf("InitiateKeyUpdate after close = %v, want ErrClosed", err)
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("InitiateKeyUpdate after close = %v, want ErrClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("Close did not cancel blocked key-update entropy")
+	}
+}
+
+func TestApplicationKeyUpdateCancellationReleasesBlockedEntropyAndReservation(t *testing.T) {
+	clientConfig, _ := testApplicationConfigs()
+	random := newBlockingNonceReader()
+	defer random.unblock()
+	clientConfig.Entropy = random
+	client, err := NewApplication(clientConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- client.InitiateKeyUpdate(ctx, 1)
+	}()
+	<-random.started
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("InitiateKeyUpdate cancellation = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("context cancellation did not release blocked key-update entropy")
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if client.reservedPackets != 0 || client.reservedBytes != 0 || client.pendingWriteUpdate || len(client.queue) != 0 {
+		t.Fatalf("canceled entropy retained reservation or queued state: packets=%d bytes=%d pending=%v queue=%d", client.reservedPackets, client.reservedBytes, client.pendingWriteUpdate, len(client.queue))
+	}
+}
+
+func TestApplicationConcurrentReservationsReleaseOnlyTheirOwner(t *testing.T) {
+	clientConfig, _ := testApplicationConfigs()
+	random := newBlockingNonceReader()
+	defer random.unblock()
+	clientConfig.Entropy = random
+	client, err := NewApplication(clientConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	wantBytes, err := keyUpdateReservation(client.writeState, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- client.InitiateKeyUpdate(context.Background(), 1)
+	}()
+	<-random.started
+	if err := client.QueueFrames(context.Background(), testFrameBlock(t, 131, []byte("concurrent reservation"))); err != nil {
+		t.Fatal(err)
+	}
+	client.mu.Lock()
+	gotPackets, gotBytes := client.reservedPackets, client.reservedBytes
+	client.mu.Unlock()
+	if gotPackets != 1 || gotBytes != wantBytes {
+		t.Fatalf("remaining reservation = %d packets/%d bytes, want 1/%d", gotPackets, gotBytes, wantBytes)
+	}
+	random.unblock()
+	if err := <-result; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -704,14 +776,14 @@ func TestApplicationKeyUpdateACKBackpressureLeavesReplayRetryable(t *testing.T) 
 	}
 
 	updatePacket := nextApplicationPacket(t, client)
-	beforeRandom := relay.random.(*bytes.Reader).Len()
+	beforeRandom := remainingReaderEntropy(t, relay.entropy)
 	if _, err := relay.HandlePacket(context.Background(), time.Now(), updatePacket); !errors.Is(err, ErrBackpressure) {
 		t.Fatalf("ACK backpressure error = %v, want ErrBackpressure", err)
 	}
 	if relay.terminal != nil || relay.readState.KeyPhase != 0 {
 		t.Fatalf("retryable ACK backpressure terminated or mutated the session")
 	}
-	if relay.random.(*bytes.Reader).Len() != beforeRandom {
+	if remainingReaderEntropy(t, relay.entropy) != beforeRandom {
 		t.Fatalf("ACK backpressure consumed acknowledgement entropy")
 	}
 	_ = nextApplicationPacket(t, relay)
@@ -925,9 +997,9 @@ func TestApplicationConsumesRepeatedValidKeyUpdateRequests(t *testing.T) {
 
 func TestApplicationKeyUpdateACKRandomFailureLeavesReplayRetryable(t *testing.T) {
 	clientConfig, relayConfig := testApplicationConfigs()
-	clientConfig.Random = bytes.NewReader(repeatedByte(0x91, 256))
+	clientConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0x91, 256)))
 	relayRandom := bytes.NewBuffer(repeatedByte(0xa1, 15))
-	relayConfig.Random = relayRandom
+	relayConfig.Entropy = newReaderEntropy(relayRandom)
 	client, err := NewApplication(clientConfig)
 	if err != nil {
 		t.Fatal(err)
@@ -960,11 +1032,276 @@ func TestApplicationKeyUpdateACKRandomFailureLeavesReplayRetryable(t *testing.T)
 	}
 }
 
+func TestApplicationLostKeyUpdateACKExpiresIdleDrainAndReplayState(t *testing.T) {
+	clock := newManualApplicationClock(time.Now())
+	clientConfig, relayConfig := testApplicationConfigs()
+	clientConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0x91, 256)))
+	relayConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0xa1, 256)))
+	client, err := newApplicationWithClock(clientConfig, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, err := newApplicationWithClock(relayConfig, clock)
+	if err != nil {
+		client.Close()
+		t.Fatal(err)
+	}
+	defer client.Close()
+	defer relay.Close()
+
+	if err := client.InitiateKeyUpdate(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	updatePacket := nextApplicationPacket(t, client)
+	if got, err := relay.HandlePacket(context.Background(), clock.Now(), updatePacket); err != nil || got != nil {
+		t.Fatalf("HandlePacket(update) = %#v, %v; want nil, nil", got, err)
+	}
+	if client.writeState.DrainUntil.IsZero() || relay.readState.DrainUntil.IsZero() {
+		t.Fatalf("key update did not start both drain windows")
+	}
+	before := relay.receiver.Stats()
+	if before.PacketNumberSpaces != 1 || before.SeenPackets != 1 {
+		t.Fatalf("receiver state before expiry = %+v, want one packet in one space", before)
+	}
+
+	clock.Advance(packet.MaxDrainWindow + time.Nanosecond)
+	if !client.writeState.DrainUntil.IsZero() || !relay.readState.DrainUntil.IsZero() {
+		t.Fatalf("idle drain retained expired traffic keys")
+	}
+	if after := relay.receiver.Stats(); after.PacketNumberSpaces != 0 || after.SeenPackets != 0 {
+		t.Fatalf("receiver state after expiry = %+v, want empty", after)
+	}
+}
+
+func TestApplicationDelayedReadDrainPurgesReplayBeforeNextUpdate(t *testing.T) {
+	clock := newManualApplicationClock(time.Now())
+	clientConfig, relayConfig := testApplicationConfigs()
+	clientConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0x91, 256)))
+	relayConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0xa1, 256)))
+	client, err := newApplicationWithClock(clientConfig, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, err := newApplicationWithClock(relayConfig, clock)
+	if err != nil {
+		client.Close()
+		t.Fatal(err)
+	}
+	defer client.Close()
+	defer relay.Close()
+
+	if err := client.InitiateKeyUpdate(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.HandlePacket(context.Background(), clock.Now(), nextApplicationPacket(t, client)); err != nil {
+		t.Fatal(err)
+	}
+	clock.AdvanceWithoutCallbacks(packet.MaxDrainWindow + time.Nanosecond)
+	if err := client.InitiateKeyUpdate(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.HandlePacket(context.Background(), clock.Now(), nextApplicationPacket(t, client)); err != nil {
+		t.Fatal(err)
+	}
+	if got := relay.receiver.Stats(); got.PacketNumberSpaces != 1 || got.SeenPackets != 1 {
+		t.Fatalf("receiver state after delayed drain and next update = %+v, want one current space", got)
+	}
+}
+
+func TestApplicationConsecutiveReadUpdatesPurgeSupersededReplaySpace(t *testing.T) {
+	clock := newManualApplicationClock(time.Now())
+	clientConfig, relayConfig := testApplicationConfigs()
+	clientConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0x91, 256)))
+	relayConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0xa1, 256)))
+	client, err := newApplicationWithClock(clientConfig, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, err := newApplicationWithClock(relayConfig, clock)
+	if err != nil {
+		client.Close()
+		t.Fatal(err)
+	}
+	defer client.Close()
+	defer relay.Close()
+
+	if err := client.InitiateKeyUpdate(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.HandlePacket(context.Background(), clock.Now(), nextApplicationPacket(t, client)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.HandlePacket(context.Background(), clock.Now(), nextApplicationPacket(t, relay)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.InitiateKeyUpdate(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.HandlePacket(context.Background(), clock.Now(), nextApplicationPacket(t, client)); err != nil {
+		t.Fatal(err)
+	}
+	if got := relay.receiver.Stats(); got.PacketNumberSpaces != 1 || got.SeenPackets != 1 {
+		t.Fatalf("receiver state after consecutive updates = %+v, want one current space", got)
+	}
+}
+
+func TestApplicationDrainTimerDefersWhileAuthenticatedUpdateWaitsForEntropy(t *testing.T) {
+	clock := newManualApplicationClock(time.Now())
+	clientConfig, relayConfig := testApplicationConfigs()
+	clientConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0x91, 256)))
+	relayConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0xa1, 256)))
+	client, err := newApplicationWithClock(clientConfig, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, err := newApplicationWithClock(relayConfig, clock)
+	if err != nil {
+		client.Close()
+		t.Fatal(err)
+	}
+	defer client.Close()
+	defer relay.Close()
+
+	if err := client.InitiateKeyUpdate(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	oldWrite := cloneApplicationProtector(client.write)
+	defer destroyApplicationProtector(&oldWrite)
+	updatePacket := nextApplicationPacket(t, client)
+	updateBlock := openApplicationPacket(t, oldWrite, updatePacket)
+	defer zeroFrameBlock(updateBlock)
+	oldWrite.NextPacket = decodeApplicationPacket(t, updatePacket).PacketNumber + 1
+	duplicatePacket := sealApplicationPacket(t, &oldWrite, updateBlock)
+	if _, err := relay.HandlePacket(context.Background(), clock.Now(), updatePacket); err != nil {
+		t.Fatal(err)
+	}
+
+	blockedEntropy := newBlockingNonceReader()
+	defer blockedEntropy.unblock()
+	relay.mu.Lock()
+	relay.entropy = blockedEntropy
+	relay.mu.Unlock()
+	receivedAt := clock.Now()
+	result := make(chan error, 1)
+	go func() {
+		_, err := relay.HandlePacket(context.Background(), receivedAt, duplicatePacket)
+		result <- err
+	}()
+	awaitSessionSignal(t, blockedEntropy.started, "duplicate update entropy")
+	clock.Advance(packet.MaxDrainWindow + time.Nanosecond)
+	blockedEntropy.unblock()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("authenticated duplicate update after delayed entropy: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("duplicate update did not finish after entropy release")
+	}
+	if relay.terminal != nil {
+		t.Fatalf("drain timer made authenticated duplicate terminal: %v", relay.terminal)
+	}
+}
+
+func TestApplicationDrainTimerDefersWriteACKWhileEntropyBlocks(t *testing.T) {
+	clock := newManualApplicationClock(time.Now())
+	clientConfig, relayConfig := testApplicationConfigs()
+	clientConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0x91, 256)))
+	relayConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0xa1, 256)))
+	client, err := newApplicationWithClock(clientConfig, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, err := newApplicationWithClock(relayConfig, clock)
+	if err != nil {
+		client.Close()
+		t.Fatal(err)
+	}
+	defer client.Close()
+	defer relay.Close()
+
+	if err := relay.InitiateKeyUpdate(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	_ = nextApplicationPacket(t, relay)
+	update := protocol.KeyUpdate{
+		RouteInstanceID: client.routeInstanceID,
+		HopLayer:        client.hopLayer,
+		Direction:       client.write.Direction,
+		OldKeyPhase:     0,
+		NewKeyPhase:     1,
+		UpdateNonce:     repeatedByte(0xd3, 16),
+		AckRequired:     true,
+		UpdateReason:    1,
+	}
+	ack := protocol.KeyUpdateACK{
+		RouteInstanceID: relay.routeInstanceID,
+		HopLayer:        relay.hopLayer,
+		AckedDirection:  relay.write.Direction,
+		AckedKeyPhase:   relay.writeState.KeyPhase,
+		AckNonce:        repeatedByte(0xd4, 16),
+	}
+	updateFrame := keyUpdateBlock(t, update).Frames[0]
+	ackFrame := keyUpdateACKBlock(t, ack).Frames[0]
+	write := cloneApplicationProtector(client.write)
+	defer destroyApplicationProtector(&write)
+	encoded := sealApplicationPacket(t, &write, protocol.FrameBlock{Frames: []protocol.AuroraFrame{updateFrame, ackFrame}})
+
+	blockedEntropy := newBlockingNonceReader()
+	defer blockedEntropy.unblock()
+	relay.mu.Lock()
+	relay.entropy = blockedEntropy
+	relay.mu.Unlock()
+	receivedAt := clock.Now()
+	result := make(chan error, 1)
+	go func() {
+		_, err := relay.HandlePacket(context.Background(), receivedAt, encoded)
+		result <- err
+	}()
+	awaitSessionSignal(t, blockedEntropy.started, "mixed control entropy")
+	clock.Advance(packet.MaxDrainWindow + time.Nanosecond)
+	blockedEntropy.unblock()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("authenticated write acknowledgement after delayed entropy: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("mixed controls did not finish after entropy release")
+	}
+	if relay.terminal != nil || !relay.writeState.DrainUntil.IsZero() || relay.readState.KeyPhase != 1 {
+		t.Fatalf("drain timer invalidated mixed controls: terminal=%v write_drain=%s read_phase=%d", relay.terminal, relay.writeState.DrainUntil, relay.readState.KeyPhase)
+	}
+}
+
+func TestApplicationCloseCancelsDrainTimers(t *testing.T) {
+	clock := newManualApplicationClock(time.Now())
+	clientConfig, _ := testApplicationConfigs()
+	clientConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0x91, 256)))
+	client, err := newApplicationWithClock(clientConfig, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.InitiateKeyUpdate(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	_ = nextApplicationPacket(t, client)
+	if got := clock.ActiveTimers(); got != 1 {
+		t.Fatalf("active drain timers = %d, want 1", got)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := clock.ActiveTimers(); got != 0 {
+		t.Fatalf("active drain timers after Close = %d, want 0", got)
+	}
+}
+
 func newKeyUpdateApplicationPair(t *testing.T) (*Application, *Application) {
 	t.Helper()
 	clientConfig, relayConfig := testApplicationConfigs()
-	clientConfig.Random = bytes.NewReader(repeatedByte(0x91, 256))
-	relayConfig.Random = bytes.NewReader(repeatedByte(0xa1, 256))
+	clientConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0x91, 256)))
+	relayConfig.Entropy = newReaderEntropy(bytes.NewReader(repeatedByte(0xa1, 256)))
 	client, err := NewApplication(clientConfig)
 	if err != nil {
 		t.Fatal(err)
@@ -1100,9 +1437,14 @@ func requireTerminalApplication(t *testing.T, app *Application) {
 }
 
 type blockingNonceReader struct {
-	started chan struct{}
-	release chan struct{}
-	once    sync.Once
+	started     chan struct{}
+	release     chan struct{}
+	once        sync.Once
+	releaseOnce sync.Once
+}
+
+func (r *blockingNonceReader) unblock() {
+	r.releaseOnce.Do(func() { close(r.release) })
 }
 
 func newBlockingNonceReader() *blockingNonceReader {
@@ -1112,11 +1454,119 @@ func newBlockingNonceReader() *blockingNonceReader {
 	}
 }
 
-func (r *blockingNonceReader) Read(p []byte) (int, error) {
+func (r *blockingNonceReader) ReadContext(ctx context.Context, p []byte) error {
 	r.once.Do(func() { close(r.started) })
-	<-r.release
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-r.release:
+	}
 	for i := range p {
 		p[i] = 0xd1
 	}
-	return len(p), nil
+	return nil
+}
+
+type readerEntropy struct{ reader io.Reader }
+
+func newReaderEntropy(reader io.Reader) *readerEntropy {
+	return &readerEntropy{reader: reader}
+}
+
+func (r *readerEntropy) ReadContext(ctx context.Context, p []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := io.ReadFull(r.reader, p); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+func remainingReaderEntropy(t *testing.T, source EntropySource) int {
+	t.Helper()
+	reader, ok := source.(*readerEntropy)
+	if !ok {
+		t.Fatalf("entropy source type = %T, want *readerEntropy", source)
+	}
+	remaining, ok := reader.reader.(interface{ Len() int })
+	if !ok {
+		t.Fatalf("entropy reader type = %T, want Len", reader.reader)
+	}
+	return remaining.Len()
+}
+
+type manualApplicationClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	nextID uint64
+	timers map[uint64]manualApplicationTimer
+}
+
+type manualApplicationTimer struct {
+	deadline time.Time
+	callback func()
+}
+
+func newManualApplicationClock(now time.Time) *manualApplicationClock {
+	return &manualApplicationClock{now: now, timers: make(map[uint64]manualApplicationTimer)}
+}
+
+func (c *manualApplicationClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *manualApplicationClock) AfterFunc(delay time.Duration, callback func()) func() bool {
+	c.mu.Lock()
+	c.nextID++
+	id := c.nextID
+	c.timers[id] = manualApplicationTimer{deadline: c.now.Add(delay), callback: callback}
+	c.mu.Unlock()
+	return func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if _, ok := c.timers[id]; !ok {
+			return false
+		}
+		delete(c.timers, id)
+		return true
+	}
+}
+
+func (c *manualApplicationClock) Advance(elapsed time.Duration) {
+	c.AdvanceWithoutCallbacks(elapsed)
+	c.RunDueTimers()
+}
+
+func (c *manualApplicationClock) AdvanceWithoutCallbacks(elapsed time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(elapsed)
+	c.mu.Unlock()
+}
+
+func (c *manualApplicationClock) RunDueTimers() {
+	for {
+		var callback func()
+		c.mu.Lock()
+		for id, timer := range c.timers {
+			if !timer.deadline.After(c.now) {
+				callback = timer.callback
+				delete(c.timers, id)
+				break
+			}
+		}
+		c.mu.Unlock()
+		if callback == nil {
+			return
+		}
+		callback()
+	}
+}
+
+func (c *manualApplicationClock) ActiveTimers() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.timers)
 }

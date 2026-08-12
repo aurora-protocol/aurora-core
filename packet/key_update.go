@@ -301,6 +301,14 @@ func (s *DirectionState) ExpireDrainAt(now time.Time) {
 	s.expireDrain(now)
 }
 
+// DrainInfo reports the prior key phase and its erasure deadline.
+func (s *DirectionState) DrainInfo() (previousKeyPhase uint8, deadline time.Time, ok bool) {
+	if s.DrainUntil.IsZero() {
+		return 0, time.Time{}, false
+	}
+	return s.previousKeyPhase, s.DrainUntil, true
+}
+
 // PendingKeyUpdateRetransmission returns material owned by the caller when ok is true.
 func (s *DirectionState) PendingKeyUpdateRetransmission(now time.Time) (protocol.KeyUpdate, KeyMaterial, bool) {
 	s.expireDrain(now)

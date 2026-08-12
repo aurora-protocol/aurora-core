@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/packet"
@@ -74,7 +73,7 @@ func (a *Application) InitiateKeyUpdate(ctx context.Context, reason uint64) erro
 	}
 	a.mu.Unlock()
 
-	nonce, randomErr := a.readNonce()
+	nonce, randomErr := a.readNonce(ctx)
 	defer zeroBytes(nonce)
 
 	a.mu.Lock()
@@ -97,7 +96,7 @@ func (a *Application) InitiateKeyUpdate(ctx context.Context, reason uint64) erro
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	now := time.Now()
+	now := a.clock.Now()
 	prepared, err := a.writeState.PrepareUpdate(a.suite, nonce, true, reason, now)
 	if err != nil {
 		return err
@@ -197,7 +196,7 @@ func (c *keyControls) Destroy() {
 	*c = keyControls{}
 }
 
-func (a *Application) handleKeyControlsLocked(now time.Time, packetKeyPhase uint8, block *protocol.FrameBlock, commitReplay func() error) ([]protocol.FrameBlock, error) {
+func (a *Application) handleKeyControlsLocked(ctx context.Context, now time.Time, packetKeyPhase uint8, block *protocol.FrameBlock, commitReplay func() error) ([]protocol.FrameBlock, error) {
 	controls, err := scanKeyControls(block)
 	if err != nil {
 		return nil, err
@@ -208,6 +207,14 @@ func (a *Application) handleKeyControlsLocked(now time.Time, packetKeyPhase uint
 	}
 	if controls.ack != nil && packetKeyPhase != a.readState.KeyPhase {
 		return nil, fmt.Errorf("session: key update acknowledgement is not under the current read phase")
+	}
+	if controls.ack != nil {
+		a.pinWriteDrainLocked(now)
+		defer a.unpinWriteDrainLocked()
+	}
+	if controls.update != nil {
+		a.pinReadDrainLocked(now)
+		defer a.unpinReadDrainLocked()
 	}
 
 	var reservation int
@@ -242,7 +249,7 @@ func (a *Application) handleKeyControlsLocked(now time.Time, packetKeyPhase uint
 		}
 		reservationHeld = true
 		a.mu.Unlock()
-		generatedNonce, randomErr := a.readNonce()
+		generatedNonce, randomErr := a.readNonce(ctx)
 		a.mu.Lock()
 		if a.terminal != nil {
 			reservationHeld = false
@@ -276,7 +283,12 @@ func (a *Application) handleKeyControlsLocked(now time.Time, packetKeyPhase uint
 	haveUpdateResult := false
 	var readCandidate packet.DirectionState
 	haveReadCandidate := false
+	var supersededReplayPhase uint8
+	haveSupersededReplayPhase := false
+	readPhaseAdvanced := false
 	if controls.update != nil {
+		readPhase := a.readState.KeyPhase
+		supersededReplayPhase, _, haveSupersededReplayPhase = a.readState.DrainInfo()
 		readCandidate = a.readState.Clone()
 		haveReadCandidate = true
 		defer func() {
@@ -288,6 +300,7 @@ func (a *Application) handleKeyControlsLocked(now time.Time, packetKeyPhase uint
 		if err != nil {
 			return nil, fmt.Errorf("session: apply received key update: %w", err)
 		}
+		readPhaseAdvanced = readCandidate.KeyPhase != readPhase
 		haveUpdateResult = true
 		defer func() {
 			if haveUpdateResult {
@@ -343,12 +356,17 @@ func (a *Application) handleKeyControlsLocked(now time.Time, packetKeyPhase uint
 		a.writeState = writeCandidate
 		haveWriteCandidate = false
 		previous.Destroy()
+		a.scheduleWriteDrainLocked()
 	}
 	if haveReadCandidate {
 		previous := a.readState
 		a.readState = readCandidate
 		haveReadCandidate = false
 		previous.Destroy()
+		if readPhaseAdvanced && haveSupersededReplayPhase {
+			a.receiver.ForgetPacketNumberSpace(a.routeInstanceID, a.hopLayer, a.readState.Direction, supersededReplayPhase)
+		}
+		a.scheduleReadDrainLocked()
 	}
 	if len(controls.frames) == 0 {
 		return nil, nil
@@ -505,7 +523,7 @@ func (a *Application) validateWriteProtectorLocked() error {
 	return nil
 }
 
-func (a *Application) activateWriteStateLocked() {
+func (a *Application) activateWriteStateLocked(now time.Time) {
 	key := append([]byte(nil), a.writeState.Material.Key...)
 	iv := append([]byte(nil), a.writeState.Material.IV...)
 	zeroBytes(a.write.Key)
@@ -515,18 +533,7 @@ func (a *Application) activateWriteStateLocked() {
 	a.write.StaticIV = iv
 	a.write.NextPacket = a.writePacketNumbers[a.write.KeyPhase]
 	a.writePhaseBytes = 0
-	a.writePhaseStartedAt = time.Now()
-}
-
-func (a *Application) readNonce() ([]byte, error) {
-	a.randomMu.Lock()
-	defer a.randomMu.Unlock()
-	nonce := make([]byte, keyUpdateNonceBytes)
-	if _, err := io.ReadFull(a.random, nonce); err != nil {
-		zeroBytes(nonce)
-		return nil, err
-	}
-	return nonce, nil
+	a.writePhaseStartedAt = now
 }
 
 func zeroFrameBlock(block protocol.FrameBlock) {

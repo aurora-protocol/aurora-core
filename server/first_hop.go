@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -44,7 +45,69 @@ type FirstHopOptions struct {
 	CoverOrigin        http.Handler
 	MaxRecordBodyBytes uint32
 	FrameHandler       transport.FrameBlockHandler
+	SessionFactory     FirstHopSessionFactory
 	PostHeaderTimeout  time.Duration
+}
+
+// FirstHopSessionApplication is the authenticated packet endpoint and backward frame queue for one carrier.
+type FirstHopSessionApplication interface {
+	transport.PacketEndpoint
+	QueueFrames(context.Context, protocol.FrameBlock) error
+}
+
+// FirstHopSessionFactory constructs a carrier-scoped frame handler and owner after policy selection.
+type FirstHopSessionFactory func(context.Context, FirstHopSessionApplication, protocol.PolicyAccept) (transport.FrameBlockHandler, io.Closer, error)
+
+// ErrFirstHopUnsupportedPersonality rejects authenticated policies without an implemented data plane.
+var ErrFirstHopUnsupportedPersonality = errors.New("server: unsupported first-hop tunnel personality")
+
+// FirstHopProxySessionOptions defines destination policy, I/O dependencies, and per-session limits.
+type FirstHopProxySessionOptions struct {
+	ExitPolicy    relay.ExitPolicy
+	RateLimit     relay.ExitRateLimit
+	UDPConfirmTTL uint32
+	Dialer        relay.ContextDialer
+	Resolver      relay.IPResolver
+	Limits        relay.SocketEgressLimits
+}
+
+// NewFirstHopProxySessionFactory creates one bounded socket egress per authenticated session.
+func NewFirstHopProxySessionFactory(options FirstHopProxySessionOptions) (FirstHopSessionFactory, error) {
+	if isNilFirstHopInterface(options.Dialer) {
+		return nil, fmt.Errorf("server: first-hop proxy dialer is required")
+	}
+	if isNilFirstHopInterface(options.Resolver) {
+		return nil, fmt.Errorf("server: first-hop proxy resolver is required")
+	}
+	if err := relay.ValidateSocketEgressLimits(options.Limits); err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, application FirstHopSessionApplication, selected protocol.PolicyAccept) (transport.FrameBlockHandler, io.Closer, error) {
+		if selected.SelectedTunnelPersonality != registry.PersonalityProxyFlow {
+			return nil, nil, ErrFirstHopUnsupportedPersonality
+		}
+		egress, err := relay.NewSocketEgress(ctx, relay.SocketEgressOptions{
+			Sink:     application,
+			Policy:   options.ExitPolicy,
+			Dialer:   options.Dialer,
+			Resolver: options.Resolver,
+			Limits:   options.Limits,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		exitSession, err := relay.NewExitSession(egress, application, relay.ExitSessionOptions{
+			Policy:             options.ExitPolicy,
+			RateLimit:          options.RateLimit,
+			UDPConfirmTTL:      options.UDPConfirmTTL,
+			QueueRetryInterval: options.Limits.QueueRetryInterval,
+		})
+		if err != nil {
+			_ = egress.Close()
+			return nil, nil, err
+		}
+		return exitSession.HandleFrameBlock, exitSession, nil
+	}, nil
 }
 
 // FirstHopHandler admits at most the first request on each HTTP/2 connection.
@@ -59,10 +122,12 @@ type FirstHopHandler struct {
 	coverOrigin        http.Handler
 	maxRecordBodyBytes uint32
 	frameHandler       transport.FrameBlockHandler
+	sessionFactory     FirstHopSessionFactory
 	preHeaderTimeout   time.Duration
 	postHeaderTimeout  time.Duration
 	begin              firstHopBeginFunc
 	finish             firstHopFinishFunc
+	sessionAdmission   func(context.Context) (func(), error)
 	sessionMu          sync.Mutex
 	sessions           map[uint64]context.CancelFunc
 	nextSessionID      uint64
@@ -70,7 +135,7 @@ type FirstHopHandler struct {
 }
 
 type firstHopBeginFunc func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error)
-type firstHopFinishFunc func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, error)
+type firstHopFinishFunc func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error)
 
 type firstHopConnectionContextKey struct{}
 
@@ -122,8 +187,8 @@ func NewFirstHopHandler(options FirstHopOptions) (*FirstHopHandler, error) {
 	if maximum > maximumFirstHopRecordBodyBytes {
 		return nil, fmt.Errorf("server: first-hop record maximum exceeds unsigned-24 limit")
 	}
-	if options.FrameHandler == nil {
-		return nil, fmt.Errorf("server: first-hop frame handler is required")
+	if (options.FrameHandler == nil) == (options.SessionFactory == nil) {
+		return nil, fmt.Errorf("server: exactly one first-hop frame handler source is required")
 	}
 	postHeaderTimeout := options.PostHeaderTimeout
 	if postHeaderTimeout == 0 {
@@ -149,14 +214,15 @@ func NewFirstHopHandler(options FirstHopOptions) (*FirstHopHandler, error) {
 		coverOrigin:        options.CoverOrigin,
 		maxRecordBodyBytes: maximum,
 		frameHandler:       options.FrameHandler,
+		sessionFactory:     options.SessionFactory,
 		preHeaderTimeout:   defaultFirstHopPreHeaderTimeout,
 		postHeaderTimeout:  postHeaderTimeout,
 		sessions:           make(map[uint64]context.CancelFunc),
 	}
 	handler.begin = handler.driver.Begin
-	handler.finish = func(ctx context.Context, state *handshake.RelayHandshake, capsule1 []byte, nowUnix uint64) ([]byte, transport.PacketEndpoint, error) {
-		capsule2, application, _, err := state.Finish(ctx, capsule1, nowUnix)
-		return capsule2, application, err
+	handler.finish = func(ctx context.Context, state *handshake.RelayHandshake, capsule1 []byte, nowUnix uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
+		capsule2, application, policy, err := state.Finish(ctx, capsule1, nowUnix)
+		return capsule2, application, policy, err
 	}
 	return handler, nil
 }
@@ -360,6 +426,14 @@ func (h *FirstHopHandler) ServeHTTP(w http.ResponseWriter, request *http.Request
 		serveCoverRequest(w, request, h.origin, h.coverOrigin)
 		return
 	}
+	if h.sessionAdmission != nil {
+		release, err := h.sessionAdmission(sessionContext)
+		if err != nil || release == nil {
+			h.servePreHeaderFailure(w, request)
+			return
+		}
+		defer release()
+	}
 	sessionID, registered := h.registerSession(cancel)
 	if !registered {
 		h.servePreHeaderFailure(w, request)
@@ -516,7 +590,7 @@ func (h *FirstHopHandler) serveCandidate(ctx context.Context, cancel context.Can
 		return err
 	}
 	defer zeroFirstHopBytes(capsule1Record)
-	capsule2Record, application, err := h.finish(postHeaderContext, handshakeState, capsule1Record, uint64(time.Now().Unix()))
+	capsule2Record, application, policy, err := h.finish(postHeaderContext, handshakeState, capsule1Record, uint64(time.Now().Unix()))
 	if err != nil {
 		zeroFirstHopBytes(capsule2Record)
 		if !isNilFirstHopInterface(application) {
@@ -530,8 +604,42 @@ func (h *FirstHopHandler) serveCandidate(ctx context.Context, cancel context.Can
 		abortFirstHopAfterHeader(cancel)
 		return fmt.Errorf("server: first-hop Finish returned nil application")
 	}
-	defer zeroFirstHopBytes(capsule2Record)
 	defer application.Close()
+	frameHandler := h.frameHandler
+	if h.sessionFactory != nil {
+		sessionApplication, ok := application.(FirstHopSessionApplication)
+		if !ok || isNilFirstHopInterface(sessionApplication) {
+			zeroFirstHopBytes(capsule2Record)
+			abortFirstHopAfterHeader(cancel)
+			return fmt.Errorf("server: first-hop application does not support session frames")
+		}
+		var sessionCloser io.Closer
+		var factoryErr error
+		frameHandler, sessionCloser, factoryErr = h.sessionFactory(ctx, sessionApplication, cloneFirstHopPolicyAccept(policy))
+		if factoryErr != nil {
+			zeroFirstHopBytes(capsule2Record)
+			if !isNilFirstHopInterface(sessionCloser) {
+				_ = sessionCloser.Close()
+			}
+			abortFirstHopAfterHeader(cancel)
+			return factoryErr
+		}
+		if frameHandler == nil || isNilFirstHopInterface(sessionCloser) {
+			zeroFirstHopBytes(capsule2Record)
+			if !isNilFirstHopInterface(sessionCloser) {
+				_ = sessionCloser.Close()
+			}
+			abortFirstHopAfterHeader(cancel)
+			return fmt.Errorf("server: first-hop session factory returned invalid handler ownership")
+		}
+		defer sessionCloser.Close()
+	}
+	if err := postHeaderContext.Err(); err != nil {
+		zeroFirstHopBytes(capsule2Record)
+		abortFirstHopAfterHeader(cancel)
+		return err
+	}
+	defer zeroFirstHopBytes(capsule2Record)
 	if err := recordWriter.Write(capsule2Record); err != nil {
 		abortFirstHopAfterHeader(cancel)
 		return err
@@ -554,7 +662,27 @@ func (h *FirstHopHandler) serveCandidate(ctx context.Context, cancel context.Can
 		return err
 	}
 	writeStream := &firstHopResponseWriteCloser{writer: w, controller: controller, cancel: cancel}
-	return transport.RunPacketDuplex(ctx, request.Body, writeStream, application, h.frameHandler, h.maxRecordBodyBytes)
+	return transport.RunPacketDuplex(ctx, request.Body, writeStream, application, frameHandler, h.maxRecordBodyBytes)
+}
+
+func cloneFirstHopPolicyAccept(policy protocol.PolicyAccept) protocol.PolicyAccept {
+	policy.FallbackMethods = append([]uint64(nil), policy.FallbackMethods...)
+	if policy.VirtualAddressAssignment != nil {
+		assignment := *policy.VirtualAddressAssignment
+		assignment.LeaseID = append([]byte(nil), assignment.LeaseID...)
+		assignment.ClientAddress = append([]byte(nil), assignment.ClientAddress...)
+		assignment.DNSServerHint = append([]byte(nil), assignment.DNSServerHint...)
+		policy.VirtualAddressAssignment = &assignment
+	}
+	if len(policy.Extensions) != 0 {
+		extensions := make([]protocol.Extension, len(policy.Extensions))
+		for i, extension := range policy.Extensions {
+			extensions[i] = extension
+			extensions[i].Body = append([]byte(nil), extension.Body...)
+		}
+		policy.Extensions = extensions
+	}
+	return policy
 }
 
 func commitFirstHopCarrierHeaders(ctx context.Context, writer http.ResponseWriter, header http.Header, status int, committed *atomic.Bool) error {

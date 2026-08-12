@@ -906,7 +906,7 @@ Reviewer one focuses on cryptographic ordering, transcript/binding correctness, 
 
 For each finding, add a failing regression test, confirm red, implement the minimal fix, rerun focused and full gates, commit, and repeat reviews until both report no P0-P3 findings.
 
-- [ ] **Step 7: Integrate and verify remote CI**
+- [x] **Step 7: Integrate and verify remote CI**
 
 ```bash
 git status --short
@@ -916,6 +916,6 @@ git push -u origin feature/live-first-hop
 
 Fast-forward into `main` only after local gates and both reviews are clean, preserve the main checkout's untracked route test, push `main`, and watch the exact GitHub Actions run through completion. Expected: macOS, Ubuntu, Windows, race/coverage/fuzz/benchmark/live-load/vulnerability jobs all green.
 
-- [ ] **Step 8: Record the next production boundary**
+- [x] **Step 8: Record the next production boundary**
 
 Update the active plan state only after remote CI is green: mark live TLS/HTTP binding and randomized first-hop handshake complete, then move Linux relay egress to in progress. Do not claim a production-ready end-to-end service until process configuration, real destination egress, impairment/release gates, and Swift clients are integrated.

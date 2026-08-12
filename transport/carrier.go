@@ -333,6 +333,11 @@ func validateVisibleHeaders(header http.Header) error {
 	return nil
 }
 
+// ValidateVisibleHeaders rejects carrier headers that expose forbidden wire markers.
+func ValidateVisibleHeaders(header http.Header) error {
+	return validateVisibleHeaders(header)
+}
+
 func containsForbiddenWireMarker(s string) bool {
 	lower := strings.ToLower(s)
 	for _, marker := range forbiddenWireMarkers {

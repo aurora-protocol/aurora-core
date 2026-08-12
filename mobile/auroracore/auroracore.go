@@ -22,12 +22,16 @@ import "C"
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
 	"unsafe"
 
+	"github.com/aurora-protocol/aurora-core/client"
 	"github.com/aurora-protocol/aurora-core/issuerd"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/server"
+	"github.com/aurora-protocol/aurora-core/session"
 )
 
 // Operation codes for AuroraCoreCall. Kept stable as part of the ABI contract.
@@ -39,6 +43,12 @@ const (
 	opDecodeIssueResponse    = 5
 	opDecodeSpendResponse    = 6
 	opParseAdmissionProof    = 7
+	opBeginNativeSession     = 8
+	opCompleteNativeSession  = 9
+	opCloseNativeSession     = 10
+	opQueueFrameBlock        = 11
+	opNextPacket             = 12
+	opHandlePacket           = 13
 )
 
 // Result status bytes.
@@ -70,15 +80,25 @@ type parsedMetadata struct {
 //
 //export AuroraCoreCall
 func AuroraCoreCall(op C.int, in *C.uint8_t, inLen C.int, arg C.uint64_t, outLen *C.int) *C.uint8_t {
+	if outLen == nil {
+		return nil
+	}
 	var input []byte
-	if in != nil && inLen > 0 {
+	if inLen < 0 || (inLen > 0 && in == nil) {
+		return cBytes([]byte{statusError}, outLen)
+	}
+	if inLen > 0 {
 		input = C.GoBytes(unsafe.Pointer(in), inLen)
 	}
+	defer zeroNativeBytes(input)
 	status, payload := dispatch(int(op), input, uint64(arg))
 	result := make([]byte, 1+len(payload))
 	result[0] = status
 	copy(result[1:], payload)
-	return cBytes(result, outLen)
+	output := cBytes(result, outLen)
+	zeroNativeBytes(payload)
+	zeroNativeBytes(result)
+	return output
 }
 
 //export AuroraCoreFree
@@ -161,6 +181,80 @@ func dispatch(op int, in []byte, arg uint64) (byte, []byte) {
 			return statusError, nil
 		}
 		return statusOK, encoded
+	case opBeginNativeSession:
+		if arg != 0 {
+			return statusError, nil
+		}
+		provisioning, err := client.ParseNativeProvisioning(in, time.Now())
+		if err != nil {
+			return statusError, nil
+		}
+		work, err := nativeSessions.begin(provisioning)
+		if err != nil {
+			return statusError, nil
+		}
+		encoded, err := work.encode()
+		handle := work.Handle
+		zeroNativeIssuerWork(&work)
+		if err != nil {
+			_ = nativeSessions.close(handle)
+			return statusError, nil
+		}
+		return statusOK, encoded
+	case opCompleteNativeSession:
+		if arg != 0 {
+			return statusError, nil
+		}
+		handle, issuerResponse, err := decodeNativeHandlePayload(in, maximumNativeIssuerResponse)
+		if err != nil || nativeSessions.complete(handle, issuerResponse) != nil {
+			return statusError, nil
+		}
+		return statusOK, nil
+	case opCloseNativeSession:
+		if len(in) != 0 || arg == 0 || nativeSessions.close(arg) != nil {
+			return statusError, nil
+		}
+		return statusOK, nil
+	case opQueueFrameBlock:
+		if arg != 0 {
+			return statusError, nil
+		}
+		handle, block, err := decodeNativeHandlePayload(in, maximumNativeSessionPacket)
+		if err != nil {
+			return statusError, nil
+		}
+		if err := nativeSessions.queueFrameBlock(handle, block); err != nil {
+			if errors.Is(err, session.ErrBackpressure) {
+				return statusConflict, nil
+			}
+			return statusError, nil
+		}
+		return statusOK, nil
+	case opNextPacket:
+		if len(in) != 0 || arg == 0 {
+			return statusError, nil
+		}
+		packet, err := nativeSessions.nextPacket(arg)
+		if errors.Is(err, session.ErrNoPacket) {
+			return statusOK, nil
+		}
+		if err != nil {
+			return statusError, nil
+		}
+		return statusOK, packet
+	case opHandlePacket:
+		if arg != 0 {
+			return statusError, nil
+		}
+		handle, packet, err := decodeNativeHandlePayload(in, maximumNativeSessionPacket)
+		if err != nil {
+			return statusError, nil
+		}
+		blocks, err := nativeSessions.handlePacket(handle, packet)
+		if err != nil {
+			return statusError, nil
+		}
+		return statusOK, blocks
 	default:
 		return statusError, nil
 	}

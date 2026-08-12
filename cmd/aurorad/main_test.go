@@ -18,7 +18,7 @@ import (
 
 func TestReadinessCheckReportsRunnableServer(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--readiness-check"}, &stdout, &stderr)
+	code := run([]string{"harness", "--readiness-check"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run returned %d stderr=%s", code, stderr.String())
 	}
@@ -39,7 +39,7 @@ func TestReadinessCheckReportsRunnableServer(t *testing.T) {
 
 func TestRunRejectsEmptyListenAddress(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--listen", ""}, &stdout, &stderr)
+	code := run([]string{"harness", "--listen", ""}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("run accepted empty listen address stdout=%s", stdout.String())
 	}
@@ -62,7 +62,7 @@ func TestRunTunPacketModeOpensLinuxTUNDevice(t *testing.T) {
 	defer restoreListen()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := run([]string{"harness",
 		"--packet-mode", "tun",
 		"--tun-device", "/tmp/aurora-tun",
 		"--tun-iface", "aurtest0",
@@ -136,7 +136,7 @@ func TestRunTLSModeServesHTTPSForAppleClients(t *testing.T) {
 	defer restoreListen()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := run([]string{"harness",
 		"--listen", "0.0.0.0:9443",
 		"--tls-cert", "/tmp/aurora-cert.pem",
 		"--tls-key", "/tmp/aurora-key.pem",
@@ -163,25 +163,29 @@ func TestREADMEPublicLinuxCommandUsesRequiredRuntimeGates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var command string
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.Contains(line, "go run ./cmd/aurorad --listen 0.0.0.0:9443") {
-			command = line
-			break
-		}
-	}
-	if command == "" {
+	command := string(data)
+	if !strings.Contains(command, "go run ./cmd/aurorad serve --listen 0.0.0.0:9443") {
 		t.Fatal("README is missing the public Linux aurorad command")
 	}
 	for _, want := range []string{
 		"--tls-cert",
 		"--tls-key",
 		"--cover-origin-url",
-		"--spent-token-cache",
-		"--packet-mode tun",
+		"--relay-descriptor",
+		"--trusted-descriptor-hash",
+		"--cover-template",
+		"--template-authority-key",
+		"--classical-signer-key",
+		"--pq-signer-key",
+		"--access-hints",
+		"--token-verification-key",
+		"--hint-spent-cache",
+		"--token-spent-cache",
+		"--bootstrap-cache",
+		"--max-sessions",
 	} {
 		if !strings.Contains(command, want) {
-			t.Fatalf("README public Linux aurorad command missing %q: %s", want, command)
+			t.Fatalf("README public Linux aurorad command missing %q", want)
 		}
 	}
 }
@@ -193,7 +197,7 @@ func TestRunRejectsNonLoopbackTLSWithoutPersistentSpentTokenCache(t *testing.T) 
 	defer restoreListen()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := run([]string{"harness",
 		"--listen", "0.0.0.0:9443",
 		"--tls-cert", "/tmp/aurora-cert.pem",
 		"--tls-key", "/tmp/aurora-key.pem",
@@ -214,7 +218,7 @@ func TestRunRejectsNonLoopbackTLSWithoutCoverOriginURL(t *testing.T) {
 	defer restoreListen()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := run([]string{"harness",
 		"--listen", "0.0.0.0:9443",
 		"--tls-cert", "/tmp/aurora-cert.pem",
 		"--tls-key", "/tmp/aurora-key.pem",
@@ -243,7 +247,7 @@ func TestRunRejectsNonLoopbackTLSWithoutTUNPacketMode(t *testing.T) {
 	defer restoreListen()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := run([]string{"harness",
 		"--listen", "0.0.0.0:9443",
 		"--tls-cert", "/tmp/aurora-cert.pem",
 		"--tls-key", "/tmp/aurora-key.pem",
@@ -260,7 +264,7 @@ func TestRunRejectsNonLoopbackTLSWithoutTUNPacketMode(t *testing.T) {
 
 func TestRunRejectsNonLoopbackPlainHTTP(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--listen", "0.0.0.0:9443"}, &stdout, &stderr)
+	code := run([]string{"harness", "--listen", "0.0.0.0:9443"}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("run accepted non-loopback HTTP stdout=%s", stdout.String())
 	}
@@ -295,7 +299,7 @@ func TestRunCoverOriginURLServesReverseProxiedCover(t *testing.T) {
 	defer restoreListen()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--cover-origin-url", "https://cover.example"}, &stdout, &stderr)
+	code := run([]string{"harness", "--cover-origin-url", "https://cover.example"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run returned %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -309,7 +313,7 @@ func TestRunOpensPersistentSpentTokenCacheWhenConfigured(t *testing.T) {
 	defer restoreListen()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--spent-token-cache", path}, &stdout, &stderr)
+	code := run([]string{"harness", "--spent-token-cache", path}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run returned %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -328,7 +332,7 @@ func TestRunOpensPersistentSpentTokenCacheWhenConfigured(t *testing.T) {
 
 func TestRunRejectsUnknownPacketMode(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--packet-mode", "bogus"}, &stdout, &stderr)
+	code := run([]string{"harness", "--packet-mode", "bogus"}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("run accepted unknown packet mode stdout=%s", stdout.String())
 	}

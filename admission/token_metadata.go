@@ -79,6 +79,12 @@ type BlindRSA2048Verifier struct {
 	TokenVerificationKeyDER []byte
 }
 
+// ValidateBlindRSA2048VerificationKey validates a complete public verification key before it is used by a relay.
+func ValidateBlindRSA2048VerificationKey(encoded []byte) error {
+	_, err := parseBlindRSA2048PublicKey(encoded)
+	return err
+}
+
 func (v BlindRSA2048Verifier) VerifyBlindRSA2048(proof protocol.AdmissionProof) error {
 	return VerifyBlindRSA2048(proof, v.TokenVerificationKeyDER)
 }

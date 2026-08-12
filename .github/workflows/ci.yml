@@ -119,7 +119,7 @@ jobs:
           set -euo pipefail
           go build -o "$RUNNER_TEMP/aurorad" ./cmd/aurorad
           go build -o "$RUNNER_TEMP/auroractl" ./cmd/auroractl
-          "$RUNNER_TEMP/aurorad" --listen 127.0.0.1:19443 >"$RUNNER_TEMP/aurorad.log" 2>&1 &
+          "$RUNNER_TEMP/aurorad" harness --listen 127.0.0.1:19443 >"$RUNNER_TEMP/aurorad.log" 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
           ready=false

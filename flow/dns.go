@@ -11,7 +11,10 @@ import (
 	"github.com/aurora-protocol/aurora-core/registry"
 )
 
-var ErrNegativeCached = errors.New("flow: negative DNS response cached")
+var (
+	ErrNegativeCached = errors.New("flow: negative DNS response cached")
+	ErrUnknownFakeIP  = errors.New("flow: unknown fake IP mapping")
+)
 
 type DNSForwarderOptions struct {
 	FakeIPCIDR string
@@ -112,23 +115,9 @@ func (f *DNSForwarder) OpenFakeIPUDPFlow(flowID uint64, domain string, answers [
 }
 
 func (f *DNSForwarder) OpenMappedFakeIPUDPFlow(flowID uint64, fakeIP string, port uint16, now uint64) (protocol.FlowOpen, SyntheticAnswer, error) {
-	ip := net.ParseIP(fakeIP).To4()
-	if ip == nil {
-		return protocol.FlowOpen{}, SyntheticAnswer{}, fmt.Errorf("flow: fake IP must be IPv4")
-	}
-	mapping, ok := f.allocator.MappingForFakeIP(ip.String())
-	if !ok {
-		return protocol.FlowOpen{}, SyntheticAnswer{}, fmt.Errorf("flow: unknown fake IP mapping")
-	}
-	targetKind, targetHost, err := firstIPTarget(mapping.Answers)
+	targetKind, targetHost, answer, err := f.mappedFakeIPTarget(fakeIP)
 	if err != nil {
 		return protocol.FlowOpen{}, SyntheticAnswer{}, err
-	}
-	answer := SyntheticAnswer{
-		Domain:           mapping.Domain,
-		FakeIP:           ip.String(),
-		NameBindingID:    bindingID(mapping.Domain, mapping.Answers),
-		DNSAnswerSetHash: DNSAnswerSetHash(mapping.Answers),
 	}
 	open := protocol.FlowOpen{
 		FlowOpenVersion:  registry.Version20,
@@ -144,6 +133,49 @@ func (f *DNSForwarder) OpenMappedFakeIPUDPFlow(flowID uint64, fakeIP string, por
 		PriorityClass:    PriorityRealtime,
 	}
 	return open, answer, nil
+}
+
+// OpenMappedFakeIPTCPFlow resolves a locally assigned fake IP to its bound target for a TCP flow.
+func (f *DNSForwarder) OpenMappedFakeIPTCPFlow(flowID uint64, fakeIP string, port uint16) (protocol.FlowOpen, SyntheticAnswer, error) {
+	targetKind, targetHost, answer, err := f.mappedFakeIPTarget(fakeIP)
+	if err != nil {
+		return protocol.FlowOpen{}, SyntheticAnswer{}, err
+	}
+	open := protocol.FlowOpen{
+		FlowOpenVersion:  registry.Version20,
+		FlowID:           flowID,
+		FlowKind:         FlowKindTCPStream,
+		TargetKind:       targetKind,
+		TargetHost:       targetHost,
+		TargetPort:       port,
+		UDPFQDNMode:      UDPFQDNNoneIPAuthoritative,
+		NameBindingID:    append([]byte(nil), answer.NameBindingID...),
+		DNSAnswerSetHash: append([]byte(nil), answer.DNSAnswerSetHash...),
+		LocalBindingMode: LocalBindingTransparentFakeIP,
+		PriorityClass:    PriorityInteractive,
+	}
+	return open, answer, nil
+}
+
+func (f *DNSForwarder) mappedFakeIPTarget(fakeIP string) (uint8, []byte, SyntheticAnswer, error) {
+	ip := net.ParseIP(fakeIP).To4()
+	if ip == nil {
+		return 0, nil, SyntheticAnswer{}, fmt.Errorf("%w: %q", ErrUnknownFakeIP, fakeIP)
+	}
+	mapping, ok := f.allocator.MappingForFakeIP(ip.String())
+	if !ok {
+		return 0, nil, SyntheticAnswer{}, fmt.Errorf("%w: %s", ErrUnknownFakeIP, ip.String())
+	}
+	targetKind, targetHost, err := firstIPTarget(mapping.Answers)
+	if err != nil {
+		return 0, nil, SyntheticAnswer{}, err
+	}
+	return targetKind, targetHost, SyntheticAnswer{
+		Domain:           mapping.Domain,
+		FakeIP:           ip.String(),
+		NameBindingID:    bindingID(mapping.Domain, mapping.Answers),
+		DNSAnswerSetHash: DNSAnswerSetHash(mapping.Answers),
+	}, nil
 }
 
 func (f *DNSForwarder) AnswerLocalAQuery(flowID uint64, query []byte, answers []string, now uint64) (LocalDNSResult, error) {

@@ -1,6 +1,7 @@
 package handshake
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -130,6 +131,50 @@ func TestRelayDriverProductionRequiresDurableReplayCaches(t *testing.T) {
 	config.BootstrapCache = admission.NewMemoryReplayCache()
 	if _, err := newRelayDriverForTest(config); err != nil {
 		t.Fatalf("explicit test relay configuration rejected memory caches: %v", err)
+	}
+}
+
+func TestRelayDriverDeploymentReturnsBoundVerifiedDeployment(t *testing.T) {
+	config := validRelayDriverConfig(t, time.Now())
+	driver, err := NewRelayDriver(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment := driver.Deployment()
+	if !deployment.Valid() || deployment.Suite() != config.Deployment.Suite() || deployment.Method() != config.Deployment.Method() ||
+		!bytes.Equal(deployment.DescriptorHash(), config.Deployment.DescriptorHash()) || !bytes.Equal(deployment.TemplateHash(), config.Deployment.TemplateHash()) {
+		t.Fatalf("relay driver returned unexpected deployment: %+v", deployment)
+	}
+	if (*RelayDriver)(nil).Deployment().Valid() {
+		t.Fatal("nil relay driver returned a verified deployment")
+	}
+}
+
+func TestStaticAccessHintResolverOwnsAndMatchesCredentials(t *testing.T) {
+	credential := validClientDriverConfig(t, time.Now()).AccessHint
+	issuerID := append([]byte(nil), credential.HintIssuerID...)
+	relayBucketID := append([]byte(nil), credential.RelayBucketID...)
+	hintSelector := append([]byte(nil), credential.HintSelector...)
+	wantSecret := append([]byte(nil), credential.HintSecret...)
+	resolver, err := NewStaticAccessHintResolver([]admission.AccessHintCredential{credential})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential.HintSecret[0] ^= 0xff
+	resolved, err := resolver.ResolveAccessHint(context.Background(), issuerID, relayBucketID, credential.HintEpochID, hintSelector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(resolved.HintSecret, wantSecret) {
+		t.Fatal("resolver retained caller access hint secret")
+	}
+	resolved.HintSecret[0] ^= 0xff
+	again, err := resolver.ResolveAccessHint(context.Background(), issuerID, relayBucketID, credential.HintEpochID, hintSelector)
+	if err != nil || !bytes.Equal(again.HintSecret, wantSecret) {
+		t.Fatal("resolver returned aliased access hint credential")
+	}
+	if _, err := resolver.ResolveAccessHint(context.Background(), issuerID, relayBucketID, credential.HintEpochID+1, hintSelector); err == nil {
+		t.Fatal("resolver accepted unrelated access hint lookup")
 	}
 }
 

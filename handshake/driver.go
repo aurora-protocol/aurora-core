@@ -107,8 +107,12 @@ type ClientDriver struct {
 	sessionLimits  session.Limits
 	rekey          session.RekeyPolicy
 	entropy        session.EntropySource
-	hintUseMu      sync.Mutex
-	hintUses       uint16
+	hintUse        *clientAccessHintUse
+}
+
+type clientAccessHintUse struct {
+	mu   sync.Mutex
+	uses uint16
 }
 
 type RelayDriver struct {
@@ -183,11 +187,20 @@ func newClientDriverAt(config ClientDriverConfig, now time.Time) (*ClientDriver,
 		sessionLimits:  config.SessionLimits,
 		rekey:          config.Rekey,
 		entropy:        config.Entropy,
+		hintUse:        &clientAccessHintUse{},
 	}, nil
 }
 
 func NewRelayDriver(config RelayDriverConfig) (*RelayDriver, error) {
 	return newRelayDriver(config, time.Now(), true)
+}
+
+// Deployment returns the verified deployment bound to this relay driver.
+func (d *RelayDriver) Deployment() trust.VerifiedRelayDeployment {
+	if d == nil {
+		return trust.VerifiedRelayDeployment{}
+	}
+	return d.deployment
 }
 
 func newRelayDriverForTest(config RelayDriverConfig) (*RelayDriver, error) {

@@ -874,11 +874,11 @@ GOCACHE=/private/tmp/aurora-first-hop-cache go vet ./...
 
 Install or invoke `honnef.co/go/tools/cmd/staticcheck@2026.1`, then run `staticcheck -checks 'all,-U1000' ./...`. Expected: no finding; `U1000` remains separately audited because this repository intentionally retains conformance helpers that are not called by production packages.
 
-- [ ] **Step 2: Run focused stress and fuzz campaigns**
+- [x] **Step 2: Run focused stress and fuzz campaigns**
 
 Run 100 non-race and 50 race repetitions covering connection claims, cancellation, replay, wrong Finished, and application handoff. Run at least 10 seconds each for existing record fuzz targets and any new strict Prelude/Capsule decoder fuzz target. Expected: no failure, race, panic, unbounded allocation, or goroutine leak evidence.
 
-- [ ] **Step 3: Run security and portability gates**
+- [x] **Step 3: Run security and portability gates**
 
 Run:
 
@@ -892,11 +892,11 @@ GOOS=android GOARCH=arm64 CGO_ENABLED=0 GOCACHE=/private/tmp/aurora-first-hop-ca
 
 Inspect public errors/logs and response bodies for payloads, keys, proofs, nonces, targets, client addresses, or differentiated pre-authentication failures. Expected: no reachable vulnerability and no sensitive output.
 
-- [ ] **Step 4: Measure coverage and performance**
+- [x] **Step 4: Measure coverage and performance**
 
 Generate repository and package coverage; require the repository floor to remain at least 70% and the new handshake, HTTP/2 carrier, gate, and trust files to have focused success and failure coverage. Run benchmarks five times and compare retained bytes and allocations against the pre-optimization commit. Fix avoidable per-record buffering or retained handshake objects without weakening ownership.
 
-- [ ] **Step 5: Run hygiene scans**
+- [x] **Step 5: Run hygiene scans**
 
 Search all changed core files and commits for protocol specification version text, external inspiration-project names, user paths or identity, unfinished-work markers, fixed carrier paths, protocol markers in visible headers, and AI attribution. Expected: no match except required protocol-domain strings already defined by canonical formulas.
 

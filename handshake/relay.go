@@ -529,14 +529,14 @@ func (d *RelayDriver) signAndPadRelayPrelude1(ctx context.Context, entropy conte
 	if err != nil {
 		return protocol.CoverPrelude1{}, nil, err
 	}
-	placeholderFinalizer := func(value protocol.CoverPrelude1) (protocol.CoverPrelude1, []byte, error) {
+	sizingFinalizer := func(value protocol.CoverPrelude1) (protocol.CoverPrelude1, []byte, error) {
 		value.ServerPreludeSignatureClassical = make([]byte, classicalSize)
 		value.ServerPreludeSignaturePQ = make([]byte, pqSize)
 		encoded, err := protocol.Encode(value)
 		return value, encoded, err
 	}
-	padded, placeholderRecord, err := padCoverPrelude1(entropy, input, template.PreludeEnvelope.MinResponseBodySize, template.PreludeEnvelope.MaxResponseBodySize, placeholderFinalizer)
-	zeroBindingBytes(placeholderRecord)
+	padded, sizingRecord, err := padCoverPrelude1(entropy, input, template.PreludeEnvelope.MinResponseBodySize, template.PreludeEnvelope.MaxResponseBodySize, sizingFinalizer)
+	zeroBindingBytes(sizingRecord)
 	if err != nil {
 		return protocol.CoverPrelude1{}, nil, err
 	}

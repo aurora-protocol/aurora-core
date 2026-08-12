@@ -383,7 +383,7 @@ func verifyVerifierOperations(profile IssuerOperationsProfile, report *IssuerOpe
 	}
 	for _, service := range profile.Metadata.VerifierServices {
 		if !profile.ImplementedVerifierRequestAuthPolicyIDs[service.RequestAuthPolicyID] {
-			report.addFinding("verifier service request auth policy is not implemented")
+			report.addFinding("verifier service request auth policy is unavailable")
 			passed = false
 		}
 	}

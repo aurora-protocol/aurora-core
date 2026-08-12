@@ -783,7 +783,7 @@ git commit -m "feat: bind relay handshake to fresh http2"
 - Consumes: Tasks 1-8 plus `transport.RunPacketDuplex` and `session.Application`.
 - Produces: `evidence.FirstHopResult` and `evidence.RunFirstHop(context.Context, evidence.FirstHopHarness) (FirstHopResult, error)` with bounded counters only.
 
-- [ ] **Step 1: Write the failing randomized process-boundary integration test**
+- [x] **Step 1: Write the failing randomized process-boundary integration test**
 
 Generate fresh TLS, descriptor long-term, epoch ECDSA, epoch ML-DSA, ECDH, ML-KEM, hint, and Blind RSA material for each test run. Start a real TCP TLS HTTP/2 server and a separate client transport. Complete Prelude0/1 and Capsule1/2, then run both application pumps over the same request/response bodies.
 
@@ -795,13 +795,13 @@ Over real TLS sockets, cover wrong exporter metadata, wrong path-template ID, ba
 
 Assert failure classes only locally, no secret response/log fields, no application callback on failure, and no replay-store rollback after uncertainty. Run the successful randomized path 100 times and replay/cancellation paths 50 times.
 
-- [ ] **Step 3: Run integration tests and verify red or incomplete behavior**
+- [x] **Step 3: Run integration tests and verify red or incomplete behavior**
 
 Run: `GOCACHE=/private/tmp/aurora-first-hop-cache go test ./server -run 'TestLiveFirstHop' -count=1 -v`
 
 Expected: FAIL until every transport/driver handoff is correctly composed.
 
-- [ ] **Step 4: Implement bounded evidence reporting**
+- [x] **Step 4: Implement bounded evidence reporting**
 
 Define only non-sensitive fields:
 
@@ -825,11 +825,11 @@ type FirstHopResult struct {
 
 The harness dependency starts a loopback live server with caller-supplied randomized credentials; production packages must not import the evidence package. Cap findings, do not retain errors containing cryptographic material, and enforce a context deadline.
 
-- [ ] **Step 5: Add latency and allocation benchmarks**
+- [x] **Step 5: Add latency and allocation benchmarks**
 
 Benchmark one complete randomized bootstrap separately from steady-state application packets. Report `ns/op`, `B/op`, and `allocs/op`; close every server/carrier/session inside the iteration. Add a 64-connection parallel benchmark with a fixed upper bound on live sessions and record/queue limits, but no pass/fail throughput constant in unit tests.
 
-- [ ] **Step 6: Run repeated integration, evidence, race, and benchmark gates**
+- [x] **Step 6: Run repeated integration, evidence, race, and benchmark gates**
 
 Run:
 

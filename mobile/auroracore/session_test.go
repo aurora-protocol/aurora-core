@@ -5,7 +5,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/server"
 	"github.com/aurora-protocol/aurora-core/session"
+	"github.com/aurora-protocol/aurora-core/transport"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
@@ -185,6 +188,134 @@ func TestNativeSessionPacketCallsRejectMalformedFramesAndPackets(t *testing.T) {
 	}
 }
 
+func TestNativeSessionDuplexConvertsRawPacketsWithoutExposingCarrierFrames(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	clientRead, relayWrite := io.Pipe()
+	relayRead, clientWrite := io.Pipe()
+	clientApplication := nativeTestApplication(t)
+	relayApplication := nativePeerApplication(t)
+	defer relayApplication.Close()
+	pumpContext, cancelPump := context.WithCancel(context.Background())
+	defer cancelPump()
+	flowIDs := make(chan uint64, 1)
+	relayResult := make(chan error, 1)
+	go func() {
+		relayResult <- transport.RunPacketDuplex(pumpContext, relayRead, relayWrite, relayApplication, func(_ context.Context, block protocol.FrameBlock) error {
+			for _, frame := range block.Frames {
+				if frame.FrameType != registry.FrameFlowOpen {
+					continue
+				}
+				reader := wire.NewReader(frame.Payload)
+				open := protocol.DecodeFlowOpen(reader)
+				if reader.Err() != nil || !reader.EOF() {
+					return errors.New("malformed client flow open")
+				}
+				flowIDs <- open.FlowID
+			}
+			return nil
+		}, transport.DefaultMaxRecordBodyBytes)
+	}()
+	stub := &nativeTestHandshake{session: &handshake.EstablishedSession{
+		Application:  clientApplication,
+		ReadCarrier:  clientRead,
+		WriteCarrier: clientWrite,
+	}}
+	registry := newNativeSessionRegistry(nativeSessionRegistryOptions{
+		now:    func() time.Time { return now },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x70}, 64)),
+		start: func(context.Context, client.NativeProvisioning, time.Time) (nativeSessionHandshake, handshake.ClientProofRequest, error) {
+			return stub, nativeTestProofRequest(now), nil
+		},
+	})
+	work, err := registry.begin(client.NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer registry.close(work.Handle)
+	proof := nativeTestAdmissionProof(now, nativeTestProofRequest(now).AdmissionContextHash)
+	encodedProof, err := protocol.Encode(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.complete(work.Handle, server.EncodeCarrier(server.CarrierBlindRSAIssueResp, encodedProof)); err != nil {
+		t.Fatal(err)
+	}
+
+	syn := nativeTCPv4([4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, 100, 0, 0x02, nil)
+	immediate, err := registry.ingressLocalPacket(work.Handle, syn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(immediate) != 1 || len(immediate[0]) < 34 || immediate[0][33] != 0x12 {
+		t.Fatalf("TCP SYN did not produce a synthetic SYN/ACK: %x", immediate)
+	}
+	flowID := <-flowIDs
+	response, err := protocol.NewStreamDataFrame(flowID, []byte("response"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := relayApplication.QueueFrames(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{response}}); err != nil {
+		t.Fatal(err)
+	}
+	nextContext, cancelNext := context.WithTimeout(context.Background(), time.Second)
+	defer cancelNext()
+	local, err := registry.nextLocalPacket(nextContext, work.Handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(local) < 40 || local[33] != 0x18 || !bytes.Equal(local[40:], []byte("response")) {
+		t.Fatalf("relay stream data did not emerge as a raw local TCP packet: %x", local)
+	}
+	if err := registry.queueFrameBlock(work.Handle, []byte{0xff}); err == nil {
+		t.Fatal("carrier-backed native session accepted a caller-supplied frame block")
+	}
+	if _, err := registry.handlePacket(work.Handle, []byte{0}); err == nil {
+		t.Fatal("carrier-backed native session accepted a caller-supplied encrypted packet")
+	}
+	if err := registry.close(work.Handle); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-time.After(time.Second):
+		t.Fatal("relay duplex did not stop after native session close")
+	case <-relayResult:
+	}
+}
+
+func TestNativeSessionLocalPacketWaitStopsWhenClosed(t *testing.T) {
+	packetQueue := make(chan []byte, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	application := nativeTestApplication(t)
+	defer application.Close()
+	adapter, err := client.NewPacketAdapter(application, client.PacketAdapterOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &nativeSession{context: ctx, cancel: cancel, established: &handshake.EstablishedSession{Application: application}, adapter: adapter, localPackets: packetQueue}
+	registry := &nativeSessionRegistry{sessions: map[uint64]*nativeSession{1: session}}
+	result := make(chan error, 1)
+	go func() {
+		_, err := registry.nextLocalPacket(context.Background(), 1)
+		result <- err
+	}()
+	select {
+	case <-time.After(10 * time.Millisecond):
+	case err := <-result:
+		t.Fatalf("local packet wait returned before close: %v", err)
+	}
+	if err := registry.close(1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-time.After(time.Second):
+		t.Fatal("local packet wait did not stop after close")
+	case err := <-result:
+		if err == nil {
+			t.Fatal("local packet wait succeeded after close")
+		}
+	}
+}
+
 func TestNativeSessionDispatchUsesBoundedOpaqueOperations(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	application := nativeTestApplication(t)
@@ -240,6 +371,54 @@ func TestNativeSessionDispatchUsesBoundedOpaqueOperations(t *testing.T) {
 	status, payload = dispatch(opCloseNativeSession, nil, work.Handle)
 	if status != statusError || len(payload) != 0 {
 		t.Fatalf("closed handle dispatch = status %d payload %x", status, payload)
+	}
+}
+
+func TestNativeSessionDispatchAdaptsRawLocalPackets(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	application := nativeTestApplication(t)
+	stub := &nativeTestHandshake{session: &handshake.EstablishedSession{Application: application}}
+	registry := newNativeSessionRegistry(nativeSessionRegistryOptions{
+		now:    func() time.Time { return now },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x89}, 64)),
+		start: func(context.Context, client.NativeProvisioning, time.Time) (nativeSessionHandshake, handshake.ClientProofRequest, error) {
+			return stub, nativeTestProofRequest(now), nil
+		},
+	})
+	previousRegistry := nativeSessions
+	nativeSessions = registry
+	defer func() { nativeSessions = previousRegistry }()
+	work, err := registry.begin(client.NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer registry.close(work.Handle)
+	proof := nativeTestAdmissionProof(now, nativeTestProofRequest(now).AdmissionContextHash)
+	encodedProof, err := protocol.Encode(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, payload := dispatch(opCompleteNativeSession, nativeHandlePayload(t, work.Handle, server.EncodeCarrier(server.CarrierBlindRSAIssueResp, encodedProof)), 0); status != statusOK || len(payload) != 0 {
+		t.Fatalf("complete dispatch = status %d payload %x", status, payload)
+	}
+	syn := nativeTCPv4([4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, 100, 0, 0x02, nil)
+	status, payload := dispatch(opIngressLocalPacket, syn, work.Handle)
+	if status != statusOK {
+		t.Fatalf("raw packet ingress status = %d", status)
+	}
+	local := nativeLocalPacketList(t, payload)
+	if len(local) != 1 || len(local[0]) < 34 || local[0][33] != 0x12 {
+		t.Fatalf("raw packet ingress did not return a synthetic SYN/ACK: %x", local)
+	}
+	nativeSession, err := registry.lookup(work.Handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{0x45, 0x00, 0x00, 0x14}
+	nativeSession.localPackets <- append([]byte(nil), want...)
+	status, payload = dispatch(opNextLocalPacket, nil, work.Handle)
+	if status != statusOK || !bytes.Equal(payload, want) {
+		t.Fatalf("next local packet dispatch = status %d payload %x, want %x", status, payload, want)
 	}
 }
 
@@ -414,6 +593,88 @@ func nativeTestApplication(t *testing.T) *session.Application {
 	return application
 }
 
+func nativePeerApplication(t *testing.T) *session.Application {
+	t.Helper()
+	application, err := session.NewApplication(session.Config{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 7,
+		HopLayer:        0,
+		Write: session.DirectionConfig{
+			Direction: 1,
+			Secret:    bytes.Repeat([]byte{0x41}, 48),
+			Key:       bytes.Repeat([]byte{0x42}, 32),
+			IV:        bytes.Repeat([]byte{0x43}, 12),
+		},
+		Read: session.DirectionConfig{
+			Direction: 0,
+			Secret:    bytes.Repeat([]byte{0x31}, 48),
+			Key:       bytes.Repeat([]byte{0x32}, 32),
+			IV:        bytes.Repeat([]byte{0x33}, 12),
+		},
+		Limits: session.Limits{
+			MaxQueuedPackets:       8,
+			MaxQueuedBytes:         64 << 10,
+			ControlReservedPackets: 2,
+			ControlReservedBytes:   8 << 10,
+			ReplayWindow:           64,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return application
+}
+
+func nativeTCPv4(source, target [4]byte, sourcePort, targetPort uint16, sequence, acknowledgment uint32, flags byte, payload []byte) []byte {
+	packet := make([]byte, 40+len(payload))
+	packet[0] = 0x45
+	binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
+	packet[8] = 64
+	packet[9] = 6
+	copy(packet[12:16], source[:])
+	copy(packet[16:20], target[:])
+	binary.BigEndian.PutUint16(packet[10:12], nativeChecksum(packet[:20]))
+	binary.BigEndian.PutUint16(packet[20:22], sourcePort)
+	binary.BigEndian.PutUint16(packet[22:24], targetPort)
+	binary.BigEndian.PutUint32(packet[24:28], sequence)
+	binary.BigEndian.PutUint32(packet[28:32], acknowledgment)
+	packet[32] = 0x50
+	packet[33] = flags
+	binary.BigEndian.PutUint16(packet[34:36], 65535)
+	copy(packet[40:], payload)
+	pseudo := make([]byte, 12)
+	copy(pseudo[0:4], source[:])
+	copy(pseudo[4:8], target[:])
+	pseudo[9] = 6
+	binary.BigEndian.PutUint16(pseudo[10:12], uint16(len(packet)-20))
+	binary.BigEndian.PutUint16(packet[36:38], nativeChecksum(pseudo, packet[20:]))
+	return packet
+}
+
+func nativeChecksum(parts ...[]byte) uint16 {
+	var sum uint32
+	var odd byte
+	hasOdd := false
+	for _, part := range parts {
+		for _, value := range part {
+			if !hasOdd {
+				odd = value
+				hasOdd = true
+				continue
+			}
+			sum += uint32(odd)<<8 | uint32(value)
+			hasOdd = false
+		}
+	}
+	if hasOdd {
+		sum += uint32(odd) << 8
+	}
+	for sum>>16 != 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	return ^uint16(sum)
+}
+
 func nativeHandlePayload(t testing.TB, handle uint64, payload []byte) []byte {
 	t.Helper()
 	encoder := wire.NewEncoder()
@@ -424,4 +685,18 @@ func nativeHandlePayload(t testing.TB, handle uint64, payload []byte) []byte {
 		t.Fatal(err)
 	}
 	return encoded
+}
+
+func nativeLocalPacketList(t testing.TB, encoded []byte) [][]byte {
+	t.Helper()
+	reader := wire.NewReader(encoded)
+	count := reader.ReadVarint()
+	packets := make([][]byte, 0, count)
+	for index := uint64(0); index < count; index++ {
+		packets = append(packets, append([]byte(nil), reader.ReadOpaque24()...))
+	}
+	if reader.Err() != nil || !reader.EOF() {
+		t.Fatalf("decode native local packet list: %v", reader.Err())
+	}
+	return packets
 }

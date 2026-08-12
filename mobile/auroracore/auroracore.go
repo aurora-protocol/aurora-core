@@ -20,6 +20,7 @@ package main
 import "C"
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -49,6 +50,8 @@ const (
 	opQueueFrameBlock        = 11
 	opNextPacket             = 12
 	opHandlePacket           = 13
+	opIngressLocalPacket     = 14
+	opNextLocalPacket        = 15
 )
 
 // Result status bytes.
@@ -255,6 +258,32 @@ func dispatch(op int, in []byte, arg uint64) (byte, []byte) {
 			return statusError, nil
 		}
 		return statusOK, blocks
+	case opIngressLocalPacket:
+		if arg == 0 {
+			return statusError, nil
+		}
+		packets, err := nativeSessions.ingressLocalPacket(arg, in)
+		if err != nil {
+			if errors.Is(err, session.ErrBackpressure) {
+				return statusConflict, nil
+			}
+			return statusError, nil
+		}
+		defer zeroNativeLocalPackets(packets)
+		encoded, err := encodeNativeLocalPackets(packets)
+		if err != nil {
+			return statusError, nil
+		}
+		return statusOK, encoded
+	case opNextLocalPacket:
+		if arg == 0 || len(in) != 0 {
+			return statusError, nil
+		}
+		packet, err := nativeSessions.nextLocalPacket(context.Background(), arg)
+		if err != nil {
+			return statusError, nil
+		}
+		return statusOK, packet
 	default:
 		return statusError, nil
 	}

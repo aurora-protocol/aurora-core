@@ -628,6 +628,7 @@ func TestFirstHopBuildsSessionHandlerBeforeCapsule2(t *testing.T) {
 	}
 	handler.frameHandler = nil
 	factoryCalled := make(chan protocol.PolicyAccept, 1)
+	handledFrames := make(chan []byte, 1)
 	releaseFactory := make(chan struct{})
 	closer := &signalingFirstHopCloser{closed: make(chan struct{})}
 	handler.sessionFactory = func(_ context.Context, application FirstHopSessionApplication, policy protocol.PolicyAccept) (transport.FrameBlockHandler, io.Closer, error) {
@@ -637,7 +638,10 @@ func TestFirstHopBuildsSessionHandlerBeforeCapsule2(t *testing.T) {
 		policy.FallbackMethods[0] = registry.MethodWebH1WS
 		factoryCalled <- policy
 		<-releaseFactory
-		return func(context.Context, protocol.FrameBlock) error { return nil }, closer, nil
+		return func(_ context.Context, block protocol.FrameBlock) error {
+			handledFrames <- append([]byte(nil), block.Frames[0].Payload...)
+			return nil
+		}, closer, nil
 	}
 
 	response, writer := openFirstHopStreamingRequest(t, client, server.URL+handler.path)
@@ -679,6 +683,17 @@ func TestFirstHopBuildsSessionHandlerBeforeCapsule2(t *testing.T) {
 	close(releaseFactory)
 	if err := <-capsuleResult; err != nil {
 		t.Fatalf("read Capsule2: %v", err)
+	}
+	if err := writer.Write([]byte("factory application packet")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case payload := <-handledFrames:
+		if string(payload) != "factory application packet" {
+			t.Fatalf("factory handler payload = %q", payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("application packet did not reach factory handler")
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)

@@ -14,6 +14,7 @@ import (
 	"encoding/asn1"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/admission"
+	auroraclient "github.com/aurora-protocol/aurora-core/client"
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/evidence"
 	"github.com/aurora-protocol/aurora-core/handshake"
@@ -141,6 +143,316 @@ func TestLiveFirstHopRandomizedApplicationRoundTrip(t *testing.T) {
 		if stats.PeakQueuedPackets == 0 || stats.PeakQueuedPackets > 32 || stats.PeakQueuedBytes == 0 || stats.PeakQueuedBytes > 256<<10 {
 			t.Fatalf("%s application queue stats escaped configured bounds: %+v", name, stats)
 		}
+	}
+}
+
+func TestLiveFirstHopEncryptedTCPAndUDPEgress(t *testing.T) {
+	tcpPayloads := [][]byte{randomLiveFirstHopBytes(t, 1024), randomLiveFirstHopBytes(t, 1537)}
+	tcpListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tcpListener.Close() })
+	tcpResult := make(chan error, 1)
+	tcpObserved := make(chan []byte, len(tcpPayloads))
+	tcpAccepted := make(chan struct{})
+	go func() {
+		connection, acceptErr := tcpListener.Accept()
+		if acceptErr != nil {
+			tcpResult <- acceptErr
+			return
+		}
+		close(tcpAccepted)
+		for _, payload := range tcpPayloads {
+			received := make([]byte, len(payload))
+			if _, readErr := io.ReadFull(connection, received); readErr != nil {
+				_ = connection.Close()
+				tcpResult <- readErr
+				return
+			}
+			if !bytes.Equal(received, payload) {
+				_ = connection.Close()
+				tcpResult <- errors.New("TCP destination received different payload")
+				return
+			}
+			tcpObserved <- append([]byte(nil), received...)
+			if writeErr := writeLiveFirstHopAll(connection, received); writeErr != nil {
+				_ = connection.Close()
+				tcpResult <- writeErr
+				return
+			}
+		}
+		tcpResult <- connection.Close()
+	}()
+
+	udpPayload := randomLiveFirstHopBytes(t, 1201)
+	udpConnection, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = udpConnection.Close() })
+	udpResult := make(chan error, 1)
+	go func() {
+		buffer := make([]byte, 2048)
+		count, peer, readErr := udpConnection.ReadFrom(buffer)
+		if readErr != nil {
+			udpResult <- readErr
+			return
+		}
+		if !bytes.Equal(buffer[:count], udpPayload) {
+			udpResult <- errors.New("UDP destination received different payload")
+			return
+		}
+		written, writeErr := udpConnection.WriteTo(buffer[:count], peer)
+		if writeErr == nil && written != count {
+			writeErr = io.ErrShortWrite
+		}
+		udpResult <- writeErr
+	}()
+
+	fixture := newLiveFirstHopFixture(t, time.Now())
+	relayDriver := fixture.newRelayDriver(t)
+	sessionFactory, err := NewFirstHopProxySessionFactory(FirstHopProxySessionOptions{
+		ExitPolicy: relay.ExitPolicy{AllowPrivate: true},
+		Dialer:     &net.Dialer{},
+		Resolver:   net.DefaultResolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness := startLiveFirstHopHarnessWithSessionFactory(t, fixture, relayDriver, nil, sessionFactory)
+	clientDriver := fixture.newClientDriver(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	established, err := clientDriver.Connect(ctx, harness.opener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayApplication := <-harness.relayApplications
+	clientFrames := make(chan protocol.AuroraFrame, 16)
+	pumpContext, cancelPump := context.WithCancel(context.Background())
+	pumpResult := make(chan error, 1)
+	go func() {
+		pumpResult <- transport.RunPacketDuplex(
+			pumpContext,
+			established.ReadCarrier,
+			established.WriteCarrier,
+			established.Application,
+			func(frameContext context.Context, block protocol.FrameBlock) error {
+				for _, frame := range block.Frames {
+					frame.Payload = append([]byte(nil), frame.Payload...)
+					select {
+					case clientFrames <- frame:
+					case <-frameContext.Done():
+						return frameContext.Err()
+					}
+				}
+				return nil
+			},
+			1<<20,
+		)
+	}()
+	t.Cleanup(func() {
+		cancelPump()
+		_ = established.Close()
+		select {
+		case pumpErr := <-pumpResult:
+			if pumpErr != nil && !errors.Is(pumpErr, context.Canceled) && !errors.Is(pumpErr, session.ErrClosed) && !errors.Is(pumpErr, net.ErrClosed) && !errors.Is(pumpErr, io.ErrClosedPipe) && !errors.Is(pumpErr, io.EOF) {
+				t.Errorf("encrypted egress client pump stopped unexpectedly: %v", pumpErr)
+			}
+		case <-time.After(time.Second):
+			t.Error("encrypted egress client pump did not stop")
+		}
+	})
+
+	proxy := auroraclient.NewLocalProxy()
+	tcpAddress := tcpListener.Addr().(*net.TCPAddr)
+	tcpOpen, err := proxy.OpenTCPFrame(1, tcpAddress.IP.String(), uint16(tcpAddress.Port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueLiveFirstHopBlock(t, ctx, established.Application, protocol.FrameBlock{Frames: []protocol.AuroraFrame{tcpOpen}})
+	select {
+	case <-tcpAccepted:
+	case <-ctx.Done():
+		t.Fatalf("TCP destination accept: %v", ctx.Err())
+	}
+	tcpData, err := proxy.SendTCP(1, tcpPayloads[0], 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueLiveFirstHopBlock(t, ctx, established.Application, protocol.FrameBlock{Frames: []protocol.AuroraFrame{tcpData}})
+	if err := awaitLiveFirstHopPayload(ctx, tcpObserved, tcpPayloads[0]); err != nil {
+		t.Fatalf("TCP destination receive: %v", err)
+	}
+	assertLiveFirstHopFrame(t, ctx, clientFrames, registry.FrameStreamData, 1, tcpPayloads[0])
+
+	if err := established.Application.InitiateKeyUpdate(ctx, 1); err != nil {
+		t.Fatalf("initiate encrypted TCP key update: %v", err)
+	}
+	tcpData, err = proxy.SendTCP(1, tcpPayloads[1], 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueLiveFirstHopBlock(t, ctx, established.Application, protocol.FrameBlock{Frames: []protocol.AuroraFrame{tcpData}})
+	if err := awaitLiveFirstHopPayload(ctx, tcpObserved, tcpPayloads[1]); err != nil {
+		t.Fatalf("post-update TCP destination receive: %v", err)
+	}
+	assertLiveFirstHopFrame(t, ctx, clientFrames, registry.FrameStreamData, 1, tcpPayloads[1])
+	tcpClose := assertLiveFirstHopFrame(t, ctx, clientFrames, registry.FrameFlowClose, 1, nil)
+	closeReader := wire.NewReader(tcpClose.Payload)
+	if close := protocol.DecodeFlowClose(closeReader); closeReader.Err() != nil || !closeReader.EOF() || close.CloseCode != protocol.CloseNormal {
+		t.Fatalf("TCP target EOF close = %+v, decode_err=%v", close, closeReader.Err())
+	}
+	if targetErr := <-tcpResult; targetErr != nil {
+		t.Fatalf("TCP destination: %v", targetErr)
+	}
+
+	udpAddress := udpConnection.LocalAddr().(*net.UDPAddr)
+	udpOpen, err := proxy.OpenUDPExplicitFrame(2, udpAddress.IP.String(), uint16(udpAddress.Port), uint64(time.Now().Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueLiveFirstHopBlock(t, ctx, established.Application, protocol.FrameBlock{Frames: []protocol.AuroraFrame{udpOpen}})
+	confirm := assertLiveFirstHopFrame(t, ctx, clientFrames, registry.FrameUDPTargetConfirm, 2, nil)
+	if err := proxy.ReceiveUDPTargetConfirmFrameAt(confirm, uint64(time.Now().Unix())); err != nil {
+		t.Fatalf("receive UDP target confirmation: %v", err)
+	}
+	if err := relayApplication.InitiateKeyUpdate(ctx, 2); err != nil {
+		t.Fatalf("initiate encrypted UDP key update: %v", err)
+	}
+	udpData, err := proxy.SendUDP(2, udpPayload, uint64(time.Now().Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueLiveFirstHopBlock(t, ctx, established.Application, protocol.FrameBlock{Frames: []protocol.AuroraFrame{udpData}})
+	assertLiveFirstHopFrame(t, ctx, clientFrames, registry.FrameDatagramData, 2, udpPayload)
+	if targetErr := <-udpResult; targetErr != nil {
+		t.Fatalf("UDP destination: %v", targetErr)
+	}
+	udpClose, err := proxy.CloseFrame(2, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueLiveFirstHopBlock(t, ctx, established.Application, protocol.FrameBlock{Frames: []protocol.AuroraFrame{udpClose}})
+}
+
+func TestLiveFirstHopEgressPolicyDenialPreventsDial(t *testing.T) {
+	dialer := &rejectingLiveFirstHopDialer{}
+	sessionFactory, err := NewFirstHopProxySessionFactory(FirstHopProxySessionOptions{
+		Dialer:   dialer,
+		Resolver: net.DefaultResolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := newLiveFirstHopFixture(t, time.Now())
+	harness := startLiveFirstHopHarnessWithSessionFactory(t, fixture, fixture.newRelayDriver(t), nil, sessionFactory)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	established, err := fixture.newClientDriver(t).Connect(ctx, harness.opener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer established.Close()
+	select {
+	case <-harness.relayApplications:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	pumpResult := make(chan error, 1)
+	go func() {
+		pumpResult <- transport.RunPacketDuplex(
+			ctx,
+			established.ReadCarrier,
+			established.WriteCarrier,
+			established.Application,
+			func(context.Context, protocol.FrameBlock) error { return nil },
+			1<<20,
+		)
+	}()
+	proxy := auroraclient.NewLocalProxy()
+	open, err := proxy.OpenTCPFrame(1, "127.0.0.1", 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueLiveFirstHopBlock(t, ctx, established.Application, protocol.FrameBlock{Frames: []protocol.AuroraFrame{open}})
+	select {
+	case pumpErr := <-pumpResult:
+		if pumpErr == nil {
+			t.Fatal("policy-denied carrier stopped without an error")
+		}
+	case <-ctx.Done():
+		t.Fatalf("policy-denied carrier remained open: %v", ctx.Err())
+	}
+	if calls := dialer.calls.Load(); calls != 0 {
+		t.Fatalf("policy denial invoked dialer %d times", calls)
+	}
+}
+
+func TestLiveFirstHopShutdownCancelsBlockedEgressDial(t *testing.T) {
+	dialer := newBlockingLiveFirstHopDialer()
+	sessionFactory, err := NewFirstHopProxySessionFactory(FirstHopProxySessionOptions{
+		ExitPolicy: relay.ExitPolicy{AllowPrivate: true},
+		Dialer:     dialer,
+		Resolver:   net.DefaultResolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := newLiveFirstHopFixture(t, time.Now())
+	harness := startLiveFirstHopHarnessWithSessionFactory(t, fixture, fixture.newRelayDriver(t), nil, sessionFactory)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	established, err := fixture.newClientDriver(t).Connect(ctx, harness.opener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer established.Close()
+	select {
+	case <-harness.relayApplications:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	pumpResult := make(chan error, 1)
+	go func() {
+		pumpResult <- transport.RunPacketDuplex(
+			ctx,
+			established.ReadCarrier,
+			established.WriteCarrier,
+			established.Application,
+			func(context.Context, protocol.FrameBlock) error { return nil },
+			1<<20,
+		)
+	}()
+	proxy := auroraclient.NewLocalProxy()
+	open, err := proxy.OpenTCPFrame(1, "127.0.0.1", 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueLiveFirstHopBlock(t, ctx, established.Application, protocol.FrameBlock{Frames: []protocol.AuroraFrame{open}})
+	select {
+	case <-dialer.started:
+	case <-ctx.Done():
+		t.Fatalf("blocked dial did not start: %v", ctx.Err())
+	}
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := harness.shutdown(shutdownContext); err != nil {
+		t.Fatalf("shutdown with blocked egress dial: %v", err)
+	}
+	select {
+	case <-dialer.done:
+	case <-time.After(time.Second):
+		t.Fatal("blocked egress dial was not canceled")
+	}
+	select {
+	case pumpErr := <-pumpResult:
+		if pumpErr == nil {
+			t.Fatal("shutdown carrier stopped without an error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client pump remained live after shutdown")
 	}
 }
 
@@ -307,8 +619,12 @@ func awaitLiveFirstHopPayload(ctx context.Context, received <-chan []byte, expec
 }
 
 func queueLiveFirstHopFrame(ctx context.Context, application *session.Application, payload []byte) error {
+	return queueLiveFirstHopFrameBlock(ctx, application, protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding, Payload: payload}}})
+}
+
+func queueLiveFirstHopFrameBlock(ctx context.Context, application *session.Application, block protocol.FrameBlock) error {
 	for {
-		err := application.QueueFrames(ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding, Payload: payload}}})
+		err := application.QueueFrames(ctx, block)
 		if err == nil || !errors.Is(err, session.ErrBackpressure) {
 			return err
 		}
@@ -322,6 +638,44 @@ func queueLiveFirstHopFrame(ctx context.Context, application *session.Applicatio
 		case <-timer.C:
 		}
 	}
+}
+
+func queueLiveFirstHopBlock(t testing.TB, ctx context.Context, application *session.Application, block protocol.FrameBlock) {
+	t.Helper()
+	if err := queueLiveFirstHopFrameBlock(ctx, application, block); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertLiveFirstHopFrame(t testing.TB, ctx context.Context, frames <-chan protocol.AuroraFrame, frameType, flowID uint64, payload []byte) protocol.AuroraFrame {
+	t.Helper()
+	select {
+	case frame, ok := <-frames:
+		if !ok {
+			t.Fatal("live first-hop frame stream closed")
+		}
+		if frame.FrameType != frameType || frame.FlowID != flowID || (payload != nil && !bytes.Equal(frame.Payload, payload)) {
+			t.Fatalf("unexpected live first-hop frame: type=0x%x flow=%d payload_bytes=%d", frame.FrameType, frame.FlowID, len(frame.Payload))
+		}
+		return frame
+	case <-ctx.Done():
+		t.Fatalf("wait for live first-hop frame type=0x%x flow=%d: %v", frameType, flowID, ctx.Err())
+		return protocol.AuroraFrame{}
+	}
+}
+
+func writeLiveFirstHopAll(writer io.Writer, payload []byte) error {
+	for len(payload) != 0 {
+		written, err := writer.Write(payload)
+		if err != nil {
+			return err
+		}
+		if written == 0 {
+			return io.ErrShortWrite
+		}
+		payload = payload[written:]
+	}
+	return nil
 }
 
 type liveFirstHopManualClient struct {
@@ -1302,6 +1656,10 @@ type liveFirstHopHarness struct {
 }
 
 func startLiveFirstHopHarness(t testing.TB, fixture liveFirstHopFixture, relayDriver *handshake.RelayDriver, coverOrigin http.Handler) liveFirstHopHarness {
+	return startLiveFirstHopHarnessWithSessionFactory(t, fixture, relayDriver, coverOrigin, nil)
+}
+
+func startLiveFirstHopHarnessWithSessionFactory(t testing.TB, fixture liveFirstHopFixture, relayDriver *handshake.RelayDriver, coverOrigin http.Handler, sessionFactory FirstHopSessionFactory) liveFirstHopHarness {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1320,7 +1678,7 @@ func startLiveFirstHopHarness(t testing.TB, fixture liveFirstHopFixture, relayDr
 		RequestClassID:          requestClass.ClassID,
 		MethodFamilyID:          fixture.deployment.Method(),
 	}
-	handler, err := NewFirstHopHandler(FirstHopOptions{
+	options := FirstHopOptions{
 		Driver:             relayDriver,
 		Authority:          authority,
 		Path:               path,
@@ -1330,12 +1688,17 @@ func startLiveFirstHopHarness(t testing.TB, fixture liveFirstHopFixture, relayDr
 		Origin:             relay.StaticOrigin{Status: http.StatusNotFound, Body: []byte("not found")},
 		CoverOrigin:        coverOrigin,
 		MaxRecordBodyBytes: 1 << 20,
-		FrameHandler: func(_ context.Context, block protocol.FrameBlock) error {
+		PostHeaderTimeout:  5 * time.Second,
+	}
+	if sessionFactory == nil {
+		options.FrameHandler = func(_ context.Context, block protocol.FrameBlock) error {
 			serverFrames <- append([]byte(nil), block.Frames[0].Payload...)
 			return nil
-		},
-		PostHeaderTimeout: 5 * time.Second,
-	})
+		}
+	} else {
+		options.SessionFactory = sessionFactory
+	}
+	handler, err := NewFirstHopHandler(options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1440,6 +1803,33 @@ type liveFirstHopDisconnectingOpener struct {
 	closeOnOpen     bool
 	closeAfterWrite int
 	closeAfterRead  int
+}
+
+type rejectingLiveFirstHopDialer struct {
+	calls atomic.Int32
+}
+
+func (d *rejectingLiveFirstHopDialer) DialContext(context.Context, string, string) (net.Conn, error) {
+	d.calls.Add(1)
+	return nil, errors.New("unexpected test dial")
+}
+
+type blockingLiveFirstHopDialer struct {
+	started chan struct{}
+	done    chan struct{}
+	start   sync.Once
+	finish  sync.Once
+}
+
+func newBlockingLiveFirstHopDialer() *blockingLiveFirstHopDialer {
+	return &blockingLiveFirstHopDialer{started: make(chan struct{}), done: make(chan struct{})}
+}
+
+func (d *blockingLiveFirstHopDialer) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
+	d.start.Do(func() { close(d.started) })
+	<-ctx.Done()
+	d.finish.Do(func() { close(d.done) })
+	return nil, ctx.Err()
 }
 
 func (o *liveFirstHopDisconnectingOpener) Open(ctx context.Context, coverRandom []byte) (handshake.BootstrapCarrier, error) {

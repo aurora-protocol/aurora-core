@@ -604,7 +604,9 @@ func (h *FirstHopHandler) serveCandidate(ctx context.Context, cancel context.Can
 			abortFirstHopAfterHeader(cancel)
 			return fmt.Errorf("server: first-hop application does not support session frames")
 		}
-		frameHandler, sessionCloser, factoryErr := h.sessionFactory(ctx, sessionApplication, cloneFirstHopPolicyAccept(policy))
+		var sessionCloser io.Closer
+		var factoryErr error
+		frameHandler, sessionCloser, factoryErr = h.sessionFactory(ctx, sessionApplication, cloneFirstHopPolicyAccept(policy))
 		if factoryErr != nil {
 			zeroFirstHopBytes(capsule2Record)
 			if !isNilFirstHopInterface(sessionCloser) {

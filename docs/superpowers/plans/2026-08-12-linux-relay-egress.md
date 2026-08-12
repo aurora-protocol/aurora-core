@@ -156,15 +156,15 @@ Run all first-hop tests, 50 repeated live tests, and race tests for `server`, `r
 
 **Files:** Modify `server/first_hop_integration_test.go`; create `evidence/egress.go`; create `evidence/egress_test.go`.
 
-- [ ] **Step 1: Add real TLS/H2 TCP and UDP paths**
+- [x] **Step 1: Add real TLS/H2 TCP and UDP paths**
 
 Generate fresh handshake material, establish a live client and relay application, open a TCP echo flow and a UDP echo association through encrypted packets, and assert byte-identical bidirectional data. Exercise key updates while flows are open, target EOF, policy denial, stalled target cancellation, and server shutdown.
 
-- [ ] **Step 2: Add bounded evidence**
+- [x] **Step 2: Add bounded evidence**
 
 Report only pass flags, counts, durations, queue peaks, flow peaks, and byte totals. Do not retain destinations or protocol material. Run success repeatedly and assert all sockets, carriers, sessions, and servers close.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 Run live integration 100 times, evidence 20 times, and race-enabled integration 10 times. Commit `test: prove encrypted destination egress`.
 

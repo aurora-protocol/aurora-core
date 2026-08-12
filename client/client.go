@@ -87,6 +87,31 @@ func (p *LocalProxy) OpenTCPFrame(flowID uint64, host string, port uint16) (prot
 }
 
 func (p *LocalProxy) OpenTCPFrameWithPriority(flowID uint64, host string, port uint16, priority uint8) (protocol.AuroraFrame, error) {
+	return p.openTCPFrame(flowID, host, port, priority, flow.LocalBindingExplicitProxyAPI)
+}
+
+// OpenTUNTCPFrame creates a TCP flow for a locally captured packet-tunnel connection.
+func (p *LocalProxy) OpenTUNTCPFrame(flowID uint64, host string, port uint16) (protocol.AuroraFrame, error) {
+	return p.openTCPFrame(flowID, host, port, flow.PriorityInteractive, flow.LocalBindingTUNPacketFlow)
+}
+
+// OpenTCPFromFakeIPFrame restores a TCP target from a local synthetic DNS answer.
+func (p *LocalProxy) OpenTCPFromFakeIPFrame(flowID uint64, fakeIP string, port uint16) (flow.SyntheticAnswer, protocol.AuroraFrame, error) {
+	open, answer, err := p.dns.OpenMappedFakeIPTCPFlow(flowID, fakeIP, port)
+	if err != nil {
+		return flow.SyntheticAnswer{}, protocol.AuroraFrame{}, err
+	}
+	frame, err := protocol.NewFlowOpenFrame(open)
+	if err != nil {
+		return flow.SyntheticAnswer{}, protocol.AuroraFrame{}, err
+	}
+	if err := p.flows.Open(open); err != nil {
+		return flow.SyntheticAnswer{}, protocol.AuroraFrame{}, err
+	}
+	return answer, frame, nil
+}
+
+func (p *LocalProxy) openTCPFrame(flowID uint64, host string, port uint16, priority, localBindingMode uint8) (protocol.AuroraFrame, error) {
 	targetKind, targetHost, err := localTarget(host)
 	if err != nil {
 		return protocol.AuroraFrame{}, err
@@ -101,7 +126,7 @@ func (p *LocalProxy) OpenTCPFrameWithPriority(flowID uint64, host string, port u
 		UDPFQDNMode:      flow.UDPFQDNNoneIPAuthoritative,
 		NameBindingID:    make([]byte, 16),
 		DNSAnswerSetHash: make([]byte, 48),
-		LocalBindingMode: flow.LocalBindingExplicitProxyAPI,
+		LocalBindingMode: localBindingMode,
 		PriorityClass:    priority,
 	}
 	frame, err := protocol.NewFlowOpenFrame(open)
@@ -120,6 +145,15 @@ func (p *LocalProxy) OpenUDPExplicit(flowID uint64, host string, port uint16, no
 }
 
 func (p *LocalProxy) OpenUDPExplicitFrame(flowID uint64, host string, port uint16, now uint64) (protocol.AuroraFrame, error) {
+	return p.openUDPFrame(flowID, host, port, now, flow.LocalBindingExplicitProxyAPI)
+}
+
+// OpenTUNUDPFrame creates a UDP flow for a locally captured packet-tunnel datagram.
+func (p *LocalProxy) OpenTUNUDPFrame(flowID uint64, host string, port uint16, now uint64) (protocol.AuroraFrame, error) {
+	return p.openUDPFrame(flowID, host, port, now, flow.LocalBindingTUNPacketFlow)
+}
+
+func (p *LocalProxy) openUDPFrame(flowID uint64, host string, port uint16, now uint64, localBindingMode uint8) (protocol.AuroraFrame, error) {
 	targetKind, targetHost, err := localTarget(host)
 	if err != nil {
 		return protocol.AuroraFrame{}, err
@@ -140,7 +174,7 @@ func (p *LocalProxy) OpenUDPExplicitFrame(flowID uint64, host string, port uint1
 		UDPFQDNMode:        udpFQDNMode,
 		NameBindingID:      make([]byte, 16),
 		DNSAnswerSetHash:   make([]byte, 48),
-		LocalBindingMode:   flow.LocalBindingExplicitProxyAPI,
+		LocalBindingMode:   localBindingMode,
 		PriorityClass:      flow.PriorityRealtime,
 		OriginalDomainHint: originalDomainHint,
 	}

@@ -21,6 +21,7 @@ import "C"
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -37,21 +38,23 @@ import (
 
 // Operation codes for AuroraCoreCall. Kept stable as part of the ABI contract.
 const (
-	opEncodeMetadataRequest  = 1
-	opEncodeIssueRequest     = 2
-	opEncodeSpendRequest     = 3
-	opDecodeMetadataResponse = 4
-	opDecodeIssueResponse    = 5
-	opDecodeSpendResponse    = 6
-	opParseAdmissionProof    = 7
-	opBeginNativeSession     = 8
-	opCompleteNativeSession  = 9
-	opCloseNativeSession     = 10
-	opQueueFrameBlock        = 11
-	opNextPacket             = 12
-	opHandlePacket           = 13
-	opIngressLocalPacket     = 14
-	opNextLocalPacket        = 15
+	opEncodeMetadataRequest    = 1
+	opEncodeIssueRequest       = 2
+	opEncodeSpendRequest       = 3
+	opDecodeMetadataResponse   = 4
+	opDecodeIssueResponse      = 5
+	opDecodeSpendResponse      = 6
+	opParseAdmissionProof      = 7
+	opBeginNativeSession       = 8
+	opCompleteNativeSession    = 9
+	opCloseNativeSession       = 10
+	opQueueFrameBlock          = 11
+	opNextPacket               = 12
+	opHandlePacket             = 13
+	opIngressLocalPacket       = 14
+	opNextLocalPacket          = 15
+	opBeginNativeSessionJSON   = 16
+	opCompleteNativeSessionRaw = 17
 )
 
 // Result status bytes.
@@ -73,6 +76,13 @@ type parsedAdmissionProof struct {
 type parsedMetadata struct {
 	IssuerMetadataHex     string `json:"issuer_metadata"`
 	IssuerMetadataHashHex string `json:"issuer_metadata_hash"`
+}
+
+type nativeIssuerWorkJSON struct {
+	Handle            uint64 `json:"handle"`
+	IssuerURL         string `json:"issuer_url"`
+	IssuerCarrierPath string `json:"issuer_carrier_path"`
+	RequestBodyBase64 string `json:"request_body_base64"`
 }
 
 // AuroraCoreCall dispatches a single portable-core operation. in/inLen is the
@@ -284,6 +294,31 @@ func dispatch(op int, in []byte, arg uint64) (byte, []byte) {
 			return statusError, nil
 		}
 		return statusOK, packet
+	case opBeginNativeSessionJSON:
+		if arg != 0 {
+			return statusError, nil
+		}
+		provisioning, err := client.ParseNativeProvisioning(in, time.Now())
+		if err != nil {
+			return statusError, nil
+		}
+		work, err := nativeSessions.begin(provisioning)
+		if err != nil {
+			return statusError, nil
+		}
+		encoded, err := encodeNativeIssuerWorkJSON(work)
+		handle := work.Handle
+		zeroNativeIssuerWork(&work)
+		if err != nil {
+			_ = nativeSessions.close(handle)
+			return statusError, nil
+		}
+		return statusOK, encoded
+	case opCompleteNativeSessionRaw:
+		if arg == 0 || len(in) == 0 || nativeSessions.complete(arg, in) != nil {
+			return statusError, nil
+		}
+		return statusOK, nil
 	default:
 		return statusError, nil
 	}
@@ -312,6 +347,18 @@ func parseAdmissionProof(in []byte) ([]byte, error) {
 		TokenAuthenticatorHex: hex.EncodeToString(proof.TokenAuthenticator),
 		IssuerMetadataHashHex: hex.EncodeToString(meta.IssuerMetadataHash),
 		ExpiryUnix:            proof.ExpiryUnix,
+	})
+}
+
+func encodeNativeIssuerWorkJSON(work nativeIssuerWork) ([]byte, error) {
+	if work.Handle == 0 || len(work.IssuerURL) == 0 || len(work.IssuerCarrierPath) == 0 || len(work.RequestBody) == 0 || len(work.RequestBody) > maximumNativeIssuerWorkBytes {
+		return nil, fmt.Errorf("auroracore: native issuer work is invalid")
+	}
+	return json.Marshal(nativeIssuerWorkJSON{
+		Handle:            work.Handle,
+		IssuerURL:         work.IssuerURL,
+		IssuerCarrierPath: work.IssuerCarrierPath,
+		RequestBodyBase64: base64.StdEncoding.EncodeToString(work.RequestBody),
 	})
 }
 

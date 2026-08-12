@@ -5,7 +5,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"sync"
@@ -83,6 +85,67 @@ func TestNativeSessionBeginReturnsIssuerRequestOnlyAfterPrelude1(t *testing.T) {
 	}
 	if len(tokenNonce) != 32 || !bytes.Equal(admissionContextHash, request.AdmissionContextHash) || expiryUnix <= uint64(now.Unix()) || expiryUnix >= request.ReplayEpochValidUntil {
 		t.Fatalf("unexpected native issuer request: nonce=%d context=%x expiry=%d", len(tokenNonce), admissionContextHash, expiryUnix)
+	}
+}
+
+func TestNativeIssuerWorkJSONRemainsOpaqueToNativeAdapters(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	registry := newNativeSessionRegistry(nativeSessionRegistryOptions{
+		now:    func() time.Time { return now },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x76}, 64)),
+		start: func(context.Context, client.NativeProvisioning, time.Time) (nativeSessionHandshake, handshake.ClientProofRequest, error) {
+			return &nativeTestHandshake{}, nativeTestProofRequest(now), nil
+		},
+	})
+	work, err := registry.begin(client.NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer registry.close(work.Handle)
+	encoded, err := encodeNativeIssuerWorkJSON(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded nativeIssuerWorkJSON
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	body, err := base64.StdEncoding.DecodeString(decoded.RequestBodyBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Handle != work.Handle || decoded.IssuerURL != work.IssuerURL || decoded.IssuerCarrierPath != work.IssuerCarrierPath || !bytes.Equal(body, work.RequestBody) {
+		t.Fatalf("native issuer JSON changed opaque issuer work: %+v", decoded)
+	}
+}
+
+func TestNativeSessionRawCompletionDispatch(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	application := nativeTestApplication(t)
+	stub := &nativeTestHandshake{session: &handshake.EstablishedSession{Application: application}}
+	registry := newNativeSessionRegistry(nativeSessionRegistryOptions{
+		now:    func() time.Time { return now },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x78}, 64)),
+		start: func(context.Context, client.NativeProvisioning, time.Time) (nativeSessionHandshake, handshake.ClientProofRequest, error) {
+			return stub, nativeTestProofRequest(now), nil
+		},
+	})
+	previousRegistry := nativeSessions
+	nativeSessions = registry
+	defer func() { nativeSessions = previousRegistry }()
+	work, err := registry.begin(client.NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer registry.close(work.Handle)
+	proof := nativeTestAdmissionProof(now, nativeTestProofRequest(now).AdmissionContextHash)
+	encodedProof, err := protocol.Encode(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, payload := dispatch(opCompleteNativeSessionRaw, server.EncodeCarrier(server.CarrierBlindRSAIssueResp, encodedProof), work.Handle)
+	if status != statusOK || len(payload) != 0 {
+		t.Fatalf("raw completion dispatch = status %d payload %x", status, payload)
 	}
 }
 

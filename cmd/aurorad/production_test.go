@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -47,6 +48,9 @@ func TestNewProductionServiceLoadsVerifiedDeploymentAndPrivateDependencies(t *te
 }
 
 func TestRunServeStartsAndStopsProductionService(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("production serving requires Linux")
+	}
 	config := newProductionCommandFixture(t)
 	arguments := productionCommandArguments(config)
 	ready := make(chan struct{})
@@ -108,13 +112,15 @@ func TestNewProductionServiceRejectsMalformedDeploymentAndUnsafePrivateKey(t *te
 		closeProductionCaches(caches)
 		t.Fatal("malformed relay descriptor accepted")
 	}
-	config = newProductionCommandFixture(t)
-	if err := os.Chmod(config.tlsPrivateKeyPath, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, caches, err := newProductionService(config); err == nil {
-		closeProductionCaches(caches)
-		t.Fatal("world-readable TLS private key accepted")
+	if runtime.GOOS != "windows" {
+		config = newProductionCommandFixture(t)
+		if err := os.Chmod(config.tlsPrivateKeyPath, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, caches, err := newProductionService(config); err == nil {
+			closeProductionCaches(caches)
+			t.Fatal("world-readable TLS private key accepted")
+		}
 	}
 	config = newProductionCommandFixture(t)
 	config.coverOriginURL = ""
@@ -125,6 +131,9 @@ func TestNewProductionServiceRejectsMalformedDeploymentAndUnsafePrivateKey(t *te
 }
 
 func TestProductionBinaryStartsAndStopsOnSIGTERM(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("SIGTERM process lifecycle is Unix-specific")
+	}
 	config := newProductionCommandFixture(t)
 	binary := filepath.Join(t.TempDir(), "aurorad")
 	build := exec.Command("go", "build", "-o", binary, ".")

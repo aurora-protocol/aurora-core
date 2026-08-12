@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -79,6 +80,10 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
+		return 2
+	}
+	if runtime.GOOS != "linux" {
+		fmt.Fprintln(stderr, "server: production service requires a Linux host")
 		return 2
 	}
 	service, caches, err := newProductionService(config)
@@ -431,7 +436,7 @@ func validateProductionCachePaths(paths []string) error {
 		seen[clean] = struct{}{}
 		info, err := os.Lstat(clean)
 		if err == nil {
-			if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+			if !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) {
 				return fmt.Errorf("server: durable replay cache file is unsafe")
 			}
 			continue
@@ -492,7 +497,7 @@ func readProductionFileWithMode(path string, restricted bool) ([]byte, error) {
 	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
 		return nil, fmt.Errorf("server: configuration file changed while opening")
 	}
-	if restricted && openedInfo.Mode().Perm()&0o077 != 0 {
+	if restricted && runtime.GOOS != "windows" && openedInfo.Mode().Perm()&0o077 != 0 {
 		return nil, fmt.Errorf("server: private configuration file permissions are too broad")
 	}
 	encoded, err := io.ReadAll(io.LimitReader(file, maximumProductionConfigurationFileBytes+1))

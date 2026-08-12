@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -73,6 +74,9 @@ func TestHarnessHelpSucceeds(t *testing.T) {
 }
 
 func TestReadRestrictedProductionFileRejectsUnsafeInputs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not provide Unix owner-only permission bits")
+	}
 	directory := t.TempDir()
 	path := filepath.Join(directory, "private.bin")
 	if err := os.WriteFile(path, []byte("secret"), 0o600); err != nil {
@@ -101,6 +105,9 @@ func TestReadRestrictedProductionFileRejectsUnsafeInputs(t *testing.T) {
 }
 
 func TestProductionReplayCachesMustBeDistinctAndPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not provide Unix owner-only permission bits")
+	}
 	directory := t.TempDir()
 	first := filepath.Join(directory, "first.log")
 	second := filepath.Join(directory, "second.log")
@@ -124,6 +131,9 @@ func TestServeReportsIncompleteTLSConfiguration(t *testing.T) {
 }
 
 func TestRunServeReportsListenerFailure(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("production serving requires Linux")
+	}
 	config := newProductionCommandFixture(t)
 	restoreListen := setProductionListenForTest(func(string) (net.Listener, error) {
 		return nil, errors.New("listener failure")
@@ -135,5 +145,19 @@ func TestRunServeReportsListenerFailure(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "listen") {
 		t.Fatalf("listener failure error = %s", stderr.String())
+	}
+}
+
+func TestServeRejectsNonLinuxHost(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("non-Linux production host check")
+	}
+	config := newProductionCommandFixture(t)
+	var stdout, stderr bytes.Buffer
+	if code := run(append([]string{"serve"}, productionCommandArguments(config)...), &stdout, &stderr); code != 2 {
+		t.Fatalf("serve non-Linux host code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "requires a Linux host") {
+		t.Fatalf("non-Linux host rejection = %s", stderr.String())
 	}
 }

@@ -128,7 +128,7 @@ func RunCarrierLoad(ctx context.Context, client *http.Client, endpoint string, o
 		}
 	}
 
-	report.Duration = time.Since(started)
+	report.Duration = measuredDuration(time.Since(started))
 	report.PeakRSSBytes, report.RSSAvailable = stopRSS()
 	var memoryAfter runtime.MemStats
 	runtime.ReadMemStats(&memoryAfter)
@@ -212,7 +212,7 @@ func executeCarrierLoadRequest(ctx context.Context, client *http.Client, endpoin
 	if err != nil {
 		_ = body.Close()
 		result.err = fmt.Errorf("create request")
-		result.latency = time.Since(started)
+		result.latency = measuredDuration(time.Since(started))
 		return result
 	}
 	request.ContentLength = int64(len(requestBody))
@@ -221,20 +221,20 @@ func executeCarrierLoadRequest(ctx context.Context, client *http.Client, endpoin
 	bodyErr := body.WaitClosed(requestCtx)
 	if err != nil {
 		result.err = fmt.Errorf("execute request")
-		result.latency = time.Since(started)
+		result.latency = measuredDuration(time.Since(started))
 		return result
 	}
 	if bodyErr != nil {
 		_ = response.Body.Close()
 		result.err = fmt.Errorf("finish request body")
-		result.latency = time.Since(started)
+		result.latency = measuredDuration(time.Since(started))
 		return result
 	}
 
 	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, int64(len(requestBody)+1)))
 	result.bytesReceived = uint64(len(responseBody))
 	closeErr := response.Body.Close()
-	result.latency = time.Since(started)
+	result.latency = measuredDuration(time.Since(started))
 	if readErr != nil {
 		result.err = fmt.Errorf("read response")
 		return result
@@ -364,6 +364,13 @@ func startRSSSampler() func() (uint64, bool) {
 type rssSample struct {
 	bytes     uint64
 	available bool
+}
+
+func measuredDuration(elapsed time.Duration) time.Duration {
+	if elapsed <= 0 {
+		return time.Nanosecond
+	}
+	return elapsed
 }
 
 func latencyPercentiles(samples []time.Duration) latencySummary {

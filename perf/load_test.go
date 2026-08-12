@@ -65,6 +65,24 @@ func TestLatencyPercentilesUseNearestRank(t *testing.T) {
 	}
 }
 
+func TestMeasuredDurationKeepsElapsedMetricsPositive(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		elapsed time.Duration
+		want    time.Duration
+	}{
+		{name: "clock tie", elapsed: 0, want: time.Nanosecond},
+		{name: "clock regression", elapsed: -time.Nanosecond, want: time.Nanosecond},
+		{name: "positive", elapsed: 7 * time.Nanosecond, want: 7 * time.Nanosecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := measuredDuration(tc.elapsed); got != tc.want {
+				t.Fatalf("measuredDuration(%s) = %s, want %s", tc.elapsed, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRunCarrierLoadCompletesBoundedHarnessLoad(t *testing.T) {
 	harness, err := server.NewHarnessHandler(server.HarnessOptions{NowUnix: 1_700_000_000})
 	if err != nil {

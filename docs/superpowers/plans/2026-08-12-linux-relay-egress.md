@@ -46,11 +46,11 @@
 
 **Files:** Create `relay/egress.go`; create `relay/egress_test.go`; modify `relay/relay.go` only where an owned event snapshot or local-close transition is required.
 
-- [ ] **Step 1: Write failing contract tests**
+- [x] **Step 1: Write failing contract tests**
 
 Define fakes for `FrameSink` and `Egress`. Assert that malformed or policy-denied blocks never reach egress, event payloads are owned copies, flow-open socket work completes before confirmations are queued, inbound block order is serialized, queue backpressure waits without spinning, cancellation interrupts waiting, and close is idempotent and joins egress.
 
-- [ ] **Step 2: Implement the minimum public contracts**
+- [x] **Step 2: Implement the minimum public contracts**
 
 Use these shapes unless a test proves a narrower API is required:
 
@@ -74,7 +74,7 @@ type ExitSessionOptions struct {
 
 `NewExitSession` owns a validator, egress, and sink. `HandleFrameBlock` validates synchronously, invokes egress in frame order, then queues immediate confirmations in one backward block. It retries only `session.ErrBackpressure` on a bounded timer and returns cancellation or terminal sink errors unchanged.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 Run `go test ./relay -run 'TestExitSession' -count=20` and `go test -race ./relay -run 'TestExitSession' -count=5`. Commit `feat: add validated relay egress sessions`.
 

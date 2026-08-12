@@ -432,12 +432,13 @@ type ExitFrameResult struct {
 }
 
 type ExitFrameEvent struct {
-	Kind      ExitEventKind
-	FlowID    uint64
-	FrameType uint64
-	Flow      coreflow.FlowState
-	Data      []byte
-	Close     protocol.FlowClose
+	Kind            ExitEventKind
+	FlowID          uint64
+	FrameType       uint64
+	Flow            coreflow.FlowState
+	Data            []byte
+	Close           protocol.FlowClose
+	immediateFrames []protocol.AuroraFrame
 }
 
 func NewExitFlowHandler(policy ExitPolicy) *ExitFlowHandler {
@@ -465,10 +466,11 @@ func (h *ExitFlowHandler) HandleFrameBlock(block protocol.FrameBlock, now uint64
 			result.OutboundFrames = appendAuroraFrames(result.OutboundFrames, out)
 			state, _ := h.FlowState(frame.FlowID)
 			result.Events = append(result.Events, ExitFrameEvent{
-				Kind:      ExitEventFlowOpened,
-				FlowID:    frame.FlowID,
-				FrameType: frame.FrameType,
-				Flow:      cloneFlowState(state),
+				Kind:            ExitEventFlowOpened,
+				FlowID:          frame.FlowID,
+				FrameType:       frame.FrameType,
+				Flow:            cloneFlowState(state),
+				immediateFrames: appendAuroraFrames(nil, out),
 			})
 		case registry.FrameStreamData, registry.FrameDatagramData, registry.FrameDNSMessage:
 			event, err := h.handleDataFrame(frame, now)

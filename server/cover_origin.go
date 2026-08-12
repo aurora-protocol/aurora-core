@@ -12,12 +12,38 @@ type CoverOrigin interface {
 	ServeFailureHTTP(http.ResponseWriter, *http.Request)
 }
 
+// ProductionCoverOrigin identifies a cover origin constructed for production use.
+type ProductionCoverOrigin interface {
+	CoverOrigin
+	productionFirstHopCoverOrigin()
+}
+
+type productionCoverOrigin struct {
+	CoverOrigin
+}
+
+func (productionCoverOrigin) productionFirstHopCoverOrigin() {}
+
 type reverseProxyCoverOrigin struct {
 	proxy *httputil.ReverseProxy
 }
 
 func NewReverseProxyCoverOrigin(target *url.URL) (CoverOrigin, error) {
 	return NewReverseProxyCoverOriginWithTransport(target, nil)
+}
+
+// NewProductionReverseProxyCoverOrigin constructs a production cover origin.
+func NewProductionReverseProxyCoverOrigin(target *url.URL) (ProductionCoverOrigin, error) {
+	return NewProductionReverseProxyCoverOriginWithTransport(target, nil)
+}
+
+// NewProductionReverseProxyCoverOriginWithTransport constructs a production cover origin with a fixed transport.
+func NewProductionReverseProxyCoverOriginWithTransport(target *url.URL, transport http.RoundTripper) (ProductionCoverOrigin, error) {
+	origin, err := NewReverseProxyCoverOriginWithTransport(target, transport)
+	if err != nil {
+		return nil, err
+	}
+	return productionCoverOrigin{CoverOrigin: origin}, nil
 }
 
 func NewReverseProxyCoverOriginWithTransport(target *url.URL, transport http.RoundTripper) (CoverOrigin, error) {

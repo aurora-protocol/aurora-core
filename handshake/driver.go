@@ -190,6 +190,14 @@ func NewRelayDriver(config RelayDriverConfig) (*RelayDriver, error) {
 	return newRelayDriver(config, time.Now(), true)
 }
 
+// Deployment returns the verified deployment bound to this relay driver.
+func (d *RelayDriver) Deployment() trust.VerifiedRelayDeployment {
+	if d == nil {
+		return trust.VerifiedRelayDeployment{}
+	}
+	return d.deployment
+}
+
 func newRelayDriverForTest(config RelayDriverConfig) (*RelayDriver, error) {
 	return newRelayDriver(config, time.Now(), false)
 }

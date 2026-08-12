@@ -127,6 +127,7 @@ type FirstHopHandler struct {
 	postHeaderTimeout  time.Duration
 	begin              firstHopBeginFunc
 	finish             firstHopFinishFunc
+	sessionAdmission   func(context.Context) (func(), error)
 	sessionMu          sync.Mutex
 	sessions           map[uint64]context.CancelFunc
 	nextSessionID      uint64
@@ -424,6 +425,14 @@ func (h *FirstHopHandler) ServeHTTP(w http.ResponseWriter, request *http.Request
 		}
 		serveCoverRequest(w, request, h.origin, h.coverOrigin)
 		return
+	}
+	if h.sessionAdmission != nil {
+		release, err := h.sessionAdmission(sessionContext)
+		if err != nil || release == nil {
+			h.servePreHeaderFailure(w, request)
+			return
+		}
+		defer release()
 	}
 	sessionID, registered := h.registerSession(cancel)
 	if !registered {

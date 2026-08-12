@@ -174,15 +174,15 @@ Run live integration 100 times, evidence 20 times, and race-enabled integration 
 
 **Files:** Create `server/production.go`; create `server/production_test.go`.
 
-- [ ] **Step 1: Write failing production-constructor tests**
+- [x] **Step 1: Write failing production-constructor tests**
 
 Require verified deployment, relay driver, TLS identity, authority/path/binding metadata, cover origin, persistent replay dependencies already enforced by the driver, exit policy, egress limits, and session concurrency limits. Reject static handlers, harness origins/exchangers, missing TLS, loopback-only placeholders, dynamic TLS callbacks, and invalid limits.
 
-- [ ] **Step 2: Implement owned production composition**
+- [x] **Step 2: Implement owned production composition**
 
 Build `FirstHopHandler`, per-session socket egress, an HTTP/2-only server, and a semaphore-backed session cap from one immutable options snapshot. Expose `Serve(net.Listener)` and bounded `Shutdown(context.Context)` ownership without logging secrets or destinations. Keep harness constructors in their existing files and out of this API.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 Run production server tests 50 times and race tests 10 times. Commit `feat: add production relay server composition`.
 

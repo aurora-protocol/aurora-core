@@ -1,6 +1,7 @@
 package handshake
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -130,6 +131,22 @@ func TestRelayDriverProductionRequiresDurableReplayCaches(t *testing.T) {
 	config.BootstrapCache = admission.NewMemoryReplayCache()
 	if _, err := newRelayDriverForTest(config); err != nil {
 		t.Fatalf("explicit test relay configuration rejected memory caches: %v", err)
+	}
+}
+
+func TestRelayDriverDeploymentReturnsBoundVerifiedDeployment(t *testing.T) {
+	config := validRelayDriverConfig(t, time.Now())
+	driver, err := NewRelayDriver(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment := driver.Deployment()
+	if !deployment.Valid() || deployment.Suite() != config.Deployment.Suite() || deployment.Method() != config.Deployment.Method() ||
+		!bytes.Equal(deployment.DescriptorHash(), config.Deployment.DescriptorHash()) || !bytes.Equal(deployment.TemplateHash(), config.Deployment.TemplateHash()) {
+		t.Fatalf("relay driver returned unexpected deployment: %+v", deployment)
+	}
+	if (*RelayDriver)(nil).Deployment().Valid() {
+		t.Fatal("nil relay driver returned a verified deployment")
 	}
 }
 

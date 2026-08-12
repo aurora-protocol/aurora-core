@@ -213,7 +213,7 @@ func TestDirectionStateCloneOwnsEveryMutableField(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := state.ApplyReceivedUpdateAt(registry.SuiteHybrid768AESGCM, protocol.KeyUpdate{
+	result, err := state.ApplyReceivedUpdateAt(registry.SuiteHybrid768AESGCM, protocol.KeyUpdate{
 		RouteInstanceID: state.RouteInstanceID,
 		HopLayer:        state.HopLayer,
 		Direction:       state.Direction,
@@ -222,9 +222,11 @@ func TestDirectionStateCloneOwnsEveryMutableField(t *testing.T) {
 		UpdateNonce:     bytesOf(0x92, 16),
 		AckRequired:     true,
 		UpdateReason:    1,
-	}, bytesOf(0x93, 16), now); err != nil {
+	}, bytesOf(0x93, 16), now)
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer result.Destroy()
 	state.pendingSentUpdate = update
 	state.lastReceivedUpdate = bytesOf(0x94, 3)
 	clone := state.Clone()
@@ -271,13 +273,142 @@ func TestDirectionStateDestroyZeroesMaterialAndClearsState(t *testing.T) {
 	}
 }
 
+func TestPreparedKeyUpdateDestroyZeroesOpaqueMaterial(t *testing.T) {
+	state := transactionalDirectionState()
+	prepared, err := state.PrepareUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0x98, 16), true, 1, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := [][]byte{
+		prepared.frame.UpdateNonce,
+		prepared.next.AppSecret,
+		prepared.next.Key,
+		prepared.next.IV,
+		prepared.sourceMaterial.AppSecret,
+		prepared.sourceMaterial.Key,
+		prepared.sourceMaterial.IV,
+	}
+
+	prepared.Destroy()
+
+	requireZeroedByteSlices(t, held...)
+	if prepared.frame.RouteInstanceID != 0 || prepared.sourcePhase != 0 || len(prepared.next.AppSecret) != 0 || len(prepared.sourceMaterial.AppSecret) != 0 {
+		t.Fatalf("destroy did not clear prepared update: %+v", prepared)
+	}
+}
+
+func TestDirectionStateDrainExpiryZeroesDiscardedHistory(t *testing.T) {
+	t.Run("sent update", func(t *testing.T) {
+		state := transactionalDirectionState()
+		if _, err := state.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0x9b, 16), true, 1); err != nil {
+			t.Fatal(err)
+		}
+		held := [][]byte{
+			state.previousMaterial.AppSecret,
+			state.previousMaterial.Key,
+			state.previousMaterial.IV,
+			state.pendingSentUpdate.UpdateNonce,
+		}
+		state.DrainUntil = time.Now().Add(-time.Second)
+
+		if _, _, ok := state.PendingKeyUpdateRetransmission(time.Now()); ok {
+			t.Fatalf("expired update remained pending")
+		}
+
+		requireZeroedByteSlices(t, held...)
+	})
+
+	t.Run("received update", func(t *testing.T) {
+		state := transactionalDirectionState()
+		result, err := state.ApplyReceivedUpdateAt(registry.SuiteHybrid768AESGCM, protocol.KeyUpdate{
+			RouteInstanceID: state.RouteInstanceID,
+			HopLayer:        state.HopLayer,
+			Direction:       state.Direction,
+			OldKeyPhase:     state.KeyPhase,
+			NewKeyPhase:     state.KeyPhase + 1,
+			UpdateNonce:     bytesOf(0x9c, 16),
+			AckRequired:     true,
+			UpdateReason:    1,
+		}, bytesOf(0x9d, 16), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer result.Destroy()
+		held := [][]byte{
+			state.previousMaterial.AppSecret,
+			state.previousMaterial.Key,
+			state.previousMaterial.IV,
+			state.lastReceivedUpdate,
+			state.lastReceivedUpdateResult.Next.AppSecret,
+			state.lastReceivedUpdateResult.Next.Key,
+			state.lastReceivedUpdateResult.Next.IV,
+			state.lastReceivedUpdateResult.ACK.AckNonce,
+		}
+		state.DrainUntil = time.Now().Add(-time.Second)
+
+		if _, _, ok := state.PendingKeyUpdateRetransmission(time.Now()); ok {
+			t.Fatalf("expired update remained pending")
+		}
+
+		requireZeroedByteSlices(t, held...)
+	})
+}
+
+func TestDirectionStateTransitionsZeroSupersededOwnedMaterial(t *testing.T) {
+	t.Run("local update", func(t *testing.T) {
+		state := transactionalDirectionState()
+		defer state.Destroy()
+		active := state.Material
+		prepared, err := state.PrepareUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0x99, 16), true, 1, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer prepared.Destroy()
+		if err := state.CommitPreparedUpdate(prepared, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		requireZeroedByteSlices(t, active.AppSecret, active.Key, active.IV)
+	})
+
+	t.Run("received update", func(t *testing.T) {
+		state := transactionalDirectionState()
+		defer state.Destroy()
+		active := state.Material
+		result, err := state.ApplyReceivedUpdateAt(registry.SuiteHybrid768AESGCM, protocol.KeyUpdate{
+			RouteInstanceID: state.RouteInstanceID,
+			HopLayer:        state.HopLayer,
+			Direction:       state.Direction,
+			OldKeyPhase:     state.KeyPhase,
+			NewKeyPhase:     state.KeyPhase + 1,
+			UpdateNonce:     bytesOf(0x9a, 16),
+			UpdateReason:    1,
+		}, nil, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer result.Destroy()
+		requireZeroedByteSlices(t, active.AppSecret, active.Key, active.IV)
+	})
+}
+
+func requireZeroedByteSlices(t *testing.T, values ...[]byte) {
+	t.Helper()
+	for _, value := range values {
+		for _, b := range value {
+			if b != 0 {
+				t.Fatalf("discarded material was not zeroed")
+			}
+		}
+	}
+}
+
 func populatedDirectionStateForDestroy(t *testing.T) DirectionState {
 	t.Helper()
 	state := transactionalDirectionState()
 	if _, err := state.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0x95, 16), true, 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := state.ApplyReceivedUpdateAt(registry.SuiteHybrid768AESGCM, protocol.KeyUpdate{
+	result, err := state.ApplyReceivedUpdateAt(registry.SuiteHybrid768AESGCM, protocol.KeyUpdate{
 		RouteInstanceID: state.RouteInstanceID,
 		HopLayer:        state.HopLayer,
 		Direction:       state.Direction,
@@ -286,9 +417,11 @@ func populatedDirectionStateForDestroy(t *testing.T) DirectionState {
 		UpdateNonce:     bytesOf(0x96, 16),
 		AckRequired:     true,
 		UpdateReason:    1,
-	}, bytesOf(0x97, 16), time.Now()); err != nil {
+	}, bytesOf(0x97, 16), time.Now())
+	if err != nil {
 		t.Fatal(err)
 	}
+	result.Destroy()
 	return state
 }
 
@@ -591,7 +724,7 @@ func TestReceiverOpensOldAndNewKeyPhaseOnlyDuringDrain(t *testing.T) {
 		HopLayer:        1,
 		Direction:       0,
 		KeyPhase:        0,
-		Material:        original,
+		Material:        cloneKeyMaterial(original),
 	}
 	update := protocol.KeyUpdate{
 		RouteInstanceID: 4,
@@ -1441,7 +1574,7 @@ func TestDirectionStateKeepsOldReadMaterialOnlyUntilDrainExpiry(t *testing.T) {
 		HopLayer:        1,
 		Direction:       0,
 		KeyPhase:        0,
-		Material:        original,
+		Material:        cloneKeyMaterial(original),
 	}
 	update := protocol.KeyUpdate{
 		RouteInstanceID: 0x44,
@@ -1501,7 +1634,7 @@ func TestDirectionStateBoundsLostKeyUpdateACKRetransmission(t *testing.T) {
 		HopLayer:        1,
 		Direction:       0,
 		KeyPhase:        0,
-		Material:        original,
+		Material:        cloneKeyMaterial(original),
 	}
 	sent, err := state.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa5, 16), true, 1)
 	if err != nil {
@@ -1535,7 +1668,7 @@ func TestDirectionStateBoundsLostKeyUpdateACKRetransmission(t *testing.T) {
 		HopLayer:        1,
 		Direction:       0,
 		KeyPhase:        0,
-		Material:        original,
+		Material:        cloneKeyMaterial(original),
 	}
 	if _, err := state.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa6, 16), true, 1); err != nil {
 		t.Fatal(err)

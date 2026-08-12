@@ -18,9 +18,30 @@ type KeyMaterial struct {
 	IV        []byte
 }
 
+// Destroy zeroes and releases material owned by the caller.
+func (m *KeyMaterial) Destroy() {
+	if m == nil {
+		return
+	}
+	destroyKeyMaterial(m)
+	*m = KeyMaterial{}
+}
+
 type KeyUpdateResult struct {
 	Next KeyMaterial
 	ACK  *protocol.KeyUpdateACK
+}
+
+// Destroy zeroes all owned result material.
+func (r *KeyUpdateResult) Destroy() {
+	if r == nil {
+		return
+	}
+	r.Next.Destroy()
+	if r.ACK != nil {
+		destroyBytes(r.ACK.AckNonce)
+	}
+	*r = KeyUpdateResult{}
 }
 
 type PreparedKeyUpdate struct {
@@ -30,10 +51,23 @@ type PreparedKeyUpdate struct {
 	sourceMaterial KeyMaterial
 }
 
+// Frame returns an owned copy of the update frame.
 func (p PreparedKeyUpdate) Frame() protocol.KeyUpdate {
 	return cloneKeyUpdate(p.frame)
 }
 
+// Destroy zeroes the opaque preparation state.
+func (p *PreparedKeyUpdate) Destroy() {
+	if p == nil {
+		return
+	}
+	destroyBytes(p.frame.UpdateNonce)
+	p.next.Destroy()
+	p.sourceMaterial.Destroy()
+	*p = PreparedKeyUpdate{}
+}
+
+// DeriveKeyUpdate returns material owned by the caller.
 func DeriveKeyUpdate(suite uint64, currentAppSecret []byte, frame protocol.KeyUpdate) (KeyMaterial, error) {
 	if err := protocol.ValidateKeyUpdate(frame); err != nil {
 		return KeyMaterial{}, err
@@ -52,19 +86,24 @@ func DeriveKeyUpdate(suite uint64, currentAppSecret []byte, frame protocol.KeyUp
 	}
 	keyLen, err := auroracrypto.AEADKeyLength(suite)
 	if err != nil {
+		destroyBytes(nextSecret)
 		return KeyMaterial{}, err
 	}
 	key, err := auroracrypto.HKDFExpandLabelForSuite(suite, nextSecret, "key", nil, keyLen)
 	if err != nil {
+		destroyBytes(nextSecret)
 		return KeyMaterial{}, err
 	}
 	iv, err := auroracrypto.HKDFExpandLabelForSuite(suite, nextSecret, "iv", nil, 12)
 	if err != nil {
+		destroyBytes(nextSecret)
+		destroyBytes(key)
 		return KeyMaterial{}, err
 	}
 	return KeyMaterial{AppSecret: nextSecret, Key: key, IV: iv}, nil
 }
 
+// ApplyReceivedKeyUpdate returns a result owned by the caller.
 func ApplyReceivedKeyUpdate(suite uint64, currentReadSecret []byte, frame protocol.KeyUpdate, ackNonce []byte) (KeyUpdateResult, error) {
 	next, err := DeriveKeyUpdate(suite, currentReadSecret, frame)
 	if err != nil {
@@ -73,6 +112,7 @@ func ApplyReceivedKeyUpdate(suite uint64, currentReadSecret []byte, frame protoc
 	var ack *protocol.KeyUpdateACK
 	if frame.AckRequired {
 		if len(ackNonce) != 16 {
+			next.Destroy()
 			return KeyUpdateResult{}, fmt.Errorf("packet: KEY_UPDATE_ACK nonce length %d, want 16", len(ackNonce))
 		}
 		ack = &protocol.KeyUpdateACK{
@@ -103,7 +143,7 @@ type DirectionState struct {
 	HopLayer        uint8
 	Direction       uint8
 	KeyPhase        uint8
-	Material        KeyMaterial
+	Material        KeyMaterial // Owned and destroyed when replaced or closed.
 	DrainUntil      time.Time
 
 	previousKeyPhase uint8
@@ -134,14 +174,11 @@ func (s DirectionState) Clone() DirectionState {
 }
 
 func (s *DirectionState) Destroy() {
-	destroyKeyMaterial(&s.Material)
-	destroyKeyMaterial(&s.previousMaterial)
-	destroyKeyMaterial(&s.lastReceivedUpdateResult.Next)
-	destroyBytes(s.pendingSentUpdate.UpdateNonce)
-	destroyBytes(s.lastReceivedUpdate)
-	if s.lastReceivedUpdateResult.ACK != nil {
-		destroyBytes(s.lastReceivedUpdateResult.ACK.AckNonce)
+	if s == nil {
+		return
 	}
+	destroyKeyMaterial(&s.Material)
+	s.clearDrainState()
 	*s = DirectionState{}
 }
 
@@ -151,12 +188,14 @@ func (s *DirectionState) InitiateUpdate(suite uint64, updateNonce []byte, ackReq
 	if err != nil {
 		return protocol.KeyUpdate{}, err
 	}
+	defer prepared.Destroy()
 	if err := s.CommitPreparedUpdate(prepared, now); err != nil {
 		return protocol.KeyUpdate{}, err
 	}
 	return prepared.Frame(), nil
 }
 
+// PrepareUpdate returns opaque state that the caller must destroy after use.
 func (s *DirectionState) PrepareUpdate(suite uint64, updateNonce []byte, ackRequired bool, reason uint64, now time.Time) (PreparedKeyUpdate, error) {
 	if s.drainActive(now) {
 		return PreparedKeyUpdate{}, fmt.Errorf("packet: KEY_UPDATE already in drain window")
@@ -183,7 +222,7 @@ func (s *DirectionState) PrepareUpdate(suite uint64, updateNonce []byte, ackRequ
 	}
 	return PreparedKeyUpdate{
 		frame:          cloneKeyUpdate(frame),
-		next:           cloneKeyMaterial(next),
+		next:           next,
 		sourcePhase:    s.KeyPhase,
 		sourceMaterial: cloneKeyMaterial(s.Material),
 	}, nil
@@ -209,12 +248,14 @@ func (s *DirectionState) CommitPreparedUpdate(prepared PreparedKeyUpdate, now ti
 	if !bytes.Equal(s.Material.AppSecret, prepared.sourceMaterial.AppSecret) || !bytes.Equal(s.Material.Key, prepared.sourceMaterial.Key) || !bytes.Equal(s.Material.IV, prepared.sourceMaterial.IV) {
 		return fmt.Errorf("packet: prepared KEY_UPDATE source material mismatch")
 	}
+	s.clearDrainState()
 	s.previousKeyPhase = s.KeyPhase
 	s.previousMaterial = cloneKeyMaterial(s.Material)
 	s.KeyPhase = frame.NewKeyPhase
-	s.Material = cloneKeyMaterial(prepared.next)
+	next := cloneKeyMaterial(prepared.next)
+	s.Material.Destroy()
+	s.Material = next
 	s.DrainUntil = now.Add(MaxDrainWindow)
-	s.clearLastReceivedUpdate()
 	if frame.AckRequired {
 		s.pendingSentUpdate = cloneKeyUpdate(frame)
 		s.pendingSentUpdateActive = true
@@ -224,6 +265,7 @@ func (s *DirectionState) CommitPreparedUpdate(prepared PreparedKeyUpdate, now ti
 	return nil
 }
 
+// MaterialForPacket returns material owned by the caller.
 func (s *DirectionState) MaterialForPacket(pkt AuroraPacket, now time.Time) (KeyMaterial, error) {
 	s.expireDrain(now)
 	if pkt.RouteInstanceID != s.RouteInstanceID {
@@ -244,6 +286,7 @@ func (s *DirectionState) MaterialForPacket(pkt AuroraPacket, now time.Time) (Key
 	return KeyMaterial{}, fmt.Errorf("packet: key phase %d is not active", pkt.KeyPhase)
 }
 
+// PendingKeyUpdateRetransmission returns material owned by the caller when ok is true.
 func (s *DirectionState) PendingKeyUpdateRetransmission(now time.Time) (protocol.KeyUpdate, KeyMaterial, bool) {
 	s.expireDrain(now)
 	if !s.pendingSentUpdateActive {
@@ -276,10 +319,12 @@ func (s *DirectionState) ApplyKeyUpdateACK(ack protocol.KeyUpdateACK, now time.T
 	return nil
 }
 
+// ApplyReceivedUpdate returns a result owned by the caller.
 func (s *DirectionState) ApplyReceivedUpdate(suite uint64, frame protocol.KeyUpdate, ackNonce []byte) (KeyUpdateResult, error) {
 	return s.ApplyReceivedUpdateAt(suite, frame, ackNonce, time.Now())
 }
 
+// ApplyReceivedUpdateAt returns a result owned by the caller.
 func (s *DirectionState) ApplyReceivedUpdateAt(suite uint64, frame protocol.KeyUpdate, ackNonce []byte, now time.Time) (KeyUpdateResult, error) {
 	if frame.RouteInstanceID != s.RouteInstanceID {
 		return KeyUpdateResult{}, fmt.Errorf("packet: KEY_UPDATE route instance mismatch")
@@ -304,10 +349,13 @@ func (s *DirectionState) ApplyReceivedUpdateAt(suite uint64, frame protocol.KeyU
 	if err != nil {
 		return KeyUpdateResult{}, err
 	}
+	s.clearDrainState()
 	s.previousKeyPhase = s.KeyPhase
 	s.previousMaterial = cloneKeyMaterial(s.Material)
 	s.KeyPhase = frame.NewKeyPhase
-	s.Material = res.Next
+	next := cloneKeyMaterial(res.Next)
+	s.Material.Destroy()
+	s.Material = next
 	s.DrainUntil = now.Add(MaxDrainWindow)
 	s.lastReceivedUpdate = append(s.lastReceivedUpdate[:0], encodedFrame...)
 	s.lastReceivedUpdateResult = cloneKeyUpdateResult(res)
@@ -325,17 +373,21 @@ func (s *DirectionState) isDuplicateReceivedUpdate(frame protocol.KeyUpdate, enc
 }
 
 func (s *DirectionState) clearLastReceivedUpdate() {
+	destroyBytes(s.lastReceivedUpdate)
+	s.lastReceivedUpdateResult.Destroy()
 	s.lastReceivedUpdate = nil
 	s.lastReceivedUpdateResult = KeyUpdateResult{}
 }
 
 func (s *DirectionState) clearPendingSentUpdate() {
+	destroyBytes(s.pendingSentUpdate.UpdateNonce)
 	s.pendingSentUpdate = protocol.KeyUpdate{}
 	s.pendingSentUpdateActive = false
 }
 
 func (s *DirectionState) clearDrainState() {
 	s.previousKeyPhase = 0
+	s.previousMaterial.Destroy()
 	s.previousMaterial = KeyMaterial{}
 	s.DrainUntil = time.Time{}
 	s.clearPendingSentUpdate()

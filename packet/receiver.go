@@ -62,6 +62,7 @@ func (r *Receiver) OpenWithDirectionState(pkt AuroraPacket, state *DirectionStat
 	if err != nil {
 		return protocol.FrameBlock{}, err
 	}
+	defer material.Destroy()
 	return r.openWithProtector(pkt, Protector{
 		Suite:           suite,
 		RouteInstanceID: state.RouteInstanceID,

@@ -632,35 +632,35 @@ type HTTP2ClientCarrierConfig struct {
 }
 ```
 
-- [ ] **Step 1: Write failing live-carrier tests**
+- [x] **Step 1: Write failing live-carrier tests**
 
 Start a real TLS server configured for HTTP/2. Assert `Open` returns after TLS handshake and binding derivation but before response headers, allowing Prelude0 to be written through an `io.Pipe`. After the server responds, assert fragmented records round-trip and `ApplicationStreams` returns the same aligned request/response bodies exactly once.
 
 Inspect server connection state and assert TLS 1.3, `h2`, `DidResume == false`, first stream behavior, one TCP connection, and no reuse across two opener calls. Assert configured authority/path/headers are preserved and no visible protocol marker is added.
 
-- [ ] **Step 2: Write failing validation and lifecycle tests**
+- [x] **Step 2: Write failing validation and lifecycle tests**
 
 Reject HTTP URLs, non-POST requests, wrong host/path/class/method metadata, client TLS configs allowing pre-1.3 or session caches, nil root trust, proxy functions, disabled certificate verification, response status/header mismatch, non-H2 ALPN, resumed state, oversized records, duplicate `ApplicationStreams`, and nil context.
 
 Cancel before dial, while waiting for TLS, while waiting for response headers, during blocked request write, and after application upgrade. In each case assert request pipe, response body, transport idle connections, result goroutine, and socket close within one second. Repeat 100 times and compare goroutine count with a bounded settling allowance.
 
-- [ ] **Step 3: Run the carrier tests and verify red**
+- [x] **Step 3: Run the carrier tests and verify red**
 
 Run: `GOCACHE=/private/tmp/aurora-first-hop-cache go test ./transport -run 'TestHTTP2ClientCarrier' -count=1`
 
 Expected: FAIL because the HTTP/2 opener does not exist.
 
-- [ ] **Step 4: Implement a fresh non-resumable HTTP/2 transport per Open**
+- [x] **Step 4: Implement a fresh non-resumable HTTP/2 transport per Open**
 
 Clone caller TLS configuration, require certificate verification, set both TLS bounds to TLS 1.3, set ALPN to only `h2`, and require `ClientSessionCache == nil`. Create one `http.Transport` per Open with HTTP/2 enabled, HTTP/1 disabled through `http.Protocols`, `DisableKeepAlives`, no proxy, and a custom `DialTLSContext` that completes the TLS handshake, validates state, signals a cloned `ConnectionState`, and returns the live `*tls.Conn`.
 
 Start `RoundTrip` in one owned goroutine with an `io.Pipe` request body. Race the TLS-state signal, request error, and context. Derive the live binding only after handshake success, then return the carrier before response headers. `ReadRecord` waits for and validates the configured cover status/header before constructing one bounded `RecordReader`; `WriteRecord` uses one `RecordWriter` on the pipe. `ApplicationStreams` marks one irreversible upgrade and returns wrappers that coordinate close with the transport goroutine.
 
-- [ ] **Step 5: Preserve visible request construction rules**
+- [x] **Step 5: Preserve visible request construction rules**
 
 Add `BuildStreamingH2CarrierRequest` beside `BuildCarrierRequest`. It must call the existing class selector and visible-header validator, require HTTPS and the HTTP/2 method family, clone headers, set caller authority and concrete path, and leave content length unknown. It must not invent content type, path, query, cookie, cache, or response headers.
 
-- [ ] **Step 6: Run transport verification and lifecycle stress**
+- [x] **Step 6: Run transport verification and lifecycle stress**
 
 Run:
 

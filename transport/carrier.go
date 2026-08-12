@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
@@ -42,6 +43,73 @@ type BuiltCarrierRequest struct {
 	InitialDatagrams [][]byte
 	StreamFallback   bool
 	NativeDatagrams  bool
+}
+
+type streamingH2BindingAttestation struct {
+	authorityHash []byte
+	pathID        []byte
+	authority     string
+	path          string
+	classID       uint64
+	methodID      uint64
+}
+
+type streamingH2BindingContextKey struct{}
+
+// BuildStreamingH2CarrierRequest constructs an authenticated, bodyless request
+// template whose body is attached only after a fresh HTTP/2 connection opens.
+func BuildStreamingH2CarrierRequest(in CarrierRequestInput) (BuiltCarrierRequest, error) {
+	const method = registry.MethodWebH2Stream
+	if in.Plan.Carrier.MethodID != method {
+		return BuiltCarrierRequest{}, fmt.Errorf("transport: streaming HTTP/2 builder requires HTTP/2 method family")
+	}
+	if in.Plan.UDPMode != UDPOverStreamFallback {
+		return BuiltCarrierRequest{}, fmt.Errorf("transport: streaming HTTP/2 builder requires stream fallback mode")
+	}
+	if len(in.Payload) != 0 {
+		return BuiltCarrierRequest{}, fmt.Errorf("transport: streaming HTTP/2 payload must be written after opening")
+	}
+	class, err := cover.SelectCarrierClass(in.Template, in.RequestClassID, method, false)
+	if err != nil {
+		return BuiltCarrierRequest{}, err
+	}
+	if !class.MayCarryCapsule {
+		return BuiltCarrierRequest{}, fmt.Errorf("transport: streaming HTTP/2 request class cannot carry capsule")
+	}
+	if len(in.Template.PublicNameHash) != 48 {
+		return BuiltCarrierRequest{}, fmt.Errorf("transport: streaming HTTP/2 authority hash length %d, want 48", len(in.Template.PublicNameHash))
+	}
+	if len(class.PathTemplateID) != 16 {
+		return BuiltCarrierRequest{}, fmt.Errorf("transport: streaming HTTP/2 path template ID length %d, want 16", len(class.PathTemplateID))
+	}
+	target, err := carrierURL(in.Scheme, in.Authority, in.Path)
+	if err != nil {
+		return BuiltCarrierRequest{}, err
+	}
+	if err := validateVisibleHeaders(in.Header); err != nil {
+		return BuiltCarrierRequest{}, err
+	}
+	request, err := newCarrierHTTPRequest(http.MethodPost, target, in.Authority, cloneHeader(in.Header), nil)
+	if err != nil {
+		return BuiltCarrierRequest{}, err
+	}
+	request.ContentLength = -1
+	attestation := streamingH2BindingAttestation{
+		authorityHash: append([]byte(nil), in.Template.PublicNameHash...),
+		pathID:        append([]byte(nil), class.PathTemplateID...),
+		authority:     in.Authority,
+		path:          in.Path,
+		classID:       class.ClassID,
+		methodID:      method,
+	}
+	request = request.WithContext(context.WithValue(request.Context(), streamingH2BindingContextKey{}, attestation))
+	return BuiltCarrierRequest{
+		MethodID:        method,
+		RequestClassID:  class.ClassID,
+		Request:         request,
+		StreamFallback:  in.Plan.UDPMode == UDPOverStreamFallback,
+		NativeDatagrams: in.Plan.UDPMode == UDPNativeDatagram,
+	}, nil
 }
 
 func BuildCarrierRequest(in CarrierRequestInput) (BuiltCarrierRequest, error) {

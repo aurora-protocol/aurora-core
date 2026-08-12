@@ -59,11 +59,11 @@
 - Create: `trust/deployment_test.go`
 
 **Interfaces:**
-- Consumes: `cover.ValidateTemplate`, `RelayDescriptorHash`, `RelayDescriptorSignatureInput`, `CoverTemplateHash`, `CoverTemplateFamilySignatureInput`, `CoverTemplateInstanceSignatureInput`, and `crypto.VerifySignature`.
+- Consumes: `ValidateCoverTemplateTime`, `ValidateRequestClass`, `RelayDescriptorHash`, `RelayDescriptorSignatureInput`, `CoverTemplateHash`, `CoverTemplateFamilySignatureInput`, `CoverTemplateInstanceSignatureInput`, and `crypto.VerifySignature`; structural cover checks stay in `trust` to avoid the existing `cover -> trust` dependency cycle.
 - Produces: `RelayDeploymentVerification`, `VerifiedRelayDeployment`, and `VerifyRelayDeployment(RelayDeploymentVerification) (VerifiedRelayDeployment, error)`.
 - Produces: owned accessors `Descriptor() protocol.RelayDescriptor`, `Template() protocol.CoverTemplate`, `RequestClass() protocol.RequestClass`, `DescriptorHash() []byte`, and `TemplateHash() []byte`.
 
-- [ ] **Step 1: Write the failing trust-boundary tests**
+- [x] **Step 1: Write the failing trust-boundary tests**
 
 Create real ECDSA and ML-DSA keys and a signed descriptor/template fixture. Assert acceptance only when the computed descriptor hash equals the externally trusted hash, descriptor and epoch intervals include `NowUnix`, replay metadata is unexpired, both requested suite and HTTP/2 method are listed, the template hash appears exactly once in `CoverTemplateInstanceHashes`, and the selected class is gateway-owned, permits Prelude and Capsule, and uses the HTTP/2 method family.
 
@@ -84,13 +84,13 @@ type RelayDeploymentVerification struct {
 }
 ```
 
-- [ ] **Step 2: Run the focused tests and verify red**
+- [x] **Step 2: Run the focused tests and verify red**
 
 Run: `GOCACHE=/private/tmp/aurora-first-hop-cache go test ./trust -run 'TestVerifyRelayDeployment' -count=1`
 
 Expected: FAIL because the deployment types and verifier do not exist.
 
-- [ ] **Step 3: Implement deterministic validation and an owned strong value**
+- [x] **Step 3: Implement deterministic validation and an owned strong value**
 
 Store every slice in unexported fields and deep-clone nested protocol values at construction and access. The verifier must perform checks in this order: canonical hash and trusted-hash equality; descriptor intervals and structural field lengths; long-term classical signature; required long-term PQ signature; cover-template structural/time validation; exact template commitment; exact request-class selection; template family signature under the single supplied authority key; template instance signature under the descriptor long-term classical key; suite/method/epoch/replay compatibility.
 
@@ -111,7 +111,7 @@ func (d VerifiedRelayDeployment) Valid() bool { return d.verified }
 
 Never trial-search signing keys: the caller supplies one already authenticated template-authority key, and the selected request class is located by exact ID.
 
-- [ ] **Step 4: Run trust verification**
+- [x] **Step 4: Run trust verification**
 
 Run:
 
@@ -123,7 +123,7 @@ GOCACHE=/private/tmp/aurora-first-hop-cache go test -race ./trust -count=1
 
 Expected: all trust tests pass with no race report.
 
-- [ ] **Step 5: Commit the verified metadata boundary**
+- [x] **Step 5: Commit the verified metadata boundary**
 
 ```bash
 git add trust/deployment.go trust/deployment_test.go

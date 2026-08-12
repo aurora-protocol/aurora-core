@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/admission"
+	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/evidence"
 	"github.com/aurora-protocol/aurora-core/handshake"
 	"github.com/aurora-protocol/aurora-core/protocol"
@@ -323,6 +324,251 @@ func queueLiveFirstHopFrame(ctx context.Context, application *session.Applicatio
 	}
 }
 
+type liveFirstHopManualClient struct {
+	carrier               handshake.BootstrapCarrier
+	state                 *handshake.ClientSession
+	control               handshake.ControlCapsuleContext
+	secrets               handshake.HandshakeSecrets
+	preludeTranscriptHash []byte
+	admissionContextHash  []byte
+	capsule1              protocol.CoverCapsule1Plain
+}
+
+func startLiveFirstHopManualClient(t testing.TB, fixture liveFirstHopFixture, harness liveFirstHopHarness) *liveFirstHopManualClient {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	state := handshake.NewClientSession()
+	if err := state.MarkDescriptorLoaded(); err != nil {
+		t.Fatal(err)
+	}
+	coverRandom := randomLiveFirstHopBytes(t, 32)
+	carrier, err := harness.opener.Open(ctx, coverRandom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = carrier.Close() })
+	binding := carrier.Binding()
+	if err := state.MarkCoverOpened(); err != nil {
+		t.Fatal(err)
+	}
+	clientNonce := randomLiveFirstHopBytes(t, 32)
+	clientECDH, err := auroracrypto.GenerateECDHForSuite(fixture.deployment.Suite())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientECDH.Destroy()
+	clientMLKEM, err := auroracrypto.GenerateMLKEMForSuite(fixture.deployment.Suite())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientMLKEM.Destroy()
+	accessHint, err := admission.ComputeAccessHint(fixture.accessHint, binding.HandshakeBindingContext, clientNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := fixture.deployment.Template()
+	requestClass := fixture.deployment.RequestClass()
+	prelude0 := protocol.CoverPrelude0{
+		MsgType:                     registry.MsgCoverPrelude0,
+		Version:                     registry.Version20,
+		SuiteOffers:                 []uint64{fixture.deployment.Suite()},
+		ClientNonce:                 clientNonce,
+		ClientClassicalEphPub:       clientECDH.PublicKeyBytes(),
+		ClientMLKEMEncapsulationKey: clientMLKEM.EncapsulationKeyBytes(),
+		RelayDescriptorHash:         fixture.deployment.DescriptorHash(),
+		CoverTemplateHash:           fixture.deployment.TemplateHash(),
+		RequestClassID:              requestClass.ClassID,
+		HintIssuerID:                append([]byte(nil), fixture.accessHint.HintIssuerID...),
+		RelayBucketID:               append([]byte(nil), fixture.accessHint.RelayBucketID...),
+		HintEpochID:                 fixture.accessHint.HintEpochID,
+		HintSelector:                append([]byte(nil), fixture.accessHint.HintSelector...),
+		AccessHint:                  accessHint,
+		ClientCoverRandom:           coverRandom,
+	}
+	prelude0Record := padLiveFirstHopPrelude0(t, &prelude0, template.PreludeEnvelope.MinRequestBodySize, template.PreludeEnvelope.MaxRequestBodySize)
+	if err := carrier.WriteRecord(prelude0Record); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.MarkCoverPrelude0Sent(); err != nil {
+		t.Fatal(err)
+	}
+	prelude1Record, err := carrier.ReadRecord()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size := uint64(len(prelude1Record)); size < template.PreludeEnvelope.MinResponseBodySize || size > template.PreludeEnvelope.MaxResponseBodySize {
+		t.Fatalf("live Prelude1 size %d outside envelope", size)
+	}
+	reader := wire.NewReader(prelude1Record)
+	prelude1 := protocol.DecodeCoverPrelude1(reader)
+	if reader.Err() != nil || !reader.EOF() {
+		t.Fatalf("decode live Prelude1: %v", reader.Err())
+	}
+	preludeTranscriptHash, err := state.VerifyCoverPrelude1(handshake.CoverPreludeVerificationInput{
+		Suite:              fixture.deployment.Suite(),
+		CoverStreamBinding: binding.CoverStreamBinding,
+		Prelude0:           prelude0,
+		Prelude1:           prelude1,
+		Descriptor:         fixture.deployment.Descriptor(),
+		RequirePQ:          true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedClassical, err := clientECDH.SharedSecret(prelude1.ServerClassicalEphPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedPQ, err := clientMLKEM.Decapsulate(prelude1.ServerMLKEMCiphertextToClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets, err := handshake.DeriveHandshakeSecrets(fixture.deployment.Suite(), sharedPQ, sharedClassical, binding.HandshakeBindingContext, preludeTranscriptHash)
+	zeroFirstHopBytes(sharedPQ)
+	zeroFirstHopBytes(sharedClassical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeInstanceID, err := auroracrypto.FirstHopRouteInstanceID(fixture.deployment.Suite(), preludeTranscriptHash, fixture.deployment.DescriptorHash(), binding.HandshakeBindingContext, clientNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyOffer := liveFirstHopPolicyOffer(fixture.deployment)
+	transportHints := liveFirstHopTransportHints(t)
+	admissionContextHash, err := admission.AdmissionContextHash(admission.ContextInput{
+		SelectedVersion:                 registry.Version20,
+		SelectedSuite:                   fixture.deployment.Suite(),
+		RelayDescriptorHash:             fixture.deployment.DescriptorHash(),
+		CoverTemplateHash:               fixture.deployment.TemplateHash(),
+		RouteInstanceID:                 routeInstanceID,
+		HopIndex:                        0,
+		HandshakeBindingContext:         binding.HandshakeBindingContext,
+		PreludeTranscriptHashForThisHop: preludeTranscriptHash,
+		PolicyOffer:                     policyOffer,
+		ClientTransportHints:            transportHints,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor := fixture.deployment.Descriptor()
+	proofProvider := &liveFirstHopProofProvider{
+		issuerID:      fixture.accessHint.HintIssuerID,
+		relayBucketID: fixture.accessHint.RelayBucketID,
+		privateKey:    fixture.tokenPrivate,
+		publicKeyDER:  fixture.tokenPublicDER,
+	}
+	proof, replayProof, err := proofProvider.BuildProofs(ctx, handshake.ClientProofRequest{
+		AdmissionContextHash:    admissionContextHash,
+		HandshakeBindingContext: binding.HandshakeBindingContext,
+		RouteInstanceID:         routeInstanceID,
+		HopIndex:                0,
+		ReplayEpochID:           descriptor.ReplayEpochID,
+		ReplayEpochValidUntil:   descriptor.ReplayEpochValidUntilUnix,
+		ReplayWindowID:          descriptor.ReplayWindowID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule1, err := state.BuildCoverCapsule1(protocol.CoverCapsule1Plain{
+		MsgType:              registry.MsgCoverCapsule1,
+		RouteInstanceID:      routeInstanceID,
+		AdmissionProof:       proof,
+		ReplayProof:          replayProof,
+		PolicyOffer:          policyOffer,
+		ClientTransportHints: transportHints,
+		ClientFinished:       make([]byte, 48),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := handshake.ControlCapsuleContext{
+		SelectedVersion:                 registry.Version20,
+		SelectedSuite:                   fixture.deployment.Suite(),
+		RouteInstanceID:                 routeInstanceID,
+		HopIndex:                        0,
+		HandshakeBindingContext:         binding.HandshakeBindingContext,
+		PreludeTranscriptHashForThisHop: preludeTranscriptHash,
+		ClientHSKey:                     secrets.ClientHSKey,
+		ClientHSIV:                      secrets.ClientHSIV,
+		ServerHSKey:                     secrets.ServerHSKey,
+		ServerHSIV:                      secrets.ServerHSIV,
+	}
+	sealed, err := handshake.SealCoverCapsule1(control, capsule1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size := uint64(len(sealed)); size < template.CapsuleEnvelope.MinCapsuleBodySize {
+		capsule1.Padding = randomLiveFirstHopBytes(t, int(template.CapsuleEnvelope.MinCapsuleBodySize-size))
+	}
+	capsule1.ClientFinished = nil
+	capsule1.ClientFinished, err = handshake.ComputeClientFinished(fixture.deployment.Suite(), secrets.ClientFinishedKey, preludeTranscriptHash, capsule1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err = handshake.SealCoverCapsule1(control, capsule1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size := uint64(len(sealed)); size < template.CapsuleEnvelope.MinCapsuleBodySize || size > template.CapsuleEnvelope.MaxCapsuleBodySize {
+		t.Fatalf("live Capsule1 size %d outside envelope", size)
+	}
+	return &liveFirstHopManualClient{
+		carrier:               carrier,
+		state:                 state,
+		control:               control,
+		secrets:               secrets,
+		preludeTranscriptHash: preludeTranscriptHash,
+		admissionContextHash:  admissionContextHash,
+		capsule1:              capsule1,
+	}
+}
+
+func (c *liveFirstHopManualClient) close() {
+	if c == nil {
+		return
+	}
+	if c.carrier != nil {
+		_ = c.carrier.Close()
+	}
+	for _, secret := range [][]byte{
+		c.secrets.EarlySecret,
+		c.secrets.DerivedSecret,
+		c.secrets.HandshakeSecret,
+		c.secrets.ClientHandshakeSecret,
+		c.secrets.ServerHandshakeSecret,
+		c.secrets.ClientFinishedKey,
+		c.secrets.ServerFinishedKey,
+		c.secrets.ClientHSKey,
+		c.secrets.ClientHSIV,
+		c.secrets.ServerHSKey,
+		c.secrets.ServerHSIV,
+		c.preludeTranscriptHash,
+		c.admissionContextHash,
+	} {
+		zeroFirstHopBytes(secret)
+	}
+}
+
+func padLiveFirstHopPrelude0(t testing.TB, prelude *protocol.CoverPrelude0, minimum, maximum uint64) []byte {
+	t.Helper()
+	encoded, err := protocol.Encode(*prelude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size := uint64(len(encoded)); size < minimum {
+		prelude.Padding = randomLiveFirstHopBytes(t, int(minimum-size))
+		encoded, err = protocol.Encode(*prelude)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if size := uint64(len(encoded)); size < minimum || size > maximum {
+		t.Fatalf("live Prelude0 size %d outside envelope", size)
+	}
+	return encoded
+}
+
 func TestLiveFirstHopRelayFailureBoundaries(t *testing.T) {
 	tests := []struct {
 		name                string
@@ -558,6 +804,90 @@ func TestLiveFirstHopRejectsCorruptedCapsule2(t *testing.T) {
 	}
 }
 
+func TestLiveFirstHopRejectsWrongClientFinished(t *testing.T) {
+	fixture := newLiveFirstHopFixture(t, time.Now())
+	relayDriver := fixture.newRelayDriver(t)
+	coverOrigin := &recordingFirstHopCoverOrigin{}
+	harness := startLiveFirstHopHarness(t, fixture, relayDriver, coverOrigin)
+	manual := startLiveFirstHopManualClient(t, fixture, harness)
+	defer manual.close()
+	manual.capsule1.ClientFinished[0] ^= 0xff
+	sealed, err := handshake.SealCoverCapsule1(manual.control, manual.capsule1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manual.carrier.WriteRecord(sealed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manual.carrier.ReadRecord(); err == nil {
+		t.Fatal("wrong ClientFinished produced Capsule2")
+	}
+	select {
+	case application := <-harness.relayApplications:
+		_ = application.Close()
+		t.Fatal("wrong ClientFinished created a relay application")
+	default:
+	}
+	method, body := coverOrigin.snapshot()
+	if method != "" || len(body) != 0 {
+		t.Fatalf("post-header ClientFinished failure invoked cover origin: method=%s body=%x", method, body)
+	}
+}
+
+func TestLiveFirstHopRejectsWrongServerFinished(t *testing.T) {
+	fixture := newLiveFirstHopFixture(t, time.Now())
+	relayDriver := fixture.newRelayDriver(t)
+	harness := startLiveFirstHopHarness(t, fixture, relayDriver, nil)
+	manual := startLiveFirstHopManualClient(t, fixture, harness)
+	defer manual.close()
+	sealedCapsule1, err := handshake.SealCoverCapsule1(manual.control, manual.capsule1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manual.carrier.WriteRecord(sealedCapsule1); err != nil {
+		t.Fatal(err)
+	}
+	sealedCapsule2, err := manual.carrier.ReadRecord()
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule2, err := handshake.OpenCoverCapsule2(manual.control, sealedCapsule2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, _, _, err := handshake.ComputeServerFinished(
+		fixture.deployment.Suite(),
+		manual.secrets.ServerFinishedKey,
+		manual.preludeTranscriptHash,
+		manual.capsule1,
+		capsule2.PolicyAccept,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule2.ServerFinished[0] ^= 0xff
+	tampered, err := handshake.SealCoverCapsule2(manual.control, capsule2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticatedTamper, err := handshake.OpenCoverCapsule2(manual.control, tampered)
+	if err != nil {
+		t.Fatalf("AEAD-valid wrong ServerFinished did not reopen: %v", err)
+	}
+	if err := manual.state.VerifyCoverCapsule2(authenticatedTamper, expected); err == nil {
+		t.Fatal("wrong ServerFinished was accepted")
+	}
+	if manual.state.State() == handshake.StateApplicationReady {
+		t.Fatal("wrong ServerFinished advanced the client to application state")
+	}
+	select {
+	case application := <-harness.relayApplications:
+		_ = application.Close()
+	case <-time.After(time.Second):
+		t.Fatal("relay did not commit the source Capsule2")
+	}
+}
+
 func TestLiveFirstHopRejectsSpentAccessHintOnFreshConnection(t *testing.T) {
 	fixture := newLiveFirstHopFixture(t, time.Now())
 	relayDriver := fixture.newRelayDriver(t)
@@ -590,6 +920,66 @@ func TestLiveFirstHopRejectsSpentAccessHintOnFreshConnection(t *testing.T) {
 	case application := <-harness.relayApplications:
 		_ = application.Close()
 		t.Fatal("spent access hint created a second relay application")
+	default:
+	}
+}
+
+func TestLiveFirstHopRejectsSpentAdmissionWithFreshReplayProof(t *testing.T) {
+	fixture := newLiveFirstHopFixture(t, time.Now())
+	tokenCache := &liveFirstHopDurableReplayCache{MemoryReplayCache: admission.NewMemoryReplayCache()}
+	relayDriver := fixture.newRelayDriver(t, liveFirstHopRelayOptions{tokenCache: tokenCache})
+	harness := startLiveFirstHopHarness(t, fixture, relayDriver, nil)
+	manual := startLiveFirstHopManualClient(t, fixture, harness)
+	defer manual.close()
+
+	redemptionHash, err := admission.TokenRedemptionHash(manual.capsule1.AdmissionProof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spentKey, err := admission.TokenSpentKey(redemptionHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserted, err := tokenCache.InsertIfAbsent(spentKey)
+	if err != nil || !inserted {
+		t.Fatalf("pre-spend admission token: inserted=%t err=%v", inserted, err)
+	}
+	manual.capsule1.ReplayProof.ClientReplayNonce = randomLiveFirstHopBytes(t, 32)
+	manual.capsule1.ReplayProof.ReplayContextHash, err = admission.ReplayContextHash(
+		redemptionHash,
+		manual.capsule1.ReplayProof,
+		manual.control.RouteInstanceID,
+		manual.control.HopIndex,
+		manual.control.HandshakeBindingContext,
+		manual.admissionContextHash,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manual.capsule1.ClientFinished = nil
+	manual.capsule1.ClientFinished, err = handshake.ComputeClientFinished(
+		fixture.deployment.Suite(),
+		manual.secrets.ClientFinishedKey,
+		manual.preludeTranscriptHash,
+		manual.capsule1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := handshake.SealCoverCapsule1(manual.control, manual.capsule1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manual.carrier.WriteRecord(sealed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manual.carrier.ReadRecord(); err == nil {
+		t.Fatal("spent admission token with fresh replay proof produced Capsule2")
+	}
+	select {
+	case application := <-harness.relayApplications:
+		_ = application.Close()
+		t.Fatal("spent admission token with fresh replay proof created an application")
 	default:
 	}
 }
@@ -707,6 +1097,99 @@ func TestLiveFirstHopDisconnectsAtHandshakeBoundaries(t *testing.T) {
 	}
 }
 
+func TestLiveFirstHopMalformedRecordFramingUsesSanitizedCover(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "empty record", body: []byte{0, 0, 0}},
+		{name: "truncated record", body: []byte{0, 0, 8, 1, 2}},
+		{name: "oversized record", body: []byte{0x10, 0, 1}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newLiveFirstHopFixture(t, time.Now())
+			relayDriver := fixture.newRelayDriver(t)
+			coverOrigin := &recordingFirstHopCoverOrigin{}
+			harness := startLiveFirstHopHarness(t, fixture, relayDriver, coverOrigin)
+			protocols := new(http.Protocols)
+			protocols.SetHTTP2(true)
+			clientTransport := &http.Transport{
+				TLSClientConfig:   harness.clientTLS.Clone(),
+				Protocols:         protocols,
+				ForceAttemptHTTP2: true,
+				DisableKeepAlives: true,
+			}
+			t.Cleanup(clientTransport.CloseIdleConnections)
+			client := &http.Client{Transport: clientTransport, Timeout: 3 * time.Second}
+			request, err := http.NewRequest(http.MethodPost, "https://"+harness.authority+harness.path, bytes.NewReader(test.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := client.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := readFirstHopHTTPResult(response, nil)
+			if result.err != nil || result.status != http.StatusTeapot || string(result.body) != "cover-body" {
+				t.Fatalf("malformed live record did not receive cover: %+v", result)
+			}
+			method, body := coverOrigin.snapshot()
+			if method != http.MethodGet || len(body) != 0 {
+				t.Fatalf("malformed live record reached cover origin: method=%s body=%x", method, body)
+			}
+			select {
+			case application := <-harness.relayApplications:
+				_ = application.Close()
+				t.Fatal("malformed live record created a relay application")
+			default:
+			}
+		})
+	}
+}
+
+func TestLiveFirstHopGracefulShutdownCancelsRelayDependency(t *testing.T) {
+	fixture := newLiveFirstHopFixture(t, time.Now())
+	resolver := &liveFirstHopBlockingHintResolver{started: make(chan struct{})}
+	relayDriver := fixture.newRelayDriver(t, liveFirstHopRelayOptions{hintResolver: resolver})
+	harness := startLiveFirstHopHarness(t, fixture, relayDriver, nil)
+	clientDriver := fixture.newClientDriver(t)
+	connectContext, cancelConnect := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelConnect()
+	connectResult := make(chan error, 1)
+	go func() {
+		established, err := clientDriver.Connect(connectContext, harness.opener)
+		if established != nil {
+			_ = established.Close()
+		}
+		connectResult <- err
+	}()
+	select {
+	case <-resolver.started:
+	case <-connectContext.Done():
+		t.Fatal("live relay dependency did not start")
+	}
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := harness.shutdown(shutdownContext); err != nil {
+		t.Fatalf("graceful live shutdown: %v", err)
+	}
+	select {
+	case err := <-connectResult:
+		if err == nil {
+			t.Fatal("shutdown relay dependency established a client session")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("graceful shutdown did not join the client handshake")
+	}
+	select {
+	case application := <-harness.relayApplications:
+		_ = application.Close()
+		t.Fatal("shutdown relay dependency created an application")
+	default:
+	}
+}
+
 func BenchmarkLiveFirstHopBootstrap(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -807,10 +1290,14 @@ func BenchmarkLiveFirstHopBootstrapParallel64(b *testing.B) {
 
 type liveFirstHopHarness struct {
 	opener            handshake.ClientCarrierOpener
+	authority         string
+	path              string
+	clientTLS         *tls.Config
 	bindingMetadata   handshake.HTTP2BindingMetadata
 	serverFrames      chan []byte
 	relayApplications chan *session.Application
 	connections       *atomic.Int32
+	shutdown          func(context.Context) error
 	close             func() error
 }
 
@@ -929,7 +1416,18 @@ func startLiveFirstHopHarness(t testing.TB, fixture liveFirstHopFixture, relayDr
 	if err != nil {
 		t.Fatal(err)
 	}
-	return liveFirstHopHarness{opener: opener, bindingMetadata: bindingMetadata, serverFrames: serverFrames, relayApplications: relayApplications, connections: connections, close: closeHarness}
+	return liveFirstHopHarness{
+		opener:            opener,
+		authority:         authority,
+		path:              path,
+		clientTLS:         clientTLS.Clone(),
+		bindingMetadata:   bindingMetadata,
+		serverFrames:      serverFrames,
+		relayApplications: relayApplications,
+		connections:       connections,
+		shutdown:          httpServer.Shutdown,
+		close:             closeHarness,
+	}
 }
 
 type liveFirstHopMutatingOpener struct {
@@ -1325,20 +1823,11 @@ func (f liveFirstHopFixture) newClientDriverWithProofProvider(t testing.TB) (*ha
 		publicKeyDER:  f.tokenPublicDER,
 	}
 	driver, err := handshake.NewClientDriver(handshake.ClientDriverConfig{
-		Deployment: f.deployment,
-		Suite:      f.deployment.Suite(),
-		AccessHint: f.accessHint,
-		PolicyOffer: protocol.PolicyOffer{
-			OfferedVersions:         []uint64{registry.Version20},
-			OfferedSuites:           []uint64{f.deployment.Suite()},
-			OfferedMethods:          []uint64{f.deployment.Method()},
-			MinimumPolicyID:         registry.PolicyFastWeb,
-			RequestedPolicyID:       registry.PolicyBalancedWeb,
-			RequestedRouteModeID:    registry.RouteFast1,
-			RequestedShapeID:        registry.ShapeNormal,
-			TunnelPersonalityOffers: []uint64{registry.PersonalityProxyFlow},
-		},
-		TransportHints: protocol.ClientTransportHints{Padding: randomLiveFirstHopBytes(t, 8)},
+		Deployment:     f.deployment,
+		Suite:          f.deployment.Suite(),
+		AccessHint:     f.accessHint,
+		PolicyOffer:    liveFirstHopPolicyOffer(f.deployment),
+		TransportHints: liveFirstHopTransportHints(t),
 		ProofProvider:  proofProvider,
 		RequirePQ:      true,
 		SessionLimits:  liveFirstHopSessionLimits(),
@@ -1347,6 +1836,24 @@ func (f liveFirstHopFixture) newClientDriverWithProofProvider(t testing.TB) (*ha
 		t.Fatal(err)
 	}
 	return driver, proofProvider
+}
+
+func liveFirstHopPolicyOffer(deployment trust.VerifiedRelayDeployment) protocol.PolicyOffer {
+	return protocol.PolicyOffer{
+		OfferedVersions:         []uint64{registry.Version20},
+		OfferedSuites:           []uint64{deployment.Suite()},
+		OfferedMethods:          []uint64{deployment.Method()},
+		MinimumPolicyID:         registry.PolicyFastWeb,
+		RequestedPolicyID:       registry.PolicyBalancedWeb,
+		RequestedRouteModeID:    registry.RouteFast1,
+		RequestedShapeID:        registry.ShapeNormal,
+		TunnelPersonalityOffers: []uint64{registry.PersonalityProxyFlow},
+	}
+}
+
+func liveFirstHopTransportHints(t testing.TB) protocol.ClientTransportHints {
+	t.Helper()
+	return protocol.ClientTransportHints{Padding: randomLiveFirstHopBytes(t, 8)}
 }
 
 type liveFirstHopRelayOptions struct {
@@ -1509,6 +2016,17 @@ func (r liveFirstHopHintResolver) ResolveAccessHint(_ context.Context, issuerID,
 
 type liveFirstHopMultiHintResolver struct {
 	credentials []admission.AccessHintCredential
+}
+
+type liveFirstHopBlockingHintResolver struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (r *liveFirstHopBlockingHintResolver) ResolveAccessHint(ctx context.Context, _, _ []byte, _ uint64, _ []byte) (admission.AccessHintCredential, error) {
+	r.once.Do(func() { close(r.started) })
+	<-ctx.Done()
+	return admission.AccessHintCredential{}, ctx.Err()
 }
 
 func (r liveFirstHopMultiHintResolver) ResolveAccessHint(_ context.Context, issuerID, relayBucketID []byte, hintEpochID uint64, hintSelector []byte) (admission.AccessHintCredential, error) {

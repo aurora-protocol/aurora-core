@@ -789,7 +789,7 @@ Generate fresh TLS, descriptor long-term, epoch ECDSA, epoch ML-DSA, ECDH, ML-KE
 
 Queue a forward proxy-flow frame block on the client; assert the relay receives byte-identical validated frames and queues a backward response; assert the client receives that response. Trigger one directional key update in each direction, continue traffic, and assert both pumps retain bounded queue stats and close cleanly.
 
-- [ ] **Step 2: Add live negative and concurrency cases**
+- [x] **Step 2: Add live negative and concurrency cases**
 
 Over real TLS sockets, cover wrong exporter metadata, wrong path-template ID, bad Prelude1 signature with proof-provider call count zero, replayed AccessHint, replayed AdmissionProof with a fresh ReplayProof, wrong ClientFinished, wrong ServerFinished, malformed record lengths, early disconnect at each handshake record, second request cancellation, server shutdown, and 32 concurrent independent connections.
 
@@ -843,7 +843,7 @@ GOCACHE=/private/tmp/aurora-first-hop-cache go test ./perf -run '^$' -bench 'Ben
 
 Expected: all integration/evidence/race commands pass; benchmark output records the baseline without test-time performance assertions.
 
-- [ ] **Step 7: Commit live integration evidence**
+- [x] **Step 7: Commit live integration evidence**
 
 ```bash
 git add server/first_hop_integration_test.go evidence/first_hop.go evidence/first_hop_test.go perf/first_hop_benchmark_test.go

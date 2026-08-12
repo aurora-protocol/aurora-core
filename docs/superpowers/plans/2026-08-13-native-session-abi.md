@@ -127,7 +127,7 @@ git commit -m "feat: resume client handshake after issuance"
 - Consumes: canonical `RelayDescriptor`, `CoverTemplate`, `PublicKeyRecord`, `AccessHintCredential`, and `trust.VerifyRelayDeployment`.
 - Produces: `client.NativeProvisioning` with `ParseNativeProvisioning([]byte, time.Time) (NativeProvisioning, error)` and `VerifiedDeployment() (trust.VerifiedRelayDeployment, error)`.
 
-- [ ] **Step 1: Write malformed, oversized, stale, and signature-mismatch bundle tests**
+- [x] **Step 1: Write malformed, oversized, stale, and signature-mismatch bundle tests**
 
 ```go
 func TestParseNativeProvisioningRejectsMalformedAndTrailingBytes(t *testing.T)
@@ -135,7 +135,7 @@ func TestNativeProvisioningRejectsInvalidAccessHint(t *testing.T)
 func TestNativeProvisioningVerifiesDeploymentBeforeUse(t *testing.T)
 ```
 
-- [ ] **Step 2: Encode the access hint using a fixed canonical layout**
+- [x] **Step 2: Encode the access hint using a fixed canonical layout**
 
 ```go
 func EncodeAccessHintCredential(value AccessHintCredential) ([]byte, error)
@@ -144,7 +144,7 @@ func DecodeAccessHintCredential(encoded []byte) (AccessHintCredential, error)
 
 The binary layout writes fixed issuer, relay-bucket, selector, and secret fields followed by epoch, expiry, and maximum-use values. It rejects trailing bytes and never logs field values.
 
-- [ ] **Step 3: Define and parse the provisioning bundle**
+- [x] **Step 3: Define and parse the provisioning bundle**
 
 ```go
 type NativeProvisioning struct {
@@ -165,18 +165,18 @@ type NativeProvisioning struct {
 
 Use `wire.Encoder` and length-bounded opaque fields. Decode all protocol objects with their canonical decoders, require HTTPS URLs, exact absolute carrier paths, a production suite, a valid one-use access hint, and a non-lab policy before returning.
 
-- [ ] **Step 4: Verify the deployment from decoded fields**
+- [x] **Step 4: Verify the deployment from decoded fields**
 
 ```go
 func (p NativeProvisioning) VerifiedDeployment(now time.Time) (trust.VerifiedRelayDeployment, error)
 func (p NativeProvisioning) ClientDriverConfig(now time.Time, provider handshake.ClientProofProvider) (handshake.ClientDriverConfig, error)
 ```
 
-- [ ] **Step 5: Run package tests and fuzz parsing**
+- [x] **Step 5: Run package tests and fuzz parsing**
 
 Run: `GOCACHE=/private/tmp/aurora-gocache go test ./admission ./client && GOCACHE=/private/tmp/aurora-gocache go test ./client -run '^$' -fuzz '^FuzzParseNativeProvisioning$' -fuzztime=10s`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add admission/access_hint.go admission/access_hint_test.go client/native_provisioning.go client/native_provisioning_test.go

@@ -2,6 +2,7 @@ package packet
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 	"time"
 
@@ -1184,6 +1185,42 @@ func TestKeyUpdateDerivationAndACK(t *testing.T) {
 	frame.NewKeyPhase = 3
 	if _, err := ApplyReceivedKeyUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0x55, 48), frame, bytesOf(0xbb, 16)); err == nil {
 		t.Fatalf("expected skipped phase to fail")
+	}
+}
+
+func TestKeyUpdateACKAcceptsCanonicalOpaque16NonceLengths(t *testing.T) {
+	for _, length := range []int{0, 1, 16, 0xffff} {
+		t.Run(fmt.Sprintf("length %d", length), func(t *testing.T) {
+			state := transactionalDirectionState()
+			defer state.Destroy()
+			if _, err := state.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xaa, 16), true, 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := state.ApplyKeyUpdateACK(protocol.KeyUpdateACK{
+				RouteInstanceID: state.RouteInstanceID,
+				HopLayer:        state.HopLayer,
+				AckedDirection:  state.Direction,
+				AckedKeyPhase:   state.KeyPhase,
+				AckNonce:        bytesOf(0xbb, length),
+			}, time.Now()); err != nil {
+				t.Fatalf("canonical ACK nonce length rejected: %v", err)
+			}
+		})
+	}
+
+	state := transactionalDirectionState()
+	defer state.Destroy()
+	if _, err := state.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xaa, 16), true, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ApplyKeyUpdateACK(protocol.KeyUpdateACK{
+		RouteInstanceID: state.RouteInstanceID,
+		HopLayer:        state.HopLayer,
+		AckedDirection:  state.Direction,
+		AckedKeyPhase:   state.KeyPhase,
+		AckNonce:        bytesOf(0xbb, 0x10000),
+	}, time.Now()); err == nil {
+		t.Fatalf("overlong ACK nonce was accepted")
 	}
 }
 

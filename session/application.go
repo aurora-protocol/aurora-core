@@ -13,12 +13,14 @@ import (
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/packet"
 	"github.com/aurora-protocol/aurora-core/protocol"
+	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
 var (
-	ErrBackpressure = errors.New("session: queue backpressure")
-	ErrClosed       = errors.New("session: closed")
+	ErrBackpressure   = errors.New("session: queue backpressure")
+	ErrClosed         = errors.New("session: closed")
+	ErrSessionControl = errors.New("session: key control requires orchestration")
 )
 
 const (
@@ -144,6 +146,12 @@ func NewApplication(cfg Config) (*Application, error) {
 }
 
 func (a *Application) QueueFrames(ctx context.Context, block protocol.FrameBlock) error {
+	for _, frame := range block.Frames {
+		switch frame.FrameType {
+		case registry.FrameKeyUpdate, registry.FrameKeyUpdateAck, registry.FrameKeyUpdateRequest:
+			return fmt.Errorf("%w: frame type 0x%x", ErrSessionControl, frame.FrameType)
+		}
+	}
 	return a.queueBlock(ctx, block, false)
 }
 
@@ -219,10 +227,15 @@ func (a *Application) HandlePacket(ctx context.Context, now time.Time, encoded [
 		candidate.Destroy()
 		return nil, err
 	}
+	blocks, err := a.handleKeyControlsLocked(now, pkt.KeyPhase, block, &candidate)
+	if err != nil {
+		candidate.Destroy()
+		return nil, a.failLocked(err)
+	}
 	previous := a.readState
 	a.readState = candidate
 	previous.Destroy()
-	return []protocol.FrameBlock{cloneFrameBlock(block)}, nil
+	return blocks, nil
 }
 
 func (a *Application) Close() error {
@@ -231,7 +244,18 @@ func (a *Application) Close() error {
 	if a.terminal != nil {
 		return nil
 	}
-	a.terminal = ErrClosed
+	a.terminateLocked(ErrClosed)
+	return nil
+}
+
+func (a *Application) terminateLocked(err error) {
+	if a.terminal != nil {
+		return
+	}
+	if err == nil {
+		err = ErrClosed
+	}
+	a.terminal = err
 	for i, encoded := range a.queue {
 		zeroBytes(encoded)
 		a.queue[i] = nil
@@ -244,9 +268,16 @@ func (a *Application) Close() error {
 	zeroBytes(a.write.StaticIV)
 	a.writeState.Destroy()
 	a.readState.Destroy()
+	a.writePacketNumbers = [256]uint64{}
 	a.signalLocked()
 	close(a.closed)
-	return nil
+}
+
+func (a *Application) failLocked(err error) error {
+	if a.terminal == nil {
+		a.terminateLocked(err)
+	}
+	return a.terminal
 }
 
 func (a *Application) queueBlock(ctx context.Context, block protocol.FrameBlock, control bool) error {
@@ -280,32 +311,24 @@ func (a *Application) queueBlock(ctx context.Context, block protocol.FrameBlock,
 	}
 	defer a.releaseReservationLocked(reservation)
 
-	owned := cloneFrameBlock(block)
-	phase := a.write.KeyPhase
-	nextPacket := a.writePacketNumbers[phase]
-	if nextPacket > wire.MaxVarint {
-		return fmt.Errorf("session: packet number exceeds canonical range")
-	}
-	a.write.NextPacket = nextPacket
-	pkt, err := a.write.Seal(owned)
+	encoded, phase, nextPacket, sealedNext, err := a.sealCurrentWriteBlockLocked(cloneFrameBlock(block))
 	if err != nil {
-		return err
-	}
-	encoded, err := protocol.Encode(pkt)
-	if err != nil {
-		a.write.NextPacket = nextPacket
 		return err
 	}
 	if len(encoded) > reservation {
 		a.write.NextPacket = nextPacket
 		return fmt.Errorf("session: encoded packet exceeds reservation")
 	}
+	if err := ctx.Err(); err != nil {
+		a.write.NextPacket = nextPacket
+		return err
+	}
 	a.releaseReservationLocked(reservation)
 	if err := a.enqueueEncodedLocked(encoded, control); err != nil {
 		a.write.NextPacket = nextPacket
 		return err
 	}
-	a.writePacketNumbers[phase] = a.write.NextPacket
+	a.writePacketNumbers[phase] = sealedNext
 	a.signalLocked()
 	return nil
 }
@@ -317,6 +340,18 @@ func (a *Application) enqueueEncodedLocked(encoded []byte, control bool) error {
 	a.queue = append(a.queue, append([]byte(nil), encoded...))
 	a.queuedBytes += len(encoded)
 	return nil
+}
+
+func (a *Application) rollbackLastEncodedLocked() {
+	if len(a.queue) == 0 {
+		return
+	}
+	last := len(a.queue) - 1
+	encoded := a.queue[last]
+	a.queue[last] = nil
+	a.queue = a.queue[:last]
+	a.queuedBytes -= len(encoded)
+	zeroBytes(encoded)
 }
 
 func (a *Application) reserveLocked(bytes int, control bool) bool {

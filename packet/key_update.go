@@ -12,6 +12,8 @@ import (
 
 const MaxDrainWindow = 10 * time.Second
 
+const maxOpaque16Bytes = 0xffff
+
 type KeyMaterial struct {
 	AppSecret []byte
 	Key       []byte
@@ -111,9 +113,9 @@ func ApplyReceivedKeyUpdate(suite uint64, currentReadSecret []byte, frame protoc
 	}
 	var ack *protocol.KeyUpdateACK
 	if frame.AckRequired {
-		if len(ackNonce) != 16 {
+		if len(ackNonce) > maxOpaque16Bytes {
 			next.Destroy()
-			return KeyUpdateResult{}, fmt.Errorf("packet: KEY_UPDATE_ACK nonce length %d, want 16", len(ackNonce))
+			return KeyUpdateResult{}, fmt.Errorf("packet: KEY_UPDATE_ACK nonce length %d exceeds canonical range", len(ackNonce))
 		}
 		ack = &protocol.KeyUpdateACK{
 			RouteInstanceID: frame.RouteInstanceID,
@@ -300,8 +302,8 @@ func (s *DirectionState) ApplyKeyUpdateACK(ack protocol.KeyUpdateACK, now time.T
 	if !s.pendingSentUpdateActive {
 		return fmt.Errorf("packet: no pending KEY_UPDATE_ACK")
 	}
-	if len(ack.AckNonce) != 16 {
-		return fmt.Errorf("packet: KEY_UPDATE_ACK nonce length %d, want 16", len(ack.AckNonce))
+	if len(ack.AckNonce) > maxOpaque16Bytes {
+		return fmt.Errorf("packet: KEY_UPDATE_ACK nonce length %d exceeds canonical range", len(ack.AckNonce))
 	}
 	if ack.RouteInstanceID != s.RouteInstanceID {
 		return fmt.Errorf("packet: KEY_UPDATE_ACK route instance mismatch")

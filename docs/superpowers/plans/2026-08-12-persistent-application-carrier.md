@@ -404,6 +404,17 @@ reserved acknowledgement packet. Return a new block containing only
 non-key-control frames; return no block when all frames were consumed
 internally.
 
+Stage both directional states before applying a mixed update/acknowledgement
+block, permit at most one update and one acknowledgement per packet, and commit
+the staged states only after every control validates and any required
+acknowledgement packet is sealed and inserted. Ignore the optional update
+request frame after validation rather than forwarding it to the flow
+dispatcher. Any semantic, randomness, or queue failure after authenticated
+packet opening becomes the single terminal session error, clears queued bytes,
+wakes waiters, and destroys live plus staged key material. Destroy every owned
+prepared update, returned update result, and temporary packet material on all
+paths.
+
 - [ ] **Step 6: Run packet and session verification**
 
 Run:

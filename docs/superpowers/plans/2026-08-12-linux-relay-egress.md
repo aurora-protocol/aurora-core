@@ -192,15 +192,15 @@ Run production server tests 50 times and race tests 10 times. Commit `feat: add 
 
 **Files:** Modify `cmd/aurorad/main.go`; modify `cmd/aurorad/main_test.go`; add narrowly scoped production dependency loaders only when canonical parsing and secret ownership can be tested.
 
-- [ ] **Step 1: Split harness and production command surfaces**
+- [x] **Step 1: Split harness and production command surfaces**
 
 Keep readiness under an explicit `harness` subcommand. Add a `serve` subcommand that requires a production configuration and refuses every harness packet mode and synthetic credential path. Preserve exit code `2` for configuration errors and `1` for runtime failures.
 
-- [ ] **Step 2: Add strict startup and shutdown tests**
+- [x] **Step 2: Add strict startup and shutdown tests**
 
 Cover missing files, permission failures, malformed canonical objects, mismatched signing keys, non-durable stores, missing cover origin, incomplete TLS, signal cancellation, listener failure, and clean shutdown. Secret files must be read with restrictive permission checks and destroyed from owned byte slices where practical.
 
-- [ ] **Step 3: Implement only verified loaders and commit**
+- [x] **Step 3: Implement only verified loaders and commit**
 
 Use canonical protocol decoders and explicit signer/verifier/store constructors; do not invent a permissive generic JSON representation for cryptographic structures. If a required production dependency has no real implementation, add and test that implementation in its owning package before wiring the command. Commit in dependency-sized slices, then commit `feat: run production relay service` once a separate process test passes.
 

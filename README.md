@@ -64,12 +64,12 @@ GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl perf-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl release-gate-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl p0-p8-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl p0-p11-check
-GOCACHE=/private/tmp/aurora-gocache go run ./cmd/aurorad --readiness-check
-GOCACHE=/private/tmp/aurora-gocache go run ./cmd/aurorad --listen 0.0.0.0:9443 --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem --cover-origin-url https://cover.example --spent-token-cache /var/lib/aurora/spent-token-cache.log --packet-mode tun
+GOCACHE=/private/tmp/aurora-gocache go run ./cmd/aurorad harness --readiness-check
+GOCACHE=/private/tmp/aurora-gocache go run ./cmd/aurorad serve --listen 0.0.0.0:9443 --authority cover.example:443 --path /assets/upload/42 --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem --cover-origin-url https://cover.example --relay-descriptor /etc/aurora/relay-descriptor.bin --trusted-descriptor-hash /etc/aurora/relay-descriptor.hash --cover-template /etc/aurora/cover-template.bin --template-authority-key /etc/aurora/template-authority-key.bin --request-class 7 --suite 2 --classical-signer-key /etc/aurora/epoch-classical.pem --pq-signer-key /etc/aurora/epoch-pq.bin --access-hints /etc/aurora/access-hints.bin --token-verification-key /etc/aurora/token-verification-key.der --hint-spent-cache /var/lib/aurora/hint-spent.log --token-spent-cache /var/lib/aurora/token-spent.log --bootstrap-cache /var/lib/aurora/bootstrap-replay.log --max-sessions 256
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl capabilities
 ```
 
-For non-loopback Linux serving, `aurorad` requires TLS, a cover origin, a persistent spent-token replay cache, and TUN packet mode. The process must be allowed to open `/dev/net/tun` and attach the configured interface, or it will fail closed before serving.
+`aurorad harness` is a local diagnostic surface. `aurorad serve` is the Linux production entry point: it requires a verified canonical deployment, both epoch signing keys, bounded access-hint credentials, a validated admission verification key, three independent durable replay caches, TLS, a cover origin, and an explicit concurrent-session limit. Private key and access-hint files must be regular files with owner-only permissions. The daemon rejects harness flags, loopback listen addresses, malformed objects, mismatched epoch keys, and missing production dependencies before binding its socket. Egress defaults are bounded and deny private destination ranges; use `aurorad serve --help` to tune the explicit queue, rate, timeout, and destination-policy limits.
 
 Config examples follow Section 28:
 

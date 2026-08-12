@@ -15,6 +15,33 @@ import (
 
 const maximumStaticAccessHintCredentials = 4096
 
+// BlindRSAAdmissionVerifier verifies admission proofs with one owned Blind RSA verification key.
+type BlindRSAAdmissionVerifier struct {
+	verificationKeyDER []byte
+}
+
+// NewBlindRSAAdmissionVerifier validates and owns a Blind RSA verification key.
+func NewBlindRSAAdmissionVerifier(verificationKeyDER []byte) (*BlindRSAAdmissionVerifier, error) {
+	if err := admission.ValidateBlindRSA2048VerificationKey(verificationKeyDER); err != nil {
+		return nil, fmt.Errorf("handshake: invalid Blind RSA verification key: %w", err)
+	}
+	return &BlindRSAAdmissionVerifier{verificationKeyDER: append([]byte(nil), verificationKeyDER...)}, nil
+}
+
+// VerifyAdmission verifies one proof after respecting the request context.
+func (v *BlindRSAAdmissionVerifier) VerifyAdmission(ctx context.Context, proof protocol.AdmissionProof, _ uint64) error {
+	if ctx == nil {
+		return fmt.Errorf("handshake: nil Blind RSA verification context")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if v == nil {
+		return fmt.Errorf("handshake: Blind RSA admission verifier is missing")
+	}
+	return admission.VerifyBlindRSA2048(proof, v.verificationKeyDER)
+}
+
 // StaticAccessHintResolver resolves one of a fixed, owned credential set.
 type StaticAccessHintResolver struct {
 	credentials map[staticAccessHintKey]admission.AccessHintCredential

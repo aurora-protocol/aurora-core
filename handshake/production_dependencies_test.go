@@ -12,6 +12,18 @@ import (
 	"github.com/aurora-protocol/aurora-core/registry"
 )
 
+func TestBlindRSAAdmissionVerifierRejectsInvalidKeyAndCanceledContext(t *testing.T) {
+	if _, err := NewBlindRSAAdmissionVerifier([]byte("not-a-key")); err == nil {
+		t.Fatal("invalid Blind RSA verification key accepted")
+	}
+	context, cancel := context.WithCancel(context.Background())
+	cancel()
+	verifier := &BlindRSAAdmissionVerifier{verificationKeyDER: []byte("not-used")}
+	if err := verifier.VerifyAdmission(context, protocol.AdmissionProof{}, 0); err == nil {
+		t.Fatal("canceled admission context accepted")
+	}
+}
+
 func TestProductionTranscriptSignersMatchEpochPublicKeys(t *testing.T) {
 	fixture := newTestVerifiedDeploymentFixture(t, time.Now())
 	descriptor := fixture.deployment.Descriptor()

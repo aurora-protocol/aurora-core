@@ -50,6 +50,20 @@ func TestBlindRSA2048VerifierRejectsRSAEncryptionSPKI(t *testing.T) {
 	}
 }
 
+func TestValidateBlindRSA2048VerificationKey(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER := marshalRSAPSSPublicKeyForTest(t, &priv.PublicKey)
+	if err := ValidateBlindRSA2048VerificationKey(keyDER); err != nil {
+		t.Fatalf("valid Blind RSA verification key rejected: %v", err)
+	}
+	if err := ValidateBlindRSA2048VerificationKey(append(keyDER, 0)); err == nil {
+		t.Fatal("verification key with trailing bytes accepted")
+	}
+}
+
 func TestVerifyBlindRSA2048WithIssuerMetadataEnforcesIssuerPolicy(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

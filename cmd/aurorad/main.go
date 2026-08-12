@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -36,7 +37,23 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("aurorad", flag.ContinueOnError)
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: aurorad <harness|serve> [options]")
+		return 2
+	}
+	switch args[0] {
+	case "harness":
+		return runHarness(args[1:], stdout, stderr)
+	case "serve":
+		return runServe(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "aurorad: unknown command %q; use harness or serve\n", args[0])
+		return 2
+	}
+}
+
+func runHarness(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("aurorad harness", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	defaultTUN := platform.DefaultLinuxTUNConfig()
 	listen := flags.String("listen", "127.0.0.1:9443", "listen address")
@@ -52,6 +69,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	tunInterface := flags.String("tun-iface", defaultTUN.InterfaceName, "Linux TUN interface name")
 	tunMTU := flags.Int("tun-mtu", defaultTUN.MTU, "Linux TUN MTU")
 	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	if *listen == "" {

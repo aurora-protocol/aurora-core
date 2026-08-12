@@ -670,6 +670,52 @@ func TestSocketEgressTCPCanceledWriteReleasesFlow(t *testing.T) {
 	}
 }
 
+func TestSocketEgressLifecycleCancellationInterruptsTCPWrite(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	local, peer := net.Pipe()
+	defer peer.Close()
+	egress, err := NewSocketEgress(parent, SocketEgressOptions{
+		Sink:     &channelFrameSink{blocks: make(chan protocol.FrameBlock, 4)},
+		Policy:   ExitPolicy{AllowPrivate: true},
+		Dialer:   &recordingContextDialer{conn: local, useConn: true},
+		Resolver: &recordingIPResolver{},
+	})
+	if err != nil {
+		t.Fatalf("NewSocketEgress failed: %v", err)
+	}
+	t.Cleanup(func() { _ = egress.Close() })
+	flow := coreflow.FlowState{
+		FlowID:     86,
+		Kind:       coreflow.FlowKindTCPStream,
+		TargetKind: coreflow.TargetKindIPv4,
+		TargetHost: []byte{127, 0, 0, 1},
+		TargetPort: 443,
+	}
+	if _, err := egress.HandleEvent(context.Background(), ExitFrameEvent{
+		Kind: ExitEventFlowOpened, FlowID: flow.FlowID, Flow: flow,
+	}); err != nil {
+		t.Fatalf("open HandleEvent failed: %v", err)
+	}
+	writeResult := make(chan error, 1)
+	go func() {
+		_, err := egress.HandleEvent(context.Background(), ExitFrameEvent{
+			Kind: ExitEventStreamData, FlowID: flow.FlowID, Flow: flow, Data: []byte("blocked"),
+		})
+		writeResult <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-writeResult:
+		if !errors.Is(err, ErrSocketEgressClosed) {
+			t.Fatalf("write error = %v, want ErrSocketEgressClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("lifecycle cancellation did not interrupt write")
+	}
+}
+
 func TestSocketEgressTCPFlowCloseInterruptsBackpressure(t *testing.T) {
 	local, peer := net.Pipe()
 	defer peer.Close()

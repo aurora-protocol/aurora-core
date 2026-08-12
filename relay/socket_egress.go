@@ -388,10 +388,8 @@ func (e *SocketEgress) handleTCPData(ctx context.Context, event ExitFrameEvent) 
 		return ErrExitWriteFailed
 	}
 	interruptCaller := interruptSocketWriteOnDone(ctx, flow.conn)
-	interruptLifecycle := interruptSocketWriteOnDone(e.ctx, flow.conn)
 	err = writeSocketBytes(flow.conn, event.Data)
 	interruptCaller()
-	interruptLifecycle()
 	_ = flow.conn.SetWriteDeadline(time.Time{})
 	if err != nil {
 		e.closeFlow(event.FlowID, flow)
@@ -434,10 +432,8 @@ func (e *SocketEgress) handleUDPData(ctx context.Context, event ExitFrameEvent) 
 		return ErrExitWriteFailed
 	}
 	interruptCaller := interruptSocketWriteOnDone(ctx, flow.conn)
-	interruptLifecycle := interruptSocketWriteOnDone(flow.ctx, flow.conn)
 	n, err := flow.conn.Write(event.Data)
 	interruptCaller()
-	interruptLifecycle()
 	_ = flow.conn.SetWriteDeadline(time.Time{})
 	if err != nil || n != len(event.Data) {
 		e.closeFlow(event.FlowID, flow)
@@ -490,6 +486,9 @@ func (e *SocketEgress) nextReadDeadline(flow *socketFlow) time.Time {
 }
 
 func interruptSocketWriteOnDone(ctx context.Context, conn net.Conn) func() {
+	if ctx == nil || ctx.Done() == nil {
+		return func() {}
+	}
 	done := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
 		_ = conn.SetWriteDeadline(time.Now())
@@ -748,6 +747,9 @@ func (e *SocketEgress) installFlow(flowID uint64, flow *socketFlow, conn net.Con
 		return ErrSocketEgressClosed
 	}
 	flow.conn = conn
+	context.AfterFunc(flow.ctx, func() {
+		_ = conn.SetDeadline(time.Now())
+	})
 	if target.resolved {
 		flow.expiresAt = time.Now().Add(time.Duration(e.limits.ResolvedTTLSeconds) * time.Second)
 	}

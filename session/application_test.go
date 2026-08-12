@@ -257,6 +257,7 @@ func TestApplicationStagesReadStateUntilPacketOpenSucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := relay.readState
+	supersededMaterial := relay.readState.Material
 
 	protector := packet.Protector{
 		Suite:           relay.suite,
@@ -298,6 +299,7 @@ func TestApplicationStagesReadStateUntilPacketOpenSucceeds(t *testing.T) {
 	if !relay.readState.DrainUntil.IsZero() {
 		t.Fatalf("successful packet did not expire the drain state")
 	}
+	requireZeroedBytes(t, supersededMaterial.AppSecret, supersededMaterial.Key, supersededMaterial.IV)
 }
 
 func TestApplicationRejectsPacketAboveCanonicalDecodeLimit(t *testing.T) {
@@ -396,35 +398,35 @@ func TestApplicationNextPacketCancellationAndCloseWakeWaiters(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	canceled, cancel := context.WithCancel(context.Background())
-	canceledStarted := make(chan struct{})
+	canceledBase, cancel := context.WithCancel(context.Background())
+	canceled := newObservedContext(canceledBase)
 	canceledResults := make(chan error, 1)
 	go func() {
-		close(canceledStarted)
 		_, err := app.NextPacket(canceled)
 		canceledResults <- err
 	}()
-	<-canceledStarted
-	requireNextPacketWaiterPending(t, canceledResults, "cancellation")
+	<-canceled.observed
+	requireNoNextPacketResult(t, canceledResults, "cancellation")
 	cancel()
 	if err := <-canceledResults; !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled NextPacket error = %v, want context.Canceled", err)
 	}
 
 	const waiters = 8
-	started := make(chan struct{}, waiters)
+	observed := make([]*observedContext, 0, waiters)
 	results := make(chan error, waiters)
 	for range waiters {
+		ctx := newObservedContext(context.Background())
+		observed = append(observed, ctx)
 		go func() {
-			started <- struct{}{}
-			_, err := app.NextPacket(context.Background())
+			_, err := app.NextPacket(ctx)
 			results <- err
 		}()
 	}
-	for range waiters {
-		<-started
+	for _, ctx := range observed {
+		<-ctx.observed
 	}
-	requireNextPacketWaiterPending(t, results, "close")
+	requireNoNextPacketResult(t, results, "close")
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -443,6 +445,21 @@ func TestApplicationNextPacketCancellationAndCloseWakeWaiters(t *testing.T) {
 		t.Fatalf("HandlePacket after Close = %v, want ErrClosed", err)
 	}
 	requireZeroedApplicationMaterial(t, app)
+}
+
+func TestApplicationCloseDestroysDirectionalKeyHistory(t *testing.T) {
+	app, err := NewApplication(testApplicationConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotateDirectionStateForClose(t, &app.writeState, app.suite)
+	rotateDirectionStateForClose(t, &app.readState, app.suite)
+
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+	requireDestroyedDirectionState(t, app.writeState)
+	requireDestroyedDirectionState(t, app.readState)
 }
 
 func TestApplicationQueueDequeueCloseRace(t *testing.T) {
@@ -573,12 +590,66 @@ func packetNumberForTest(t *testing.T, encoded []byte) uint64 {
 	return pkt.PacketNumber
 }
 
-func requireNextPacketWaiterPending(t *testing.T, results <-chan error, operation string) {
+func requireNoNextPacketResult(t *testing.T, results <-chan error, operation string) {
 	t.Helper()
 	select {
 	case err := <-results:
 		t.Fatalf("empty NextPacket waiter returned before %s: %v", operation, err)
-	case <-time.After(20 * time.Millisecond):
+	default:
+	}
+}
+
+type observedContext struct {
+	context.Context
+	observed chan struct{}
+	once     sync.Once
+}
+
+func newObservedContext(ctx context.Context) *observedContext {
+	return &observedContext{
+		Context:  ctx,
+		observed: make(chan struct{}),
+	}
+}
+
+func (c *observedContext) Done() <-chan struct{} {
+	c.once.Do(func() {
+		close(c.observed)
+	})
+	return c.Context.Done()
+}
+
+func rotateDirectionStateForClose(t *testing.T, state *packet.DirectionState, suite uint64) {
+	t.Helper()
+	if _, err := state.ApplyReceivedUpdateAt(suite, protocol.KeyUpdate{
+		RouteInstanceID: state.RouteInstanceID,
+		HopLayer:        state.HopLayer,
+		Direction:       state.Direction,
+		OldKeyPhase:     state.KeyPhase,
+		NewKeyPhase:     state.KeyPhase + 1,
+		UpdateNonce:     repeatedByte(0x81, 16),
+		AckRequired:     true,
+		UpdateReason:    1,
+	}, repeatedByte(0x82, 16), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func requireZeroedBytes(t *testing.T, values ...[]byte) {
+	t.Helper()
+	for _, value := range values {
+		for _, b := range value {
+			if b != 0 {
+				t.Fatalf("key material was not zeroed")
+			}
+		}
+	}
+}
+
+func requireDestroyedDirectionState(t *testing.T, state packet.DirectionState) {
+	t.Helper()
+	if state.RouteInstanceID != 0 || state.HopLayer != 0 || state.Direction != 0 || state.KeyPhase != 0 || !state.DrainUntil.IsZero() || len(state.Material.AppSecret) != 0 || len(state.Material.Key) != 0 || len(state.Material.IV) != 0 {
+		t.Fatalf("direction state was not destroyed: %+v", state)
 	}
 }
 

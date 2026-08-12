@@ -240,6 +240,58 @@ func TestDirectionStateCloneOwnsEveryMutableField(t *testing.T) {
 	requireSameDirectDirectionStateSnapshot(t, snapshotDirectionStateDirect(&clone), want)
 }
 
+func TestDirectionStateDestroyZeroesMaterialAndClearsState(t *testing.T) {
+	state := populatedDirectionStateForDestroy(t)
+	held := [][]byte{
+		state.Material.AppSecret,
+		state.Material.Key,
+		state.Material.IV,
+		state.previousMaterial.AppSecret,
+		state.previousMaterial.Key,
+		state.previousMaterial.IV,
+		state.lastReceivedUpdateResult.Next.AppSecret,
+		state.lastReceivedUpdateResult.Next.Key,
+		state.lastReceivedUpdateResult.Next.IV,
+		state.pendingSentUpdate.UpdateNonce,
+		state.lastReceivedUpdate,
+		state.lastReceivedUpdateResult.ACK.AckNonce,
+	}
+
+	state.Destroy()
+
+	for _, value := range held {
+		for _, b := range value {
+			if b != 0 {
+				t.Fatalf("destroy did not zero held backing slice")
+			}
+		}
+	}
+	if state.RouteInstanceID != 0 || state.HopLayer != 0 || state.Direction != 0 || state.KeyPhase != 0 || !state.DrainUntil.IsZero() || state.pendingSentUpdateActive || state.previousKeyPhase != 0 || len(state.Material.AppSecret) != 0 || len(state.Material.Key) != 0 || len(state.Material.IV) != 0 || len(state.previousMaterial.AppSecret) != 0 || len(state.lastReceivedUpdate) != 0 || state.lastReceivedUpdateResult.ACK != nil {
+		t.Fatalf("destroy did not clear direction state: %+v", state)
+	}
+}
+
+func populatedDirectionStateForDestroy(t *testing.T) DirectionState {
+	t.Helper()
+	state := transactionalDirectionState()
+	if _, err := state.InitiateUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0x95, 16), true, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.ApplyReceivedUpdateAt(registry.SuiteHybrid768AESGCM, protocol.KeyUpdate{
+		RouteInstanceID: state.RouteInstanceID,
+		HopLayer:        state.HopLayer,
+		Direction:       state.Direction,
+		OldKeyPhase:     state.KeyPhase,
+		NewKeyPhase:     state.KeyPhase + 1,
+		UpdateNonce:     bytesOf(0x96, 16),
+		AckRequired:     true,
+		UpdateReason:    1,
+	}, bytesOf(0x97, 16), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
 func zeroKeyMaterialForTest(material *KeyMaterial) {
 	for _, value := range [][]byte{material.AppSecret, material.Key, material.IV} {
 		for i := range value {

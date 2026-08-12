@@ -216,9 +216,12 @@ func (a *Application) HandlePacket(ctx context.Context, now time.Time, encoded [
 	candidate := a.readState.Clone()
 	block, err := a.receiver.OpenWithDirectionState(pkt, &candidate, a.suite, now)
 	if err != nil {
+		candidate.Destroy()
 		return nil, err
 	}
+	previous := a.readState
 	a.readState = candidate
+	previous.Destroy()
 	return []protocol.FrameBlock{cloneFrameBlock(block)}, nil
 }
 
@@ -239,8 +242,8 @@ func (a *Application) Close() error {
 	a.reservedBytes = 0
 	zeroBytes(a.write.Key)
 	zeroBytes(a.write.StaticIV)
-	zeroDirectionState(&a.writeState)
-	zeroDirectionState(&a.readState)
+	a.writeState.Destroy()
+	a.readState.Destroy()
 	a.signalLocked()
 	close(a.closed)
 	return nil
@@ -506,12 +509,6 @@ func cloneFrameBlock(block protocol.FrameBlock) protocol.FrameBlock {
 		}
 	}
 	return cloned
-}
-
-func zeroDirectionState(state *packet.DirectionState) {
-	zeroBytes(state.Material.AppSecret)
-	zeroBytes(state.Material.Key)
-	zeroBytes(state.Material.IV)
 }
 
 func zeroBytes(b []byte) {

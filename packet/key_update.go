@@ -133,6 +133,18 @@ func (s DirectionState) Clone() DirectionState {
 	}
 }
 
+func (s *DirectionState) Destroy() {
+	destroyKeyMaterial(&s.Material)
+	destroyKeyMaterial(&s.previousMaterial)
+	destroyKeyMaterial(&s.lastReceivedUpdateResult.Next)
+	destroyBytes(s.pendingSentUpdate.UpdateNonce)
+	destroyBytes(s.lastReceivedUpdate)
+	if s.lastReceivedUpdateResult.ACK != nil {
+		destroyBytes(s.lastReceivedUpdateResult.ACK.AckNonce)
+	}
+	*s = DirectionState{}
+}
+
 func (s *DirectionState) InitiateUpdate(suite uint64, updateNonce []byte, ackRequired bool, reason uint64) (protocol.KeyUpdate, error) {
 	now := time.Now()
 	prepared, err := s.PrepareUpdate(suite, updateNonce, ackRequired, reason, now)
@@ -370,5 +382,17 @@ func cloneKeyMaterial(in KeyMaterial) KeyMaterial {
 		AppSecret: append([]byte(nil), in.AppSecret...),
 		Key:       append([]byte(nil), in.Key...),
 		IV:        append([]byte(nil), in.IV...),
+	}
+}
+
+func destroyKeyMaterial(material *KeyMaterial) {
+	destroyBytes(material.AppSecret)
+	destroyBytes(material.Key)
+	destroyBytes(material.IV)
+}
+
+func destroyBytes(value []byte) {
+	for i := range value {
+		value[i] = 0
 	}
 }

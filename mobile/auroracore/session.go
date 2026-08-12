@@ -15,6 +15,8 @@ import (
 	"github.com/aurora-protocol/aurora-core/issuerd"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/server"
+	"github.com/aurora-protocol/aurora-core/session"
+	"github.com/aurora-protocol/aurora-core/transport"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
@@ -23,6 +25,9 @@ const (
 	maximumNativeIssuerResponse    = 1 << 20
 	maximumNativeSessionPacket     = 1 << 24
 	maximumNativeIssuerWorkBytes   = 8 << 10
+	maximumNativeLocalPacketBytes  = 65535
+	maximumNativeLocalPacketResult = 1 << 20
+	maximumNativeLocalPacketQueue  = 64
 	nativeSessionHandshakeTimeout  = 30 * time.Second
 	nativeSessionIssuerTimeout     = 2 * time.Minute
 	nativeSessionCompletionTimeout = 30 * time.Second
@@ -55,15 +60,21 @@ type nativeSessionRegistry struct {
 }
 
 type nativeSession struct {
-	mu sync.Mutex
+	mu             sync.Mutex
+	localIngressMu sync.Mutex
 
+	context           context.Context
 	cancel            context.CancelFunc
 	handshake         nativeSessionHandshake
 	established       *handshake.EstablishedSession
+	adapter           *client.PacketAdapter
+	localPackets      chan []byte
 	issuerURL         string
 	issuerCarrierPath string
 	request           handshake.ClientProofRequest
 	issuerTimer       *time.Timer
+	duplexActive      bool
+	pumpErr           error
 	completing        bool
 	closed            bool
 }
@@ -139,8 +150,10 @@ func (r *nativeSessionRegistry) begin(provisioning client.NativeProvisioning) (n
 		return nativeIssuerWork{}, err
 	}
 	session := &nativeSession{
+		context:           sessionContext,
 		cancel:            cancel,
 		handshake:         deferred,
+		localPackets:      make(chan []byte, maximumNativeLocalPacketQueue),
 		issuerURL:         provisioning.IssuerURL,
 		issuerCarrierPath: provisioning.IssuerCarrierPath,
 		request:           request,
@@ -227,10 +240,20 @@ func (r *nativeSessionRegistry) complete(handle uint64, issuerResponse []byte) e
 	proof, replay, err := r.proofsForIssuerResponse(request, issuerResponse)
 	zeroNativeProofRequest(&request)
 	var established *handshake.EstablishedSession
+	var adapter *client.PacketAdapter
 	if err == nil {
-		completionContext, cancel := context.WithTimeout(context.Background(), nativeSessionCompletionTimeout)
-		established, err = deferred.Complete(completionContext, proof, replay)
-		cancel()
+		session.mu.Lock()
+		sessionContext := session.context
+		session.mu.Unlock()
+		if sessionContext == nil {
+			err = fmt.Errorf("auroracore: native session context is unavailable")
+		} else if sessionContext.Err() != nil {
+			err = sessionContext.Err()
+		} else {
+			completionContext, cancel := context.WithTimeout(sessionContext, nativeSessionCompletionTimeout)
+			established, err = deferred.Complete(completionContext, proof, replay)
+			cancel()
+		}
 		if err == nil && (established == nil || established.Application == nil) {
 			if established != nil {
 				_ = established.Close()
@@ -238,10 +261,17 @@ func (r *nativeSessionRegistry) complete(handle uint64, issuerResponse []byte) e
 			established = nil
 			err = fmt.Errorf("auroracore: native handshake completed without application session")
 		}
+		if err == nil {
+			adapter, err = client.NewPacketAdapter(established.Application, client.PacketAdapterOptions{})
+			if err != nil {
+				err = fmt.Errorf("auroracore: create native packet adapter: %w", err)
+			}
+		}
 	}
 	zeroNativeAdmissionProof(&proof)
 	zeroNativeReplayProof(&replay)
 
+	startDuplex := false
 	session.mu.Lock()
 	session.completing = false
 	if session.closed {
@@ -252,18 +282,31 @@ func (r *nativeSessionRegistry) complete(handle uint64, issuerResponse []byte) e
 		return fmt.Errorf("auroracore: native session is closed")
 	}
 	if err == nil {
-		session.established = established
-		session.handshake = nil
-		zeroNativeProofRequest(&session.request)
-		if session.issuerTimer != nil {
-			session.issuerTimer.Stop()
-			session.issuerTimer = nil
+		if (established.ReadCarrier == nil) != (established.WriteCarrier == nil) {
+			err = fmt.Errorf("auroracore: native handshake returned incomplete carrier streams")
+		} else {
+			session.established = established
+			session.adapter = adapter
+			session.handshake = nil
+			session.duplexActive = established.ReadCarrier != nil
+			startDuplex = session.duplexActive
+			zeroNativeProofRequest(&session.request)
+			if session.issuerTimer != nil {
+				session.issuerTimer.Stop()
+				session.issuerTimer = nil
+			}
 		}
 	}
 	session.mu.Unlock()
 	if err != nil {
+		if established != nil {
+			_ = established.Close()
+		}
 		_ = r.close(handle)
 		return fmt.Errorf("auroracore: complete native session: %w", err)
+	}
+	if startDuplex {
+		go r.runNativeDuplex(handle, session)
 	}
 	return nil
 }
@@ -352,6 +395,9 @@ func (r *nativeSessionRegistry) queueFrameBlock(handle uint64, encoded []byte) e
 	if session.closed || session.established == nil || session.established.Application == nil {
 		return fmt.Errorf("auroracore: native session is not established")
 	}
+	if session.duplexActive {
+		return fmt.Errorf("auroracore: carrier-backed native session owns frame transport")
+	}
 	return session.established.Application.QueueFrames(context.Background(), block)
 }
 
@@ -364,6 +410,9 @@ func (r *nativeSessionRegistry) nextPacket(handle uint64) ([]byte, error) {
 	defer session.mu.Unlock()
 	if session.closed || session.established == nil || session.established.Application == nil {
 		return nil, fmt.Errorf("auroracore: native session is not established")
+	}
+	if session.duplexActive {
+		return nil, fmt.Errorf("auroracore: carrier-backed native session owns encrypted packets")
 	}
 	return session.established.Application.TryNextPacket()
 }
@@ -381,12 +430,192 @@ func (r *nativeSessionRegistry) handlePacket(handle uint64, encoded []byte) ([]b
 	if session.closed || session.established == nil || session.established.Application == nil {
 		return nil, fmt.Errorf("auroracore: native session is not established")
 	}
+	if session.duplexActive {
+		return nil, fmt.Errorf("auroracore: carrier-backed native session owns encrypted packets")
+	}
 	blocks, err := session.established.Application.HandlePacket(context.Background(), r.now(), encoded)
 	if err != nil {
 		return nil, err
 	}
 	defer zeroNativeFrameBlocks(blocks)
 	return encodeNativeFrameBlocks(blocks)
+}
+
+func (r *nativeSessionRegistry) ingressLocalPacket(handle uint64, encoded []byte) ([][]byte, error) {
+	if len(encoded) == 0 || len(encoded) > maximumNativeLocalPacketBytes {
+		return nil, fmt.Errorf("auroracore: native local packet size is invalid")
+	}
+	session, err := r.lookup(handle)
+	if err != nil {
+		return nil, err
+	}
+	session.mu.Lock()
+	if session.closed || session.established == nil || session.adapter == nil || session.context == nil {
+		session.mu.Unlock()
+		return nil, fmt.Errorf("auroracore: native session packet adapter is unavailable")
+	}
+	packetContext := session.context
+	adapter := session.adapter
+	session.mu.Unlock()
+	if err := packetContext.Err(); err != nil {
+		return nil, err
+	}
+	session.localIngressMu.Lock()
+	defer session.localIngressMu.Unlock()
+	if err := adapter.Ingress(packetContext, encoded, r.now()); err != nil {
+		return nil, err
+	}
+	return adapter.DrainLocalPackets(), nil
+}
+
+func (r *nativeSessionRegistry) nextLocalPacket(ctx context.Context, handle uint64) ([]byte, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("auroracore: native local packet context is nil")
+	}
+	session, err := r.lookup(handle)
+	if err != nil {
+		return nil, err
+	}
+	session.mu.Lock()
+	if session.closed || session.established == nil || session.adapter == nil || session.context == nil || session.localPackets == nil {
+		session.mu.Unlock()
+		return nil, fmt.Errorf("auroracore: native session packet adapter is unavailable")
+	}
+	packetContext := session.context
+	packets := session.localPackets
+	session.mu.Unlock()
+	for {
+		select {
+		case packet := <-packets:
+			if len(packet) == 0 {
+				return nil, fmt.Errorf("auroracore: native local packet is invalid")
+			}
+			return packet, nil
+		default:
+		}
+		select {
+		case packet := <-packets:
+			if len(packet) == 0 {
+				return nil, fmt.Errorf("auroracore: native local packet is invalid")
+			}
+			return packet, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-packetContext.Done():
+			select {
+			case packet := <-packets:
+				if len(packet) == 0 {
+					return nil, fmt.Errorf("auroracore: native local packet is invalid")
+				}
+				return packet, nil
+			default:
+				return nil, session.localPacketTerminationError()
+			}
+		}
+	}
+}
+
+func (r *nativeSessionRegistry) runNativeDuplex(handle uint64, session *nativeSession) {
+	if r == nil || session == nil {
+		return
+	}
+	session.mu.Lock()
+	packetContext := session.context
+	established := session.established
+	adapter := session.adapter
+	session.mu.Unlock()
+	if packetContext == nil || established == nil || adapter == nil {
+		r.finishNativeDuplex(handle, session, fmt.Errorf("auroracore: native duplex is unavailable"))
+		return
+	}
+	err := transport.RunPacketDuplex(packetContext, established.ReadCarrier, established.WriteCarrier, established.Application, func(frameContext context.Context, block protocol.FrameBlock) error {
+		packets, err := adapter.HandleFrameBlocks(frameContext, []protocol.FrameBlock{block}, r.now())
+		if err != nil {
+			return err
+		}
+		defer zeroNativeLocalPackets(packets)
+		for _, packet := range packets {
+			if err := session.enqueueLocalPacket(frameContext, packet); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, transport.DefaultMaxRecordBodyBytes)
+	r.finishNativeDuplex(handle, session, err)
+}
+
+func (r *nativeSessionRegistry) finishNativeDuplex(handle uint64, session *nativeSession, err error) {
+	if r == nil || handle == 0 || session == nil {
+		return
+	}
+	session.finishDuplex(err)
+	r.mu.Lock()
+	if r.sessions[handle] == session {
+		delete(r.sessions, handle)
+	}
+	r.mu.Unlock()
+	_ = session.close()
+}
+
+func (s *nativeSession) enqueueLocalPacket(ctx context.Context, packet []byte) error {
+	if s == nil || ctx == nil || len(packet) == 0 || len(packet) > maximumNativeLocalPacketBytes {
+		return fmt.Errorf("auroracore: native local packet is invalid")
+	}
+	s.mu.Lock()
+	packetContext := s.context
+	packets := s.localPackets
+	closed := s.closed
+	s.mu.Unlock()
+	if closed || packetContext == nil || packets == nil {
+		return session.ErrClosed
+	}
+	owned := append([]byte(nil), packet...)
+	select {
+	case packets <- owned:
+		return nil
+	case <-ctx.Done():
+		zeroNativeBytes(owned)
+		return ctx.Err()
+	case <-packetContext.Done():
+		zeroNativeBytes(owned)
+		return s.localPacketTerminationError()
+	}
+}
+
+func (s *nativeSession) finishDuplex(err error) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	if err == nil {
+		err = fmt.Errorf("auroracore: native duplex stopped unexpectedly")
+	}
+	s.pumpErr = err
+	cancel := s.cancel
+	established := s.established
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if established != nil {
+		_ = established.Close()
+	}
+}
+
+func (s *nativeSession) localPacketTerminationError() error {
+	if s == nil {
+		return session.ErrClosed
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pumpErr != nil {
+		return s.pumpErr
+	}
+	return session.ErrClosed
 }
 
 func (r *nativeSessionRegistry) lookup(handle uint64) (*nativeSession, error) {
@@ -533,6 +762,29 @@ func encodeNativeFrameBlocks(blocks []protocol.FrameBlock) ([]byte, error) {
 	return encoded, nil
 }
 
+func encodeNativeLocalPackets(packets [][]byte) ([]byte, error) {
+	if len(packets) > maximumNativeLocalPacketQueue {
+		return nil, fmt.Errorf("auroracore: native local packet result count exceeds limit")
+	}
+	encoder := wire.NewEncoder()
+	encoder.WriteVarint(uint64(len(packets)))
+	for _, packet := range packets {
+		if len(packet) == 0 || len(packet) > maximumNativeLocalPacketBytes {
+			return nil, fmt.Errorf("auroracore: native local packet is invalid")
+		}
+		encoder.WriteOpaque24(packet)
+	}
+	encoded, err := encoder.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("auroracore: encode native local packets: %w", err)
+	}
+	if len(encoded) > maximumNativeLocalPacketResult {
+		zeroNativeBytes(encoded)
+		return nil, fmt.Errorf("auroracore: native local packet result exceeds size limit")
+	}
+	return encoded, nil
+}
+
 func cloneNativeProofRequest(in handshake.ClientProofRequest) handshake.ClientProofRequest {
 	in.AdmissionContextHash = append([]byte(nil), in.AdmissionContextHash...)
 	in.HandshakeBindingContext = append([]byte(nil), in.HandshakeBindingContext...)
@@ -589,6 +841,13 @@ func zeroNativeFrameBlock(value *protocol.FrameBlock) {
 func zeroNativeFrameBlocks(values []protocol.FrameBlock) {
 	for index := range values {
 		zeroNativeFrameBlock(&values[index])
+	}
+}
+
+func zeroNativeLocalPackets(values [][]byte) {
+	for index := range values {
+		zeroNativeBytes(values[index])
+		values[index] = nil
 	}
 }
 

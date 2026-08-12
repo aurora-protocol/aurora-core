@@ -151,6 +151,75 @@ func TestPacketAdapterOpensUDPAndForwardsDatagrams(t *testing.T) {
 	}
 }
 
+func TestPacketAdapterForwardsDNSWithoutLocalResolver(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{
+		MaxFlows:       8,
+		MaxPacketBytes: 1500,
+		Random:         bytes.NewReader(bytes.Repeat([]byte{0x53}, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	packet := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{10, 0, 0, 1}, 53000, 53, packetAdapterDNSQuery(t, "example.com"))
+	if err := adapter.Ingress(context.Background(), packet, now); err != nil {
+		t.Fatal(err)
+	}
+	if local := adapter.DrainLocalPackets(); len(local) != 0 {
+		t.Fatalf("uncaptured DNS generated %d local packets", len(local))
+	}
+	encrypted, err := adapter.NextEncryptedPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := relayApplication.HandlePacket(context.Background(), now, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || len(blocks[0].Frames) != 2 || blocks[0].Frames[0].FrameType != registry.FrameFlowOpen || blocks[0].Frames[1].FrameType != registry.FrameStreamData {
+		t.Fatalf("DNS without local resolver did not open a relayed UDP flow: %+v", blocks)
+	}
+}
+
+func TestPacketAdapterHandlesDecodedRelayBlocks(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	syn := packetAdapterTCPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, 100, 0, tcpFlagSYN, nil)
+	if err := adapter.Ingress(context.Background(), syn, now); err != nil {
+		t.Fatal(err)
+	}
+	adapter.DrainLocalPackets()
+	encrypted, err := adapter.NextEncryptedPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := relayApplication.HandlePacket(context.Background(), now, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := protocol.DecodeFlowOpen(packetAdapterReader(blocks[0].Frames[0].Payload))
+	frame, err := protocol.NewStreamDataFrame(open.FlowID, []byte("response"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, err := adapter.HandleFrameBlocks(context.Background(), []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{frame}}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(local) != 1 || !bytes.Equal(packetAdapterParseTCPv4(t, local[0]).payload, []byte("response")) {
+		t.Fatalf("decoded relay frames did not produce the local TCP response: %d packets", len(local))
+	}
+}
+
 func TestPacketAdapterUsesNativeUDPDatagrams(t *testing.T) {
 	clientApplication, relayApplication := packetAdapterApplications(t)
 	defer clientApplication.Close()

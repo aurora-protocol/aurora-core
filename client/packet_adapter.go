@@ -167,7 +167,7 @@ func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Ti
 	if err != nil {
 		return err
 	}
-	if packet.protocol == packetAdapterUDP && packet.udp.destinationPort == packetAdapterDNSPort {
+	if packet.protocol == packetAdapterUDP && packet.udp.destinationPort == packetAdapterDNSPort && a.dnsAnswers != nil {
 		return a.ingressDNS(ctx, packet, now)
 	}
 	a.mu.Lock()
@@ -209,6 +209,29 @@ func (a *PacketAdapter) HandleEncryptedPacket(ctx context.Context, encoded []byt
 		return nil, err
 	}
 	defer zeroPacketAdapterBlocks(blocks)
+	return a.HandleFrameBlocks(ctx, blocks, now)
+}
+
+// HandleFrameBlocks converts decrypted relay frames to packets for the local tunnel.
+// Callers retain ownership of blocks and must not mutate them until this method returns.
+func (a *PacketAdapter) HandleFrameBlocks(ctx context.Context, blocks []protocol.FrameBlock, now time.Time) ([][]byte, error) {
+	if a == nil || a.application == nil {
+		return nil, fmt.Errorf("client: packet adapter application is unavailable")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("client: packet adapter context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if now.IsZero() || now.Unix() < 0 {
+		return nil, fmt.Errorf("client: packet adapter requires a valid time")
+	}
+	for _, block := range blocks {
+		if err := protocol.ValidateFrameBlock(block); err != nil {
+			return nil, fmt.Errorf("client: invalid decoded relay frame block: %w", err)
+		}
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var local [][]byte

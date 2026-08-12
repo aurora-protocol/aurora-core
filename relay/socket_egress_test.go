@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -821,5 +822,329 @@ func TestSocketEgressTCPIdleTimeoutQueuesClose(t *testing.T) {
 	case <-serverDone:
 	case <-time.After(time.Second):
 		t.Fatal("idle flow did not close destination socket")
+	}
+}
+
+func TestSocketEgressUDPAssociationRoundTrip(t *testing.T) {
+	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("ListenUDP failed: %v", err)
+	}
+	defer server.Close()
+	serverResult := make(chan error, 1)
+	go func() {
+		_ = server.SetDeadline(time.Now().Add(2 * time.Second))
+		buffer := make([]byte, 64)
+		n, client, err := server.ReadFromUDP(buffer)
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		if string(buffer[:n]) != "ping" {
+			serverResult <- errors.New("unexpected UDP request")
+			return
+		}
+		_, err = server.WriteToUDP([]byte("pong"), client)
+		serverResult <- err
+	}()
+
+	sink := &channelFrameSink{blocks: make(chan protocol.FrameBlock, 8)}
+	socketEgress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink: sink, Policy: ExitPolicy{AllowPrivate: true}, Dialer: &net.Dialer{},
+		Resolver: net.DefaultResolver,
+	})
+	if err != nil {
+		t.Fatalf("NewSocketEgress failed: %v", err)
+	}
+	exitSession, err := NewExitSession(socketEgress, sink, ExitSessionOptions{
+		Policy: ExitPolicy{AllowPrivate: true},
+	})
+	if err != nil {
+		_ = socketEgress.Close()
+		t.Fatalf("NewExitSession failed: %v", err)
+	}
+	t.Cleanup(func() { _ = exitSession.Close() })
+	open := relayUDPFlowOpen(91, []byte{127, 0, 0, 1})
+	open.TargetPort = uint16(server.LocalAddr().(*net.UDPAddr).Port)
+	if err := exitSession.HandleFrameBlock(context.Background(), protocol.FrameBlock{
+		Frames: []protocol.AuroraFrame{flowOpenFrame(t, open)},
+	}); err != nil {
+		t.Fatalf("FLOW_OPEN failed: %v", err)
+	}
+	assertSocketFrame(t, sink.blocks, registry.FrameUDPTargetConfirm, open.FlowID, "")
+	datagram, err := protocol.NewDatagramDataFrame(open.FlowID, []byte("ping"), 0)
+	if err != nil {
+		t.Fatalf("NewDatagramDataFrame failed: %v", err)
+	}
+	if err := exitSession.HandleFrameBlock(context.Background(), protocol.FrameBlock{
+		Frames: []protocol.AuroraFrame{datagram},
+	}); err != nil {
+		t.Fatalf("DATAGRAM_DATA failed: %v", err)
+	}
+	assertSocketFrame(t, sink.blocks, registry.FrameDatagramData, open.FlowID, "pong")
+	if err := <-serverResult; err != nil {
+		t.Fatalf("UDP server failed: %v", err)
+	}
+	closeFrame, err := protocol.NewFlowCloseFrame(protocol.FlowClose{FlowID: open.FlowID, CloseCode: protocol.CloseNormal})
+	if err != nil {
+		t.Fatalf("NewFlowCloseFrame failed: %v", err)
+	}
+	if err := exitSession.HandleFrameBlock(context.Background(), protocol.FrameBlock{
+		Frames: []protocol.AuroraFrame{closeFrame},
+	}); err != nil {
+		t.Fatalf("FLOW_CLOSE failed: %v", err)
+	}
+}
+
+func TestSocketEgressUDPRelayResolutionConfirmation(t *testing.T) {
+	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("ListenUDP failed: %v", err)
+	}
+	defer server.Close()
+	resolver := &recordingIPResolver{answers: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}
+	limits := validSocketEgressLimits(4)
+	sink := &channelFrameSink{blocks: make(chan protocol.FrameBlock, 4)}
+	socketEgress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink: sink, Policy: ExitPolicy{AllowPrivate: true}, Dialer: &net.Dialer{},
+		Resolver: resolver, Limits: limits,
+	})
+	if err != nil {
+		t.Fatalf("NewSocketEgress failed: %v", err)
+	}
+	exitSession, err := NewExitSession(socketEgress, sink, ExitSessionOptions{
+		Policy: ExitPolicy{AllowPrivate: true},
+	})
+	if err != nil {
+		_ = socketEgress.Close()
+		t.Fatalf("NewExitSession failed: %v", err)
+	}
+	t.Cleanup(func() { _ = exitSession.Close() })
+	open := protocol.FlowOpen{
+		FlowOpenVersion: registry.Version20, FlowID: 92,
+		FlowKind: coreflow.FlowKindUDPAssociation, TargetKind: coreflow.TargetKindDomainName,
+		TargetHost: []byte("relay.test"), TargetPort: uint16(server.LocalAddr().(*net.UDPAddr).Port),
+		UDPFQDNMode:   coreflow.UDPFQDNRelayResolvedFlowBound,
+		NameBindingID: bytesOf(0x31, 16), DNSAnswerSetHash: bytesOf(0x32, 48),
+		LocalBindingMode: coreflow.LocalBindingExplicitProxyAPI, PriorityClass: coreflow.PriorityRealtime,
+	}
+	if err := exitSession.HandleFrameBlock(context.Background(), protocol.FrameBlock{
+		Frames: []protocol.AuroraFrame{flowOpenFrame(t, open)},
+	}); err != nil {
+		t.Fatalf("FLOW_OPEN failed: %v", err)
+	}
+	select {
+	case block := <-sink.blocks:
+		if len(block.Frames) != 1 || block.Frames[0].FrameType != registry.FrameUDPTargetConfirm {
+			t.Fatalf("confirmation block = %#v", block)
+		}
+		reader := wire.NewReader(block.Frames[0].Payload)
+		confirm := protocol.DecodeUDPTargetConfirm(reader)
+		if reader.Err() != nil || !reader.EOF() {
+			t.Fatalf("decode confirmation: %v", reader.Err())
+		}
+		if confirm.ResolutionSource != protocol.UDPResolutionRelaySystemDNS ||
+			confirm.TargetKind != coreflow.TargetKindIPv4 ||
+			!bytes.Equal(confirm.SelectedIP, []byte{127, 0, 0, 1}) ||
+			confirm.TTLSeconds != limits.ResolvedTTLSeconds ||
+			!bytes.Equal(confirm.DNSAnswerSetHash, coreflow.DNSAnswerSetHash([]string{"127.0.0.1"})) {
+			t.Fatalf("unexpected confirmation: %+v", confirm)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for relay resolution confirmation")
+	}
+	if len(resolver.calls) != 1 || resolver.calls[0].host != "relay.test" {
+		t.Fatalf("resolver calls = %#v", resolver.calls)
+	}
+}
+
+func TestSocketEgressUDPRejectsOversizeAndReleasesFlow(t *testing.T) {
+	local, peer := net.Pipe()
+	defer peer.Close()
+	limits := validSocketEgressLimits(4)
+	limits.MaxUDPDatagramBytes = 512
+	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink:   &channelFrameSink{blocks: make(chan protocol.FrameBlock, 4)},
+		Policy: ExitPolicy{AllowPrivate: true},
+		Dialer: &recordingContextDialer{conn: local, useConn: true}, Resolver: &recordingIPResolver{},
+		Limits: limits,
+	})
+	if err != nil {
+		t.Fatalf("NewSocketEgress failed: %v", err)
+	}
+	t.Cleanup(func() { _ = egress.Close() })
+	flow := coreflow.FlowState{
+		FlowID: 93, Kind: coreflow.FlowKindUDPAssociation,
+		TargetKind: coreflow.TargetKindIPv4, TargetHost: []byte{127, 0, 0, 1}, TargetPort: 443,
+		UDPFQDNMode: coreflow.UDPFQDNNoneIPAuthoritative,
+	}
+	if _, err := egress.HandleEvent(context.Background(), ExitFrameEvent{
+		Kind: ExitEventFlowOpened, FlowID: flow.FlowID, Flow: flow,
+	}); err != nil {
+		t.Fatalf("open HandleEvent failed: %v", err)
+	}
+	_, err = egress.HandleEvent(context.Background(), ExitFrameEvent{
+		Kind: ExitEventDatagramData, FlowID: flow.FlowID, Flow: flow,
+		Data: make([]byte, limits.MaxUDPDatagramBytes+1),
+	})
+	if !errors.Is(err, ErrExitDatagramLarge) {
+		t.Fatalf("oversized datagram error = %v, want ErrExitDatagramLarge", err)
+	}
+	egress.mu.Lock()
+	_, retained := egress.flows[flow.FlowID]
+	egress.mu.Unlock()
+	if retained {
+		t.Fatal("oversized datagram retained the association")
+	}
+}
+
+func TestSocketEgressUDPStreamFallbackAndOversizeResponse(t *testing.T) {
+	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("ListenUDP failed: %v", err)
+	}
+	defer server.Close()
+	serverResult := make(chan error, 1)
+	go func() {
+		_ = server.SetDeadline(time.Now().Add(2 * time.Second))
+		buffer := make([]byte, 64)
+		n, client, err := server.ReadFromUDP(buffer)
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		if string(buffer[:n]) != "fallback" {
+			serverResult <- errors.New("unexpected UDP fallback request")
+			return
+		}
+		_, err = server.WriteToUDP(make([]byte, 513), client)
+		serverResult <- err
+	}()
+	limits := validSocketEgressLimits(4)
+	limits.MaxUDPDatagramBytes = 512
+	sink := &channelFrameSink{blocks: make(chan protocol.FrameBlock, 4)}
+	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink: sink, Policy: ExitPolicy{AllowPrivate: true}, Dialer: &net.Dialer{},
+		Resolver: net.DefaultResolver, Limits: limits,
+	})
+	if err != nil {
+		t.Fatalf("NewSocketEgress failed: %v", err)
+	}
+	t.Cleanup(func() { _ = egress.Close() })
+	flow := coreflow.FlowState{
+		FlowID: 94, Kind: coreflow.FlowKindUDPAssociation,
+		TargetKind: coreflow.TargetKindIPv4, TargetHost: []byte{127, 0, 0, 1},
+		TargetPort:  uint16(server.LocalAddr().(*net.UDPAddr).Port),
+		UDPFQDNMode: coreflow.UDPFQDNNoneIPAuthoritative,
+	}
+	if _, err := egress.HandleEvent(context.Background(), ExitFrameEvent{
+		Kind: ExitEventFlowOpened, FlowID: flow.FlowID, Flow: flow,
+	}); err != nil {
+		t.Fatalf("open HandleEvent failed: %v", err)
+	}
+	if _, err := egress.HandleEvent(context.Background(), ExitFrameEvent{
+		Kind: ExitEventStreamData, FlowID: flow.FlowID, Flow: flow, Data: []byte("fallback"),
+	}); err != nil {
+		t.Fatalf("stream fallback HandleEvent failed: %v", err)
+	}
+	select {
+	case block := <-sink.blocks:
+		if len(block.Frames) != 1 || block.Frames[0].FrameType != registry.FrameFlowClose {
+			t.Fatalf("oversize response block = %#v", block)
+		}
+		reader := wire.NewReader(block.Frames[0].Payload)
+		closeFrame := protocol.DecodeFlowClose(reader)
+		if reader.Err() != nil || closeFrame.CloseCode != protocol.CloseResourceLimit {
+			t.Fatalf("oversize response close = %+v, decode error %v", closeFrame, reader.Err())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for resource-limit close")
+	}
+	if err := <-serverResult; err != nil {
+		t.Fatalf("UDP server failed: %v", err)
+	}
+}
+
+func TestSocketEgressUDPIdleTimeoutQueuesClose(t *testing.T) {
+	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("ListenUDP failed: %v", err)
+	}
+	defer server.Close()
+	limits := validSocketEgressLimits(4)
+	limits.IdleTimeout = 30 * time.Millisecond
+	sink := &channelFrameSink{blocks: make(chan protocol.FrameBlock, 4)}
+	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink: sink, Policy: ExitPolicy{AllowPrivate: true}, Dialer: &net.Dialer{},
+		Resolver: net.DefaultResolver, Limits: limits,
+	})
+	if err != nil {
+		t.Fatalf("NewSocketEgress failed: %v", err)
+	}
+	t.Cleanup(func() { _ = egress.Close() })
+	flow := coreflow.FlowState{
+		FlowID: 95, Kind: coreflow.FlowKindUDPAssociation,
+		TargetKind: coreflow.TargetKindIPv4, TargetHost: []byte{127, 0, 0, 1},
+		TargetPort:  uint16(server.LocalAddr().(*net.UDPAddr).Port),
+		UDPFQDNMode: coreflow.UDPFQDNNoneIPAuthoritative,
+	}
+	if _, err := egress.HandleEvent(context.Background(), ExitFrameEvent{
+		Kind: ExitEventFlowOpened, FlowID: flow.FlowID, Flow: flow,
+	}); err != nil {
+		t.Fatalf("open HandleEvent failed: %v", err)
+	}
+	select {
+	case block := <-sink.blocks:
+		if len(block.Frames) != 1 || block.Frames[0].FrameType != registry.FrameFlowClose {
+			t.Fatalf("idle block = %#v", block)
+		}
+		reader := wire.NewReader(block.Frames[0].Payload)
+		closeFrame := protocol.DecodeFlowClose(reader)
+		if reader.Err() != nil || closeFrame.CloseCode != protocol.CloseIdleTimeout {
+			t.Fatalf("idle close = %+v, decode error %v", closeFrame, reader.Err())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for UDP idle close")
+	}
+}
+
+func TestResolvedUDPAssociationExpiresAtTTL(t *testing.T) {
+	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("ListenUDP failed: %v", err)
+	}
+	defer server.Close()
+	limits := validSocketEgressLimits(4)
+	limits.IdleTimeout = time.Minute
+	limits.ResolvedTTLSeconds = 1
+	sink := &channelFrameSink{blocks: make(chan protocol.FrameBlock, 4)}
+	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink: sink, Policy: ExitPolicy{AllowPrivate: true}, Dialer: &net.Dialer{},
+		Resolver: &recordingIPResolver{answers: []netip.Addr{netip.MustParseAddr("127.0.0.1")}},
+		Limits:   limits,
+	})
+	if err != nil {
+		t.Fatalf("NewSocketEgress failed: %v", err)
+	}
+	t.Cleanup(func() { _ = egress.Close() })
+	flow := coreflow.FlowState{
+		FlowID: 96, Kind: coreflow.FlowKindUDPAssociation,
+		TargetKind: coreflow.TargetKindDomainName, TargetHost: []byte("relay.test"),
+		TargetPort:  uint16(server.LocalAddr().(*net.UDPAddr).Port),
+		UDPFQDNMode: coreflow.UDPFQDNRelayResolvedFlowBound,
+	}
+	frames, err := egress.HandleEvent(context.Background(), ExitFrameEvent{
+		Kind: ExitEventFlowOpened, FlowID: flow.FlowID, Flow: flow,
+	})
+	if err != nil || len(frames) != 1 || frames[0].FrameType != registry.FrameUDPTargetConfirm {
+		t.Fatalf("open result frames=%#v error=%v", frames, err)
+	}
+	select {
+	case block := <-sink.blocks:
+		if len(block.Frames) != 1 || block.Frames[0].FrameType != registry.FrameFlowClose {
+			t.Fatalf("TTL block = %#v", block)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("resolved UDP association outlived TTL")
 	}
 }

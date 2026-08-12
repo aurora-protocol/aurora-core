@@ -49,6 +49,7 @@ var (
 	ErrExitEventInvalid   = errors.New("relay: invalid exit event")
 	ErrExitFlowUnknown    = errors.New("relay: unknown exit flow")
 	ErrExitWriteFailed    = errors.New("relay: exit socket write failed")
+	ErrExitDatagramLarge  = errors.New("relay: exit datagram exceeds limit")
 )
 
 type ContextDialer interface {
@@ -110,6 +111,7 @@ type socketFlow struct {
 	writeMu     sync.Mutex
 	closeOnce   sync.Once
 	peerClosed  bool
+	expiresAt   time.Time
 }
 
 func NewSocketEgress(ctx context.Context, options SocketEgressOptions) (*SocketEgress, error) {
@@ -164,7 +166,12 @@ func (e *SocketEgress) HandleEvent(ctx context.Context, event ExitFrameEvent) ([
 	case ExitEventFlowOpened:
 		return e.handleFlowOpened(ctx, event)
 	case ExitEventStreamData:
+		if event.Flow.Kind == coreflow.FlowKindUDPAssociation {
+			return nil, e.handleUDPData(ctx, event)
+		}
 		return nil, e.handleTCPData(ctx, event)
+	case ExitEventDatagramData:
+		return nil, e.handleUDPData(ctx, event)
 	case ExitEventFlowClosed:
 		return nil, e.handleFlowClosed(event)
 	default:
@@ -197,7 +204,7 @@ func (e *SocketEgress) handleFlowOpened(ctx context.Context, event ExitFrameEven
 		}
 		return nil, ErrExitDialFailed
 	}
-	if err := e.installFlow(event.FlowID, flow, conn, ctx); err != nil {
+	if err := e.installFlow(event.FlowID, flow, conn, target, ctx); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
@@ -206,8 +213,21 @@ func (e *SocketEgress) handleFlowOpened(ctx context.Context, event ExitFrameEven
 			_ = conn.Close()
 			return nil, err
 		}
+	} else if flow.kind == coreflow.FlowKindUDPAssociation {
+		if err := e.startUDPReadPump(event.FlowID, flow); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
 	}
 	keep = true
+	if flow.kind == coreflow.FlowKindUDPAssociation && target.resolved {
+		confirm, err := e.resolvedUDPConfirm(event.Flow, target)
+		if err != nil {
+			e.closeFlow(event.FlowID, flow)
+			return nil, err
+		}
+		return []protocol.AuroraFrame{confirm}, nil
+	}
 	return nil, nil
 }
 
@@ -222,8 +242,11 @@ func (e *SocketEgress) beginOperation() error {
 }
 
 type selectedSocketTarget struct {
-	network string
-	address string
+	network  string
+	address  string
+	addr     netip.Addr
+	answers  []netip.Addr
+	resolved bool
 }
 
 func (e *SocketEgress) selectTarget(ctx context.Context, flow coreflow.FlowState) (selectedSocketTarget, error) {
@@ -231,6 +254,7 @@ func (e *SocketEgress) selectTarget(ctx context.Context, flow coreflow.FlowState
 		return selectedSocketTarget{}, ErrExitTargetInvalid
 	}
 	var addr netip.Addr
+	var ordered []netip.Addr
 	switch flow.TargetKind {
 	case coreflow.TargetKindIPv4, coreflow.TargetKindIPv6:
 		var ok bool
@@ -270,7 +294,7 @@ func (e *SocketEgress) selectTarget(ctx context.Context, flow coreflow.FlowState
 		if len(allowed) == 0 {
 			return selectedSocketTarget{}, ErrExitResolveFailed
 		}
-		ordered := make([]netip.Addr, 0, len(allowed))
+		ordered = make([]netip.Addr, 0, len(allowed))
 		for answer := range allowed {
 			ordered = append(ordered, answer)
 		}
@@ -294,8 +318,11 @@ func (e *SocketEgress) selectTarget(ctx context.Context, flow coreflow.FlowState
 		}
 	}
 	return selectedSocketTarget{
-		network: network,
-		address: net.JoinHostPort(addr.String(), strconv.Itoa(int(flow.TargetPort))),
+		network:  network,
+		address:  net.JoinHostPort(addr.String(), strconv.Itoa(int(flow.TargetPort))),
+		addr:     addr,
+		answers:  ordered,
+		resolved: flow.TargetKind == coreflow.TargetKindDomainName,
 	}, nil
 }
 
@@ -369,6 +396,91 @@ func (e *SocketEgress) handleTCPData(ctx context.Context, event ExitFrameEvent) 
 	}
 	_ = flow.conn.SetReadDeadline(time.Now().Add(e.limits.IdleTimeout))
 	return nil
+}
+
+func (e *SocketEgress) handleUDPData(ctx context.Context, event ExitFrameEvent) error {
+	flow, err := e.activeFlow(event.FlowID, coreflow.FlowKindUDPAssociation)
+	if err != nil {
+		return err
+	}
+	if len(event.Data) > e.limits.MaxUDPDatagramBytes {
+		e.closeFlow(event.FlowID, flow)
+		return ErrExitDatagramLarge
+	}
+	flow.writeMu.Lock()
+	defer flow.writeMu.Unlock()
+	if flow.peerClosed {
+		return ErrExitFlowUnknown
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !flow.expiresAt.IsZero() && !time.Now().Before(flow.expiresAt) {
+		e.closeFlow(event.FlowID, flow)
+		return ErrExitFlowUnknown
+	}
+	deadline := time.Now().Add(e.limits.WriteTimeout)
+	if callerDeadline, ok := ctx.Deadline(); ok && callerDeadline.Before(deadline) {
+		deadline = callerDeadline
+	}
+	if err := flow.conn.SetWriteDeadline(deadline); err != nil {
+		e.closeFlow(event.FlowID, flow)
+		return ErrExitWriteFailed
+	}
+	interruptCaller := interruptSocketWriteOnDone(ctx, flow.conn)
+	interruptLifecycle := interruptSocketWriteOnDone(flow.ctx, flow.conn)
+	n, err := flow.conn.Write(event.Data)
+	interruptCaller()
+	interruptLifecycle()
+	_ = flow.conn.SetWriteDeadline(time.Time{})
+	if err != nil || n != len(event.Data) {
+		e.closeFlow(event.FlowID, flow)
+		if lifecycleErr := e.lifecycleError(ctx); lifecycleErr != nil {
+			return lifecycleErr
+		}
+		return ErrExitWriteFailed
+	}
+	_ = flow.conn.SetReadDeadline(e.nextReadDeadline(flow))
+	return nil
+}
+
+func (e *SocketEgress) resolvedUDPConfirm(state coreflow.FlowState, target selectedSocketTarget) (protocol.AuroraFrame, error) {
+	answers := make([]string, 0, len(target.answers))
+	for _, answer := range target.answers {
+		answers = append(answers, answer.String())
+	}
+	targetKind := coreflow.TargetKindIPv6
+	selected := target.addr.As16()
+	if target.addr.Is4() {
+		targetKind = coreflow.TargetKindIPv4
+		selected4 := target.addr.As4()
+		return protocol.NewUDPTargetConfirmFrame(protocol.UDPTargetConfirm{
+			FlowID:           state.FlowID,
+			TargetKind:       targetKind,
+			SelectedIP:       append([]byte(nil), selected4[:]...),
+			SelectedPort:     state.TargetPort,
+			DNSAnswerSetHash: coreflow.DNSAnswerSetHash(answers),
+			TTLSeconds:       e.limits.ResolvedTTLSeconds,
+			ResolutionSource: protocol.UDPResolutionRelaySystemDNS,
+		})
+	}
+	return protocol.NewUDPTargetConfirmFrame(protocol.UDPTargetConfirm{
+		FlowID:           state.FlowID,
+		TargetKind:       targetKind,
+		SelectedIP:       append([]byte(nil), selected[:]...),
+		SelectedPort:     state.TargetPort,
+		DNSAnswerSetHash: coreflow.DNSAnswerSetHash(answers),
+		TTLSeconds:       e.limits.ResolvedTTLSeconds,
+		ResolutionSource: protocol.UDPResolutionRelaySystemDNS,
+	})
+}
+
+func (e *SocketEgress) nextReadDeadline(flow *socketFlow) time.Time {
+	deadline := time.Now().Add(e.limits.IdleTimeout)
+	if !flow.expiresAt.IsZero() && flow.expiresAt.Before(deadline) {
+		return flow.expiresAt
+	}
+	return deadline
 }
 
 func interruptSocketWriteOnDone(ctx context.Context, conn net.Conn) func() {
@@ -470,6 +582,23 @@ func (e *SocketEgress) startTCPReadPump(flowID uint64, flow *socketFlow) error {
 	return nil
 }
 
+func (e *SocketEgress) startUDPReadPump(flowID uint64, flow *socketFlow) error {
+	e.mu.Lock()
+	if e.closed || e.ctx.Err() != nil || e.flows[flowID] != flow {
+		e.mu.Unlock()
+		return ErrSocketEgressClosed
+	}
+	e.wg.Add(1)
+	flow.pumpStarted = true
+	e.mu.Unlock()
+	go func() {
+		defer e.wg.Done()
+		defer flow.finish()
+		e.runUDPReadPump(flowID, flow)
+	}()
+	return nil
+}
+
 func (e *SocketEgress) runTCPReadPump(flowID uint64, flow *socketFlow) {
 	defer e.closeFlow(flowID, flow)
 	buffer := make([]byte, flow.bufferBytes)
@@ -505,7 +634,48 @@ func (e *SocketEgress) runTCPReadPump(flowID uint64, flow *socketFlow) {
 	}
 }
 
+func (e *SocketEgress) runUDPReadPump(flowID uint64, flow *socketFlow) {
+	defer e.closeFlow(flowID, flow)
+	buffer := make([]byte, flow.bufferBytes)
+	for {
+		if err := flow.ctx.Err(); err != nil {
+			return
+		}
+		if err := flow.conn.SetReadDeadline(e.nextReadDeadline(flow)); err != nil {
+			e.queueFlowClose(flow, flowID, protocol.CloseResetByPeer)
+			return
+		}
+		n, err := flow.conn.Read(buffer)
+		if n > e.limits.MaxUDPDatagramBytes {
+			e.queueFlowClose(flow, flowID, protocol.CloseResourceLimit)
+			return
+		}
+		if n > 0 {
+			frame, frameErr := protocol.NewDatagramDataFrame(flowID, buffer[:n], 0)
+			if frameErr != nil || e.queueSocketFrames(flow.ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}) != nil {
+				return
+			}
+		}
+		if err != nil {
+			code := protocol.CloseResetByPeer
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				code = protocol.CloseIdleTimeout
+			}
+			e.queueFlowClose(flow, flowID, code)
+			return
+		}
+		if n == 0 {
+			e.queueFlowClose(flow, flowID, protocol.CloseResetByPeer)
+			return
+		}
+	}
+}
+
 func (e *SocketEgress) queueTCPFlowClose(flow *socketFlow, flowID, code uint64) {
+	e.queueFlowClose(flow, flowID, code)
+}
+
+func (e *SocketEgress) queueFlowClose(flow *socketFlow, flowID, code uint64) {
 	frame, err := protocol.NewFlowCloseFrame(protocol.FlowClose{FlowID: flowID, CloseCode: code})
 	if err != nil {
 		return
@@ -559,7 +729,7 @@ func (f *socketFlow) finish() {
 	f.doneOnce.Do(func() { close(f.done) })
 }
 
-func (e *SocketEgress) installFlow(flowID uint64, flow *socketFlow, conn net.Conn, ctx context.Context) error {
+func (e *SocketEgress) installFlow(flowID uint64, flow *socketFlow, conn net.Conn, target selectedSocketTarget, ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed || e.ctx.Err() != nil {
@@ -572,6 +742,9 @@ func (e *SocketEgress) installFlow(flowID uint64, flow *socketFlow, conn net.Con
 		return ErrSocketEgressClosed
 	}
 	flow.conn = conn
+	if target.resolved {
+		flow.expiresAt = time.Now().Add(time.Duration(e.limits.ResolvedTTLSeconds) * time.Second)
+	}
 	return nil
 }
 

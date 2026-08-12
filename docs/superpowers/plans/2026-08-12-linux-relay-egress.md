@@ -120,15 +120,15 @@ Run focused tests 100 times and race tests 20 times, including a goroutine-count
 
 **Files:** Modify `relay/socket_egress.go`; modify `relay/socket_egress_test.go`.
 
-- [ ] **Step 1: Write failing loopback UDP tests**
+- [x] **Step 1: Write failing loopback UDP tests**
 
 Cover connected IP targets, datagram request/response, stream-fallback request data, response demultiplexing, authoritative-IP confirmation, relay-resolved confirmation, DNS answer hash, selected resolution source, datagram maximum, idle expiry, TTL expiry, address immutability, policy denial after resolution, duplicate close, and cancellation.
 
-- [ ] **Step 2: Implement connected UDP associations**
+- [x] **Step 2: Implement connected UDP associations**
 
 Dial `udp4` or `udp6` to the selected literal address. Accept only `DATAGRAM_DATA` and the defined encrypted stream fallback for UDP flows. Return `UDP_TARGET_CONFIRM` only after the connected socket exists; relay-resolved flows include the selected address, bounded TTL, canonical answer-set hash, and relay resolution source. One read pump emits backward datagram frames and closes idle or expired associations with an encrypted close frame.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 Run focused tests 100 times, race tests 20 times, and cross-compile relay tests for Linux, Windows, macOS, and Android. Commit `feat: relay udp proxy associations`.
 

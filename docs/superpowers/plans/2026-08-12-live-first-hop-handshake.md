@@ -672,7 +672,7 @@ GOCACHE=/private/tmp/aurora-first-hop-cache go test -race ./transport -run 'Test
 
 Expected: all live transport and cancellation tests pass without leak or race evidence.
 
-- [ ] **Step 7: Commit the client carrier**
+- [x] **Step 7: Commit the client carrier**
 
 ```bash
 git add transport/http2_client.go transport/http2_client_test.go transport/carrier.go

@@ -76,6 +76,14 @@ type RekeyPolicy struct {
 	MaxPackets uint64
 }
 
+// Stats reports current and lifetime peak outbound queue usage.
+type Stats struct {
+	QueuedPackets     int
+	QueuedBytes       int
+	PeakQueuedPackets int
+	PeakQueuedBytes   int
+}
+
 type Application struct {
 	mu            sync.Mutex
 	readMu        sync.Mutex
@@ -102,6 +110,8 @@ type Application struct {
 	reservedPackets    int
 	reservedBytes      int
 	pendingWriteUpdate bool
+	peakQueuedPackets  int
+	peakQueuedBytes    int
 
 	changed  chan struct{}
 	closed   chan struct{}
@@ -212,10 +222,16 @@ func (a *Application) NextPacket(ctx context.Context) ([]byte, error) {
 				a.activateWriteStateLocked()
 				a.pendingWriteUpdate = false
 			}
-			encoded := append([]byte(nil), queued.encoded...)
-			a.queuedBytes -= len(queued.encoded)
+			encodedBytes := len(queued.encoded)
+			encoded := queued.encoded
+			queued.encoded = nil
+			a.queuedBytes -= encodedBytes
 			queued.Destroy()
-			a.queue = a.queue[1:]
+			if len(a.queue) == 1 {
+				a.queue = a.queue[:0]
+			} else {
+				a.queue = a.queue[1:]
+			}
 			a.signalLocked()
 			a.mu.Unlock()
 			return encoded, nil
@@ -255,7 +271,7 @@ func (a *Application) HandlePacket(ctx context.Context, now time.Time, encoded [
 	}
 	a.readMu.Lock()
 	defer a.readMu.Unlock()
-	pkt, err := packet.DecodeAuroraPacket(encoded)
+	pkt, err := packet.DecodeAuroraPacketView(encoded)
 	if err != nil {
 		return nil, err
 	}
@@ -268,28 +284,23 @@ func (a *Application) HandlePacket(ctx context.Context, now time.Time, encoded [
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	candidate := a.readState.Clone()
-	preparedOpen, err := a.receiver.PrepareOpenWithDirectionState(pkt, &candidate, a.suite, now)
+	preparedOpen, err := a.receiver.PrepareOpenWithDirectionState(pkt, &a.readState, a.suite, now)
 	if err != nil {
-		candidate.Destroy()
 		return nil, err
 	}
 	defer preparedOpen.Destroy()
 	block := preparedOpen.TakeBlock()
-	defer zeroFrameBlock(block)
-	blocks, err := a.handleKeyControlsLocked(now, pkt.KeyPhase, block, &candidate, func() error {
+	defer func() { zeroFrameBlock(block) }()
+	blocks, err := a.handleKeyControlsLocked(now, pkt.KeyPhase, &block, func() error {
 		return a.receiver.CommitPreparedOpen(&preparedOpen)
 	})
 	if err != nil {
-		candidate.Destroy()
 		if isRetryableControlError(err) {
 			return nil, err
 		}
 		return nil, a.failLocked(err)
 	}
-	previous := a.readState
-	a.readState = candidate
-	previous.Destroy()
+	a.readState.ExpireDrainAt(now)
 	return blocks, nil
 }
 
@@ -301,6 +312,18 @@ func (a *Application) Close() error {
 	}
 	a.terminateLocked(ErrClosed)
 	return nil
+}
+
+// Stats returns an atomic snapshot. Peak values remain available after Close.
+func (a *Application) Stats() Stats {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return Stats{
+		QueuedPackets:     len(a.queue),
+		QueuedBytes:       a.queuedBytes,
+		PeakQueuedPackets: a.peakQueuedPackets,
+		PeakQueuedBytes:   a.peakQueuedBytes,
+	}
 }
 
 func (a *Application) terminateLocked(err error) {
@@ -379,9 +402,7 @@ func (a *Application) queueBlock(ctx context.Context, block protocol.FrameBlock,
 	}
 	defer a.releaseReservationLocked(reservation)
 
-	ownedBlock := cloneFrameBlock(block)
-	defer zeroFrameBlock(ownedBlock)
-	encoded, phase, nextPacket, sealedNext, err := a.sealCurrentWriteBlockLocked(ownedBlock)
+	encoded, phase, nextPacket, sealedNext, err := a.sealCurrentWriteBlockLocked(block)
 	if err != nil {
 		return err
 	}
@@ -413,6 +434,7 @@ func (a *Application) enqueueEncodedLocked(encoded *[]byte, control bool) error 
 	a.queue = append(a.queue, queuedPacket{encoded: *encoded})
 	a.queuedBytes += len(*encoded)
 	*encoded = nil
+	a.recordQueuePeakLocked()
 	return nil
 }
 
@@ -432,6 +454,7 @@ func (a *Application) enqueueControlBeforeWriteUpdateLocked(encoded *[]byte) err
 	a.queue[index] = queuedPacket{encoded: *encoded}
 	a.queuedBytes += len(*encoded)
 	*encoded = nil
+	a.recordQueuePeakLocked()
 	return nil
 }
 
@@ -478,6 +501,15 @@ func (a *Application) hasCapacityLocked(bytes int, control bool) bool {
 
 func (a *Application) queuedPacketsLocked() int {
 	return len(a.queue)
+}
+
+func (a *Application) recordQueuePeakLocked() {
+	if len(a.queue) > a.peakQueuedPackets {
+		a.peakQueuedPackets = len(a.queue)
+	}
+	if a.queuedBytes > a.peakQueuedBytes {
+		a.peakQueuedBytes = a.queuedBytes
+	}
 }
 
 func (a *Application) signalLocked() {
@@ -661,19 +693,6 @@ func checkedLengthAdd(current, additional int) (int, error) {
 		return 0, fmt.Errorf("session: encoded packet length overflow")
 	}
 	return current + additional, nil
-}
-
-func cloneFrameBlock(block protocol.FrameBlock) protocol.FrameBlock {
-	cloned := protocol.FrameBlock{Frames: make([]protocol.AuroraFrame, len(block.Frames))}
-	for i, frame := range block.Frames {
-		cloned.Frames[i] = protocol.AuroraFrame{
-			FrameType: frame.FrameType,
-			FlowID:    frame.FlowID,
-			Flags:     frame.Flags,
-			Payload:   append([]byte(nil), frame.Payload...),
-		}
-	}
-	return cloned
 }
 
 func zeroBytes(b []byte) {

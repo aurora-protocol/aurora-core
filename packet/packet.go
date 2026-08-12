@@ -29,6 +29,15 @@ func (p AuroraPacket) EncodeTo(e *wire.Encoder) {
 }
 
 func DecodeAuroraPacket(encoded []byte) (AuroraPacket, error) {
+	return decodeAuroraPacket(encoded, false)
+}
+
+// DecodeAuroraPacketView returns ciphertext and tag slices borrowed from encoded.
+func DecodeAuroraPacketView(encoded []byte) (AuroraPacket, error) {
+	return decodeAuroraPacket(encoded, true)
+}
+
+func decodeAuroraPacket(encoded []byte, borrowPayload bool) (AuroraPacket, error) {
 	r := wire.NewReader(encoded)
 	p := AuroraPacket{
 		RouteInstanceID: r.ReadVarint(),
@@ -36,8 +45,13 @@ func DecodeAuroraPacket(encoded []byte) (AuroraPacket, error) {
 		Direction:       r.ReadUint8(),
 		KeyPhase:        r.ReadUint8(),
 		PacketNumber:    r.ReadVarint(),
-		Ciphertext:      r.ReadOpaque24(),
-		AuthTag:         r.ReadOpaqueFixed(16),
+	}
+	if borrowPayload {
+		p.Ciphertext = r.ReadOpaque24View()
+		p.AuthTag = r.ReadOpaqueFixedView(16)
+	} else {
+		p.Ciphertext = r.ReadOpaque24()
+		p.AuthTag = r.ReadOpaqueFixed(16)
 	}
 	if r.Err() != nil {
 		return AuroraPacket{}, r.Err()

@@ -1807,6 +1807,81 @@ func TestDirectionStateKeepsOldReadMaterialOnlyUntilDrainExpiry(t *testing.T) {
 	}
 }
 
+func TestDirectionStateExpireDrainAtDestroysPriorPhaseMaterial(t *testing.T) {
+	state := DirectionState{
+		RouteInstanceID: 0x46,
+		HopLayer:        1,
+		Direction:       0,
+		Material: KeyMaterial{
+			AppSecret: bytesOf(0x91, 48),
+			Key:       bytesOf(0x92, 32),
+			IV:        bytesOf(0x93, 12),
+		},
+	}
+	now := time.Now()
+	prepared, err := state.PrepareUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xa6, 16), true, 1, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Destroy()
+	if err := state.CommitPreparedUpdate(prepared, now); err != nil {
+		t.Fatal(err)
+	}
+	prior := state.previousMaterial
+	state.ExpireDrainAt(now.Add(MaxDrainWindow + time.Nanosecond))
+	if !state.DrainUntil.IsZero() || state.pendingSentUpdateActive || len(state.previousMaterial.AppSecret) != 0 {
+		t.Fatalf("expired drain retained prior-phase state")
+	}
+	requireZeroedByteSlices(t, prior.AppSecret, prior.Key, prior.IV)
+}
+
+func TestReceiverOpenWithDirectionStateCommitsExpiredDrainCleanup(t *testing.T) {
+	state := DirectionState{
+		RouteInstanceID: 0x47,
+		HopLayer:        1,
+		Direction:       0,
+		Material: KeyMaterial{
+			AppSecret: bytesOf(0xb1, 48),
+			Key:       bytesOf(0xb2, 32),
+			IV:        bytesOf(0xb3, 12),
+		},
+	}
+	now := time.Now()
+	prepared, err := state.PrepareUpdate(registry.SuiteHybrid768AESGCM, bytesOf(0xb4, 16), false, 1, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Destroy()
+	if err := state.CommitPreparedUpdate(prepared, now); err != nil {
+		t.Fatal(err)
+	}
+	prior := state.previousMaterial
+	protector := Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: state.RouteInstanceID,
+		HopLayer:        state.HopLayer,
+		Direction:       state.Direction,
+		KeyPhase:        state.KeyPhase,
+		Key:             append([]byte(nil), state.Material.Key...),
+		StaticIV:        append([]byte(nil), state.Material.IV...),
+	}
+	pkt, err := protector.Seal(protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.DrainUntil = now.Add(-time.Nanosecond)
+	receiver := NewReceiver(ReceiverConfig{WindowSize: 64})
+	block, err := receiver.OpenWithDirectionState(pkt, &state, registry.SuiteHybrid768AESGCM, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destroyFrameBlock(&block)
+	if !state.DrainUntil.IsZero() || len(state.previousMaterial.AppSecret) != 0 {
+		t.Fatalf("successful open retained expired drain state")
+	}
+	requireZeroedByteSlices(t, prior.AppSecret, prior.Key, prior.IV)
+}
+
 func TestDirectionStateBoundsLostKeyUpdateACKRetransmission(t *testing.T) {
 	original := KeyMaterial{
 		AppSecret: bytesOf(0x81, 48),
@@ -1934,6 +2009,42 @@ func TestAuroraPacketEncodeDecode(t *testing.T) {
 	}
 	if !bytes.Equal(got.Ciphertext, pkt.Ciphertext) || got.KeyPhase != pkt.KeyPhase || got.PacketNumber != pkt.PacketNumber {
 		t.Fatalf("decoded packet mismatch: %+v", got)
+	}
+}
+
+func TestDecodeAuroraPacketViewBorrowsPayloadWhileOwnedDecoderCopies(t *testing.T) {
+	pkt := AuroraPacket{
+		RouteInstanceID: 9,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        2,
+		PacketNumber:    3,
+		Ciphertext:      []byte{1, 2, 3},
+		AuthTag:         bytesOf(0xef, 16),
+	}
+	encoded, err := protocol.Encode(pkt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned, err := DecodeAuroraPacket(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := DecodeAuroraPacketView(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.Ciphertext[0] ^= 0xff
+	view.AuthTag[0] ^= 0xff
+	if owned.Ciphertext[0] != pkt.Ciphertext[0] || owned.AuthTag[0] != pkt.AuthTag[0] {
+		t.Fatalf("owned decoder retained encoded input")
+	}
+	redecoded, err := DecodeAuroraPacketView(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if redecoded.Ciphertext[0] != view.Ciphertext[0] || redecoded.AuthTag[0] != view.AuthTag[0] {
+		t.Fatalf("view decoder did not alias encoded input")
 	}
 }
 

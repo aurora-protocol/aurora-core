@@ -109,6 +109,7 @@ func (r *Receiver) OpenWithDirectionState(pkt AuroraPacket, state *DirectionStat
 		destroyFrameBlock(&block)
 		return protocol.FrameBlock{}, err
 	}
+	state.ExpireDrainAt(now)
 	return block, nil
 }
 
@@ -116,15 +117,16 @@ func (r *Receiver) PrepareOpen(pkt AuroraPacket) (PreparedOpen, error) {
 	return r.prepareOpenWithProtector(pkt, r.protector)
 }
 
+// PrepareOpenWithDirectionState authenticates synchronously without retaining
+// or mutating state material. The caller must keep state unchanged until return.
 func (r *Receiver) PrepareOpenWithDirectionState(pkt AuroraPacket, state *DirectionState, suite uint64, now time.Time) (PreparedOpen, error) {
 	if state == nil {
 		return PreparedOpen{}, fmt.Errorf("packet: missing direction state")
 	}
-	material, err := state.MaterialForPacket(pkt, now)
+	material, err := state.materialForPacketView(pkt, now)
 	if err != nil {
 		return PreparedOpen{}, err
 	}
-	defer material.Destroy()
 	return r.prepareOpenWithProtector(pkt, Protector{
 		Suite:           suite,
 		RouteInstanceID: state.RouteInstanceID,

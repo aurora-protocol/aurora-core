@@ -119,6 +119,11 @@ func (r *Reader) ReadOpaqueFixed(n int) []byte {
 	return out
 }
 
+// ReadOpaqueFixedView returns a borrowed slice valid while the input remains unchanged.
+func (r *Reader) ReadOpaqueFixedView(n int) []byte {
+	return r.take(n)
+}
+
 func (r *Reader) ReadOpaque8() []byte {
 	n := int(r.ReadUint8())
 	return r.ReadOpaqueFixed(n)
@@ -132,6 +137,12 @@ func (r *Reader) ReadOpaque16() []byte {
 func (r *Reader) ReadOpaque24() []byte {
 	n := int(r.ReadUint24())
 	return r.ReadOpaqueFixed(n)
+}
+
+// ReadOpaque24View returns a borrowed slice valid while the input remains unchanged.
+func (r *Reader) ReadOpaque24View() []byte {
+	n := int(r.ReadUint24())
+	return r.ReadOpaqueFixedView(n)
 }
 
 func (r *Reader) ReadPreHash() []byte {

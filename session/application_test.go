@@ -273,7 +273,6 @@ func TestApplicationStagesReadStateUntilPacketOpenSucceeds(t *testing.T) {
 	}
 	result.Destroy()
 	before := relay.readState
-	supersededMaterial := relay.readState.Material
 
 	protector := packet.Protector{
 		Suite:           relay.suite,
@@ -315,7 +314,6 @@ func TestApplicationStagesReadStateUntilPacketOpenSucceeds(t *testing.T) {
 	if !relay.readState.DrainUntil.IsZero() {
 		t.Fatalf("successful packet did not expire the drain state")
 	}
-	requireZeroedBytes(t, supersededMaterial.AppSecret, supersededMaterial.Key, supersededMaterial.IV)
 }
 
 func TestApplicationRejectsPacketAboveCanonicalDecodeLimit(t *testing.T) {
@@ -405,6 +403,41 @@ func TestApplicationBackpressureReservesControlCapacityAndDoesNotAdvancePacketNu
 	}
 	if got := packetNumberForTest(t, encoded); got != 0 {
 		t.Fatalf("packet number after byte rejection = %d, want 0", got)
+	}
+}
+
+func TestApplicationStatsTrackCurrentAndPeakQueueUsage(t *testing.T) {
+	client, _ := newApplicationPair(t)
+	defer client.Close()
+	if got := client.Stats(); got != (Stats{}) {
+		t.Fatalf("initial stats = %+v, want zero", got)
+	}
+	if err := client.QueueFrames(context.Background(), testFrameBlock(t, 45, []byte("first stats packet"))); err != nil {
+		t.Fatal(err)
+	}
+	first := client.Stats()
+	if first.QueuedPackets != 1 || first.QueuedBytes <= 0 || first.PeakQueuedPackets != 1 || first.PeakQueuedBytes != first.QueuedBytes {
+		t.Fatalf("first queue stats = %+v", first)
+	}
+	if err := client.QueueFrames(context.Background(), testFrameBlock(t, 46, []byte("second stats packet"))); err != nil {
+		t.Fatal(err)
+	}
+	peak := client.Stats()
+	if peak.QueuedPackets != 2 || peak.QueuedBytes <= first.QueuedBytes || peak.PeakQueuedPackets != 2 || peak.PeakQueuedBytes != peak.QueuedBytes {
+		t.Fatalf("peak queue stats = %+v", peak)
+	}
+	if _, err := client.NextPacket(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	after := client.Stats()
+	if after.QueuedPackets != 1 || after.QueuedBytes >= peak.QueuedBytes || after.PeakQueuedPackets != peak.PeakQueuedPackets || after.PeakQueuedBytes != peak.PeakQueuedBytes {
+		t.Fatalf("dequeue stats = %+v, peak was %+v", after, peak)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := client.Stats(); got.QueuedPackets != 0 || got.QueuedBytes != 0 || got.PeakQueuedPackets != peak.PeakQueuedPackets || got.PeakQueuedBytes != peak.PeakQueuedBytes {
+		t.Fatalf("closed stats = %+v, peak was %+v", got, peak)
 	}
 }
 

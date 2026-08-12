@@ -163,6 +163,7 @@ func (a *Application) enqueueWriteUpdateLocked(encoded *[]byte, prepared *packet
 	})
 	a.queuedBytes += len(*encoded)
 	*encoded = nil
+	a.recordQueuePeakLocked()
 	return nil
 }
 
@@ -196,7 +197,7 @@ func (c *keyControls) Destroy() {
 	*c = keyControls{}
 }
 
-func (a *Application) handleKeyControlsLocked(now time.Time, packetKeyPhase uint8, block protocol.FrameBlock, readCandidate *packet.DirectionState, commitReplay func() error) ([]protocol.FrameBlock, error) {
+func (a *Application) handleKeyControlsLocked(now time.Time, packetKeyPhase uint8, block *protocol.FrameBlock, commitReplay func() error) ([]protocol.FrameBlock, error) {
 	controls, err := scanKeyControls(block)
 	if err != nil {
 		return nil, err
@@ -205,7 +206,7 @@ func (a *Application) handleKeyControlsLocked(now time.Time, packetKeyPhase uint
 	if controls.update != nil && controls.update.OldKeyPhase != packetKeyPhase {
 		return nil, fmt.Errorf("session: key update old phase does not match packet phase")
 	}
-	if controls.ack != nil && packetKeyPhase != readCandidate.KeyPhase {
+	if controls.ack != nil && packetKeyPhase != a.readState.KeyPhase {
 		return nil, fmt.Errorf("session: key update acknowledgement is not under the current read phase")
 	}
 
@@ -273,7 +274,16 @@ func (a *Application) handleKeyControlsLocked(now time.Time, packetKeyPhase uint
 
 	var updateResult packet.KeyUpdateResult
 	haveUpdateResult := false
+	var readCandidate packet.DirectionState
+	haveReadCandidate := false
 	if controls.update != nil {
+		readCandidate = a.readState.Clone()
+		haveReadCandidate = true
+		defer func() {
+			if haveReadCandidate {
+				readCandidate.Destroy()
+			}
+		}()
 		updateResult, err = readCandidate.ApplyReceivedUpdateAt(a.suite, *controls.update, ackNonce, now)
 		if err != nil {
 			return nil, fmt.Errorf("session: apply received key update: %w", err)
@@ -334,6 +344,12 @@ func (a *Application) handleKeyControlsLocked(now time.Time, packetKeyPhase uint
 		haveWriteCandidate = false
 		previous.Destroy()
 	}
+	if haveReadCandidate {
+		previous := a.readState
+		a.readState = readCandidate
+		haveReadCandidate = false
+		previous.Destroy()
+	}
 	if len(controls.frames) == 0 {
 		return nil, nil
 	}
@@ -342,9 +358,13 @@ func (a *Application) handleKeyControlsLocked(now time.Time, packetKeyPhase uint
 	return []protocol.FrameBlock{{Frames: frames}}, nil
 }
 
-func scanKeyControls(block protocol.FrameBlock) (keyControls, error) {
-	controls := keyControls{frames: make([]protocol.AuroraFrame, 0, len(block.Frames))}
-	for _, frame := range block.Frames {
+func scanKeyControls(block *protocol.FrameBlock) (keyControls, error) {
+	if block == nil {
+		return keyControls{}, fmt.Errorf("session: missing frame block")
+	}
+	frames := block.Frames
+	controls := keyControls{frames: frames[:0]}
+	for _, frame := range frames {
 		switch frame.FrameType {
 		case registry.FrameKeyUpdate:
 			if controls.update != nil {
@@ -357,6 +377,7 @@ func scanKeyControls(block protocol.FrameBlock) (keyControls, error) {
 				return keyControls{}, err
 			}
 			controls.update = &update
+			zeroBytes(frame.Payload)
 		case registry.FrameKeyUpdateAck:
 			if controls.ack != nil {
 				controls.Destroy()
@@ -368,12 +389,18 @@ func scanKeyControls(block protocol.FrameBlock) (keyControls, error) {
 				return keyControls{}, err
 			}
 			controls.ack = &ack
+			zeroBytes(frame.Payload)
 		case registry.FrameKeyUpdateRequest:
 			// Update requests are optional and are consumed after protocol validation.
+			zeroBytes(frame.Payload)
 		default:
-			controls.frames = append(controls.frames, cloneFrame(frame))
+			controls.frames = append(controls.frames, frame)
 		}
 	}
+	for i := len(controls.frames); i < len(frames); i++ {
+		frames[i] = protocol.AuroraFrame{}
+	}
+	block.Frames = nil
 	return controls, nil
 }
 
@@ -500,15 +527,6 @@ func (a *Application) readNonce() ([]byte, error) {
 		return nil, err
 	}
 	return nonce, nil
-}
-
-func cloneFrame(frame protocol.AuroraFrame) protocol.AuroraFrame {
-	return protocol.AuroraFrame{
-		FrameType: frame.FrameType,
-		FlowID:    frame.FlowID,
-		Flags:     frame.Flags,
-		Payload:   append([]byte(nil), frame.Payload...),
-	}
 }
 
 func zeroFrameBlock(block protocol.FrameBlock) {

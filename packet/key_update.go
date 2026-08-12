@@ -270,6 +270,14 @@ func (s *DirectionState) CommitPreparedUpdate(prepared PreparedKeyUpdate, now ti
 // MaterialForPacket returns material owned by the caller.
 func (s *DirectionState) MaterialForPacket(pkt AuroraPacket, now time.Time) (KeyMaterial, error) {
 	s.expireDrain(now)
+	material, err := s.materialForPacketView(pkt, now)
+	if err != nil {
+		return KeyMaterial{}, err
+	}
+	return cloneKeyMaterial(material), nil
+}
+
+func (s *DirectionState) materialForPacketView(pkt AuroraPacket, now time.Time) (KeyMaterial, error) {
 	if pkt.RouteInstanceID != s.RouteInstanceID {
 		return KeyMaterial{}, fmt.Errorf("packet: packet route instance mismatch")
 	}
@@ -280,12 +288,17 @@ func (s *DirectionState) MaterialForPacket(pkt AuroraPacket, now time.Time) (Key
 		return KeyMaterial{}, fmt.Errorf("packet: packet direction mismatch")
 	}
 	if pkt.KeyPhase == s.KeyPhase {
-		return cloneKeyMaterial(s.Material), nil
+		return s.Material, nil
 	}
 	if pkt.KeyPhase == s.previousKeyPhase && !s.DrainUntil.IsZero() && !now.After(s.DrainUntil) {
-		return cloneKeyMaterial(s.previousMaterial), nil
+		return s.previousMaterial, nil
 	}
 	return KeyMaterial{}, fmt.Errorf("packet: key phase %d is not active", pkt.KeyPhase)
+}
+
+// ExpireDrainAt erases prior-phase state when its bounded drain has elapsed.
+func (s *DirectionState) ExpireDrainAt(now time.Time) {
+	s.expireDrain(now)
 }
 
 // PendingKeyUpdateRetransmission returns material owned by the caller when ok is true.

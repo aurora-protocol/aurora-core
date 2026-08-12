@@ -781,7 +781,13 @@ func TestScanKeyControlsAcceptsMixedControlsInEitherOrder(t *testing.T) {
 		"ack then update": {ackFrame, updateFrame},
 	} {
 		t.Run(name, func(t *testing.T) {
-			controls, err := scanKeyControls(protocol.FrameBlock{Frames: frames})
+			ownedFrames := make([]protocol.AuroraFrame, len(frames))
+			for i, frame := range frames {
+				ownedFrames[i] = frame
+				ownedFrames[i].Payload = append([]byte(nil), frame.Payload...)
+			}
+			block := protocol.FrameBlock{Frames: ownedFrames}
+			controls, err := scanKeyControls(&block)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -868,7 +874,8 @@ func TestScanKeyControlsRejectsDuplicateStateChangingControls(t *testing.T) {
 		"acknowledgements": keyUpdateACKBlock(t, ack).Frames[0],
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := scanKeyControls(protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame, frame}}); err == nil {
+			block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame, frame}}
+			if _, err := scanKeyControls(&block); err == nil {
 				t.Fatalf("duplicate %s succeeded", name)
 			}
 		})

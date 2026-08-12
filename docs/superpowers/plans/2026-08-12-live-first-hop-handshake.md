@@ -189,19 +189,19 @@ git commit -m "feat: add randomized suite hybrid helpers"
 - Consumes: existing `CoverStreamBinding` and `FirstHopBindingContext`.
 - Produces: `HTTP2BindingMetadata`, `FirstHopBinding`, and `DeriveHTTP2FirstHopBinding(tls.ConnectionState, HTTP2BindingMetadata, []byte) (FirstHopBinding, error)`.
 
-- [ ] **Step 1: Write failing live-binding tests**
+- [x] **Step 1: Write failing live-binding tests**
 
 Use a real TLS 1.3 client/server connection over `net.Pipe`, negotiate `h2`, and derive the binding independently from both `ConnectionState` values. Assert byte-identical outer exporter, channel exporter, connection hash, cover-stream binding, and handshake context. Assert stream ID is `1`, HTTP version is `h2`, all returned slices are owned, and changing class, method, authority hash, path-template ID, or client cover random changes the stream binding.
 
 Add rejection cases for TLS below 1.3, non-`h2` ALPN, `DidResume`, non-48-byte authority hash, non-16-byte path-template ID, non-32-byte cover random, zero class/method, and exporter failure.
 
-- [ ] **Step 2: Run the focused tests and verify red**
+- [x] **Step 2: Run the focused tests and verify red**
 
 Run: `GOCACHE=/private/tmp/aurora-first-hop-cache go test ./handshake -run 'TestDeriveHTTP2FirstHopBinding' -count=1`
 
 Expected: FAIL because the binding metadata and live derivation do not exist.
 
-- [ ] **Step 3: Implement exporter-derived binding facts**
+- [x] **Step 3: Implement exporter-derived binding facts**
 
 Use this public shape:
 
@@ -224,7 +224,7 @@ type FirstHopBinding struct {
 
 Call `ConnectionState.ExportKeyingMaterial` with the protocol-defined outer and channel labels, empty context, and 48-byte output. Compute `connection_id_hash` from the `h2` label, channel exporter, and 48 zero resumption bytes. Feed HTTP version `h2`, stream ID `1`, configured metadata, and the client random into `CoverStreamBinding`, then derive `FirstHopBindingContext`. Validate every input before exporter calls and clone all outputs.
 
-- [ ] **Step 4: Run handshake binding verification**
+- [x] **Step 4: Run handshake binding verification**
 
 Run:
 
@@ -236,7 +236,7 @@ GOCACHE=/private/tmp/aurora-first-hop-cache go test -race ./handshake -count=1
 
 Expected: client/server live bindings agree and all existing handshake vectors remain green.
 
-- [ ] **Step 5: Commit live binding derivation**
+- [x] **Step 5: Commit live binding derivation**
 
 ```bash
 git add handshake/binding.go handshake/binding_test.go

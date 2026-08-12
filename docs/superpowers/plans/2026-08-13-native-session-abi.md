@@ -127,6 +127,8 @@ git commit -m "feat: resume client handshake after issuance"
 - Consumes: canonical `RelayDescriptor`, `CoverTemplate`, `PublicKeyRecord`, `AccessHintCredential`, and `trust.VerifyRelayDeployment`.
 - Produces: `client.NativeProvisioning` with `ParseNativeProvisioning([]byte, time.Time) (NativeProvisioning, error)` and `VerifiedDeployment() (trust.VerifiedRelayDeployment, error)`.
 
+The bundle also carries the canonical relay request/response headers, expected response status, and bounded DER trust roots required to construct the pinned HTTP/2 first-hop carrier.
+
 - [x] **Step 1: Write malformed, oversized, stale, and signature-mismatch bundle tests**
 
 ```go
@@ -160,6 +162,10 @@ type NativeProvisioning struct {
     AccessHint []byte
     PolicyOffer []byte
     TransportHints []byte
+    RelayExpectedStatus uint64
+    RelayRequestHeaders []byte
+    RelayResponseHeaders []byte
+    RelayTrustRoots []byte
 }
 ```
 
@@ -170,6 +176,7 @@ Use `wire.Encoder` and length-bounded opaque fields. Decode all protocol objects
 ```go
 func (p NativeProvisioning) VerifiedDeployment(now time.Time) (trust.VerifiedRelayDeployment, error)
 func (p NativeProvisioning) ClientDriverConfig(now time.Time, provider handshake.ClientProofProvider) (handshake.ClientDriverConfig, error)
+func (p NativeProvisioning) NewHTTP2ClientCarrierOpener(now time.Time) (handshake.ClientCarrierOpener, error)
 ```
 
 - [x] **Step 5: Run package tests and fuzz parsing**

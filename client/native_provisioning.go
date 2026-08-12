@@ -1,29 +1,44 @@
 package client
 
 import (
+	"bytes"
+	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"net/http"
+	"net/textproto"
 	"net/url"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/admission"
+	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/handshake"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/session"
+	"github.com/aurora-protocol/aurora-core/transport"
 	"github.com/aurora-protocol/aurora-core/trust"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
 const (
-	nativeProvisioningFormat             uint64 = 1
-	maximumNativeProvisioningBytes              = 1 << 20
-	maximumNativeProvisioningURLBytes           = 2048
-	maximumNativeProvisioningObjectBytes        = 256 << 10
-	maximumNativeProvisioningPolicyBytes        = 32 << 10
-	maximumNativeProvisioningHintsBytes         = 32 << 10
-	nativeTemplateFutureSkew                    = 5 * time.Minute
+	nativeProvisioningFormat                  uint64 = 2
+	maximumNativeProvisioningBytes                   = 1 << 20
+	maximumNativeProvisioningURLBytes                = 2048
+	maximumNativeProvisioningObjectBytes             = 256 << 10
+	maximumNativeProvisioningPolicyBytes             = 32 << 10
+	maximumNativeProvisioningHintsBytes              = 32 << 10
+	maximumNativeProvisioningHeaderBytes             = 64 << 10
+	maximumNativeProvisioningTrustRootBytes          = 64 << 10
+	maximumNativeProvisioningTrustRoots              = 16
+	maximumNativeProvisioningHeaderEntries           = 64
+	maximumNativeProvisioningHeaderNameBytes         = 64
+	maximumNativeProvisioningHeaderValueBytes        = 4096
+	nativeTemplateFutureSkew                         = 5 * time.Minute
 )
 
 // NativeProvisioning is the bounded canonical input for a portable native client session.
@@ -40,6 +55,10 @@ type NativeProvisioning struct {
 	AccessHint            []byte
 	PolicyOffer           []byte
 	TransportHints        []byte
+	RelayExpectedStatus   uint64
+	RelayRequestHeaders   []byte
+	RelayResponseHeaders  []byte
+	RelayTrustRoots       []byte
 }
 
 type nativeProvisioningObjects struct {
@@ -49,6 +68,9 @@ type nativeProvisioningObjects struct {
 	accessHint           admission.AccessHintCredential
 	policyOffer          protocol.PolicyOffer
 	transportHints       protocol.ClientTransportHints
+	relayRequestHeaders  http.Header
+	relayResponseHeaders http.Header
+	relayTrustRoots      []*x509.Certificate
 }
 
 // EncodeNativeProvisioning encodes bounded native provisioning fields for transport or storage.
@@ -70,6 +92,10 @@ func EncodeNativeProvisioning(provisioning NativeProvisioning) ([]byte, error) {
 	encoder.WriteOpaque16(provisioning.AccessHint)
 	encoder.WriteOpaque24(provisioning.PolicyOffer)
 	encoder.WriteOpaque24(provisioning.TransportHints)
+	encoder.WriteVarint(provisioning.RelayExpectedStatus)
+	encoder.WriteOpaque16(provisioning.RelayRequestHeaders)
+	encoder.WriteOpaque16(provisioning.RelayResponseHeaders)
+	encoder.WriteOpaque24(provisioning.RelayTrustRoots)
 	encoded, err := encoder.Bytes()
 	if err != nil {
 		return nil, fmt.Errorf("client: encode native provisioning: %w", err)
@@ -102,6 +128,10 @@ func ParseNativeProvisioning(encoded []byte, now time.Time) (NativeProvisioning,
 		AccessHint:            readNativeProvisioningOpaque16(reader, maximumNativeProvisioningObjectBytes),
 		PolicyOffer:           readNativeProvisioningOpaque24(reader, maximumNativeProvisioningPolicyBytes),
 		TransportHints:        readNativeProvisioningOpaque24(reader, maximumNativeProvisioningHintsBytes),
+		RelayExpectedStatus:   reader.ReadVarint(),
+		RelayRequestHeaders:   readNativeProvisioningOpaque16(reader, maximumNativeProvisioningHeaderBytes),
+		RelayResponseHeaders:  readNativeProvisioningOpaque16(reader, maximumNativeProvisioningHeaderBytes),
+		RelayTrustRoots:       readNativeProvisioningOpaque24(reader, maximumNativeProvisioningTrustRootBytes*maximumNativeProvisioningTrustRoots),
 	}
 	if reader.Err() != nil || !reader.EOF() {
 		return NativeProvisioning{}, fmt.Errorf("client: malformed native provisioning")
@@ -144,6 +174,51 @@ func (p NativeProvisioning) ClientDriverConfig(now time.Time, provider handshake
 		return handshake.ClientDriverConfig{}, fmt.Errorf("client: native provisioning client configuration: %w", err)
 	}
 	return config, nil
+}
+
+// NewHTTP2ClientCarrierOpener creates the pinned first-hop carrier authenticated by this bundle.
+func (p NativeProvisioning) NewHTTP2ClientCarrierOpener(now time.Time) (handshake.ClientCarrierOpener, error) {
+	objects, deployment, err := p.validatedObjectsAndDeployment(now)
+	if err != nil {
+		return nil, err
+	}
+	relayURL, err := url.Parse(p.RelayURL)
+	if err != nil {
+		return nil, fmt.Errorf("client: parse native relay URL: %w", err)
+	}
+	template := deployment.Template()
+	requestClass := deployment.RequestClass()
+	tlsConfig, err := nativeProvisioningTLSConfig(objects.relayTrustRoots, template.OriginSPKIHash)
+	if err != nil {
+		return nil, err
+	}
+	built, err := transport.BuildStreamingH2CarrierRequest(transport.CarrierRequestInput{
+		Plan: transport.CarrierPlan{
+			Carrier: transport.Carrier{MethodID: registry.MethodWebH2Stream},
+			UDPMode: transport.UDPOverStreamFallback,
+		},
+		Template:       template,
+		RequestClassID: p.RequestClassID,
+		Scheme:         relayURL.Scheme,
+		Authority:      relayURL.Host,
+		Path:           relayURL.Path,
+		Header:         objects.relayRequestHeaders,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("client: build native HTTP/2 carrier request: %w", err)
+	}
+	opener, err := transport.NewHTTP2ClientCarrierOpener(transport.HTTP2ClientCarrierConfig{
+		Request:            built.Request,
+		TLSConfig:          tlsConfig,
+		BindingMetadata:    nativeHTTP2BindingMetadata(template, requestClass),
+		ExpectedStatus:     int(p.RelayExpectedStatus),
+		ExpectedHeader:     objects.relayResponseHeaders,
+		MaxRecordBodyBytes: transport.DefaultMaxRecordBodyBytes,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("client: create native HTTP/2 carrier opener: %w", err)
+	}
+	return opener, nil
 }
 
 func (p NativeProvisioning) validateAt(now time.Time) error {
@@ -212,6 +287,9 @@ func (p NativeProvisioning) validateContainer() error {
 		{"access hint", p.AccessHint, maximumNativeProvisioningObjectBytes},
 		{"policy offer", p.PolicyOffer, maximumNativeProvisioningPolicyBytes},
 		{"transport hints", p.TransportHints, maximumNativeProvisioningHintsBytes},
+		{"relay request headers", p.RelayRequestHeaders, maximumNativeProvisioningHeaderBytes},
+		{"relay response headers", p.RelayResponseHeaders, maximumNativeProvisioningHeaderBytes},
+		{"relay trust roots", p.RelayTrustRoots, maximumNativeProvisioningTrustRootBytes * maximumNativeProvisioningTrustRoots},
 	} {
 		if len(field.value) == 0 || len(field.value) > field.maximum {
 			return fmt.Errorf("client: native provisioning %s size is invalid", field.label)
@@ -219,6 +297,18 @@ func (p NativeProvisioning) validateContainer() error {
 	}
 	if p.RequestClassID == 0 || p.RequestClassID > wire.MaxVarint || p.Suite == 0 || p.Suite > wire.MaxVarint {
 		return fmt.Errorf("client: native provisioning identifiers are invalid")
+	}
+	if p.RelayExpectedStatus < http.StatusOK || p.RelayExpectedStatus > 599 {
+		return fmt.Errorf("client: native provisioning relay response status is invalid")
+	}
+	if _, err := decodeNativeHeaders(p.RelayRequestHeaders); err != nil {
+		return fmt.Errorf("client: invalid native relay request headers: %w", err)
+	}
+	if _, err := decodeNativeHeaders(p.RelayResponseHeaders); err != nil {
+		return fmt.Errorf("client: invalid native relay response headers: %w", err)
+	}
+	if _, err := decodeNativeTrustRoots(p.RelayTrustRoots); err != nil {
+		return fmt.Errorf("client: invalid native relay trust roots: %w", err)
 	}
 	return nil
 }
@@ -248,6 +338,18 @@ func (p NativeProvisioning) decodeObjects() (nativeProvisioningObjects, error) {
 	if err != nil {
 		return nativeProvisioningObjects{}, err
 	}
+	relayRequestHeaders, err := decodeNativeHeaders(p.RelayRequestHeaders)
+	if err != nil {
+		return nativeProvisioningObjects{}, fmt.Errorf("client: invalid native relay request headers: %w", err)
+	}
+	relayResponseHeaders, err := decodeNativeHeaders(p.RelayResponseHeaders)
+	if err != nil {
+		return nativeProvisioningObjects{}, fmt.Errorf("client: invalid native relay response headers: %w", err)
+	}
+	relayTrustRoots, err := decodeNativeTrustRoots(p.RelayTrustRoots)
+	if err != nil {
+		return nativeProvisioningObjects{}, fmt.Errorf("client: invalid native relay trust roots: %w", err)
+	}
 	return nativeProvisioningObjects{
 		descriptor:           descriptor,
 		template:             template,
@@ -255,6 +357,9 @@ func (p NativeProvisioning) decodeObjects() (nativeProvisioningObjects, error) {
 		accessHint:           accessHint,
 		policyOffer:          policyOffer,
 		transportHints:       transportHints,
+		relayRequestHeaders:  relayRequestHeaders,
+		relayResponseHeaders: relayResponseHeaders,
+		relayTrustRoots:      relayTrustRoots,
 	}, nil
 }
 
@@ -301,6 +406,231 @@ func decodeNativeTransportHints(encoded []byte) (protocol.ClientTransportHints, 
 		return protocol.ClientTransportHints{}, fmt.Errorf("client: malformed native transport hints")
 	}
 	return value, nil
+}
+
+// EncodeNativeHeaders returns the canonical, bounded carrier-header representation.
+func EncodeNativeHeaders(header http.Header) ([]byte, error) {
+	fields, err := nativeHeaderFields(header)
+	if err != nil {
+		return nil, err
+	}
+	encoder := wire.NewEncoder()
+	encoder.WriteVarint(uint64(len(fields)))
+	for _, field := range fields {
+		encoder.WriteOpaque8([]byte(field.name))
+		encoder.WriteOpaque16([]byte(field.value))
+	}
+	encoded, err := encoder.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("client: encode native headers: %w", err)
+	}
+	if len(encoded) > maximumNativeProvisioningHeaderBytes {
+		return nil, fmt.Errorf("client: native headers exceed size limit")
+	}
+	return encoded, nil
+}
+
+// EncodeNativeTrustRoots returns the canonical, bounded DER trust-root representation.
+func EncodeNativeTrustRoots(roots [][]byte) ([]byte, error) {
+	if len(roots) > maximumNativeProvisioningTrustRoots {
+		return nil, fmt.Errorf("client: too many native trust roots")
+	}
+	encodedRoots := make([][]byte, len(roots))
+	for index, root := range roots {
+		if len(root) == 0 || len(root) > maximumNativeProvisioningTrustRootBytes {
+			return nil, fmt.Errorf("client: native trust root size is invalid")
+		}
+		certificate, err := x509.ParseCertificate(root)
+		if err != nil || !bytes.Equal(certificate.Raw, root) {
+			return nil, fmt.Errorf("client: native trust root is not canonical DER")
+		}
+		encodedRoots[index] = append([]byte(nil), root...)
+	}
+	sort.Slice(encodedRoots, func(i, j int) bool { return bytes.Compare(encodedRoots[i], encodedRoots[j]) < 0 })
+	for index := 1; index < len(encodedRoots); index++ {
+		if bytes.Equal(encodedRoots[index-1], encodedRoots[index]) {
+			return nil, fmt.Errorf("client: duplicate native trust root")
+		}
+	}
+	encoder := wire.NewEncoder()
+	encoder.WriteVarint(uint64(len(encodedRoots)))
+	for _, root := range encodedRoots {
+		encoder.WriteOpaque16(root)
+	}
+	encoded, err := encoder.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("client: encode native trust roots: %w", err)
+	}
+	return encoded, nil
+}
+
+type nativeHeaderField struct {
+	name  string
+	value string
+}
+
+func nativeHeaderFields(header http.Header) ([]nativeHeaderField, error) {
+	fields := make([]nativeHeaderField, 0, len(header))
+	for name, values := range header {
+		if len(values) == 0 {
+			return nil, fmt.Errorf("client: native header %q has no values", name)
+		}
+		for _, value := range values {
+			if err := validateNativeHeaderField(name, value); err != nil {
+				return nil, err
+			}
+			fields = append(fields, nativeHeaderField{name: name, value: value})
+		}
+	}
+	if len(fields) > maximumNativeProvisioningHeaderEntries {
+		return nil, fmt.Errorf("client: too many native headers")
+	}
+	sort.Slice(fields, func(i, j int) bool {
+		if fields[i].name == fields[j].name {
+			return fields[i].value < fields[j].value
+		}
+		return fields[i].name < fields[j].name
+	})
+	for index := 1; index < len(fields); index++ {
+		if fields[index-1] == fields[index] {
+			return nil, fmt.Errorf("client: duplicate native header")
+		}
+	}
+	return fields, nil
+}
+
+func decodeNativeHeaders(encoded []byte) (http.Header, error) {
+	if len(encoded) == 0 || len(encoded) > maximumNativeProvisioningHeaderBytes {
+		return nil, fmt.Errorf("client: native headers size is invalid")
+	}
+	reader := wire.NewReader(encoded)
+	count := reader.ReadVarint()
+	if count > maximumNativeProvisioningHeaderEntries {
+		return nil, fmt.Errorf("client: too many native headers")
+	}
+	fields := make([]nativeHeaderField, 0, count)
+	for index := uint64(0); index < count; index++ {
+		name := string(readNativeProvisioningOpaque8(reader, maximumNativeProvisioningHeaderNameBytes))
+		value := string(readNativeProvisioningOpaque16(reader, maximumNativeProvisioningHeaderValueBytes))
+		if err := validateNativeHeaderField(name, value); err != nil {
+			return nil, err
+		}
+		if len(fields) > 0 && (fields[len(fields)-1].name > name || (fields[len(fields)-1].name == name && fields[len(fields)-1].value >= value)) {
+			return nil, fmt.Errorf("client: native headers are not canonical")
+		}
+		fields = append(fields, nativeHeaderField{name: name, value: value})
+	}
+	if reader.Err() != nil || !reader.EOF() {
+		return nil, fmt.Errorf("client: malformed native headers")
+	}
+	header := make(http.Header)
+	for _, field := range fields {
+		header.Add(field.name, field.value)
+	}
+	return header, nil
+}
+
+func validateNativeHeaderField(name, value string) error {
+	if len(name) == 0 || len(name) > maximumNativeProvisioningHeaderNameBytes || textproto.CanonicalMIMEHeaderKey(name) != name {
+		return fmt.Errorf("client: native header name is invalid")
+	}
+	for index := 0; index < len(name); index++ {
+		if !isNativeHeaderFieldByte(name[index]) {
+			return fmt.Errorf("client: native header name is invalid")
+		}
+	}
+	if len(value) == 0 || len(value) > maximumNativeProvisioningHeaderValueBytes {
+		return fmt.Errorf("client: native header value length is invalid")
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] != '\t' && (value[index] < 0x20 || value[index] > 0x7e) {
+			return fmt.Errorf("client: native header value is invalid")
+		}
+	}
+	switch strings.ToLower(name) {
+	case "connection", "content-length", "host", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade":
+		return fmt.Errorf("client: native header name is reserved")
+	}
+	if err := transport.ValidateVisibleHeaders(http.Header{name: {value}}); err != nil {
+		return fmt.Errorf("client: native header is not cover-safe: %w", err)
+	}
+	return nil
+}
+
+func isNativeHeaderFieldByte(value byte) bool {
+	return value >= '0' && value <= '9' || value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z' || strings.ContainsRune("!#$%&'*+-.^_`|~", rune(value))
+}
+
+func decodeNativeTrustRoots(encoded []byte) ([]*x509.Certificate, error) {
+	if len(encoded) == 0 || len(encoded) > maximumNativeProvisioningTrustRootBytes*maximumNativeProvisioningTrustRoots {
+		return nil, fmt.Errorf("client: native trust roots size is invalid")
+	}
+	reader := wire.NewReader(encoded)
+	count := reader.ReadVarint()
+	if count > maximumNativeProvisioningTrustRoots {
+		return nil, fmt.Errorf("client: too many native trust roots")
+	}
+	certificates := make([]*x509.Certificate, 0, count)
+	var previous []byte
+	for index := uint64(0); index < count; index++ {
+		root := readNativeProvisioningOpaque16(reader, maximumNativeProvisioningTrustRootBytes)
+		certificate, err := x509.ParseCertificate(root)
+		if err != nil || !bytes.Equal(certificate.Raw, root) {
+			return nil, fmt.Errorf("client: native trust root is not canonical DER")
+		}
+		if len(previous) != 0 && bytes.Compare(previous, root) >= 0 {
+			return nil, fmt.Errorf("client: native trust roots are not canonical")
+		}
+		previous = root
+		certificates = append(certificates, certificate)
+	}
+	if reader.Err() != nil || !reader.EOF() {
+		return nil, fmt.Errorf("client: malformed native trust roots")
+	}
+	return certificates, nil
+}
+
+func nativeProvisioningTLSConfig(roots []*x509.Certificate, originSPKIHash []byte) (*tls.Config, error) {
+	if len(originSPKIHash) != 48 {
+		return nil, fmt.Errorf("client: native relay SPKI hash length is invalid")
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, fmt.Errorf("client: load system root pool: %w", err)
+	}
+	if pool == nil {
+		pool = x509.NewCertPool()
+	}
+	for _, root := range roots {
+		pool.AddCert(root)
+	}
+	wantSPKIHash := append([]byte(nil), originSPKIHash...)
+	return &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		MaxVersion:         tls.VersionTLS13,
+		NextProtos:         []string{"h2"},
+		RootCAs:            pool,
+		ClientSessionCache: nil,
+		VerifyConnection: func(state tls.ConnectionState) error {
+			if len(state.PeerCertificates) == 0 {
+				return fmt.Errorf("client: native relay did not provide a certificate")
+			}
+			gotSPKIHash := auroracrypto.PreHash(state.PeerCertificates[0].RawSubjectPublicKeyInfo)
+			if subtle.ConstantTimeCompare(gotSPKIHash, wantSPKIHash) != 1 {
+				return fmt.Errorf("client: native relay certificate SPKI pin mismatch")
+			}
+			return nil
+		},
+	}, nil
+}
+
+func nativeHTTP2BindingMetadata(template protocol.CoverTemplate, requestClass protocol.RequestClass) handshake.HTTP2BindingMetadata {
+	return handshake.HTTP2BindingMetadata{
+		NormalizedAuthorityHash: append([]byte(nil), template.PublicNameHash...),
+		PathTemplateID:          append([]byte(nil), requestClass.PathTemplateID...),
+		RequestClassID:          requestClass.ClassID,
+		MethodFamilyID:          registry.MethodWebH2Stream,
+	}
 }
 
 func validateNativePolicy(offer protocol.PolicyOffer, hints protocol.ClientTransportHints, suite uint64) error {
@@ -370,6 +700,14 @@ func validateNativeCarrierPath(raw string) error {
 
 func readNativeProvisioningOpaque16(reader *wire.Reader, maximum int) []byte {
 	value := reader.ReadOpaque16()
+	if len(value) > maximum {
+		reader.SetErr(fmt.Errorf("client: native provisioning field exceeds limit"))
+	}
+	return value
+}
+
+func readNativeProvisioningOpaque8(reader *wire.Reader, maximum int) []byte {
+	value := reader.ReadOpaque8()
 	if len(value) > maximum {
 		reader.SetErr(fmt.Errorf("client: native provisioning field exceeds limit"))
 	}

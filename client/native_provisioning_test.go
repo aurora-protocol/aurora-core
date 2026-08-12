@@ -6,11 +6,15 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/admission"
+	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/handshake"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
@@ -31,10 +35,11 @@ func TestParseNativeProvisioningRejectsMalformedAndTrailingBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if parsed.RelayURL != input.RelayURL || parsed.IssuerURL != input.IssuerURL || parsed.IssuerCarrierPath != input.IssuerCarrierPath ||
-		parsed.RequestClassID != input.RequestClassID || parsed.Suite != input.Suite ||
+		parsed.RequestClassID != input.RequestClassID || parsed.Suite != input.Suite || parsed.RelayExpectedStatus != input.RelayExpectedStatus ||
 		!bytes.Equal(parsed.Descriptor, input.Descriptor) || !bytes.Equal(parsed.Template, input.Template) ||
 		!bytes.Equal(parsed.AccessHint, input.AccessHint) || !bytes.Equal(parsed.PolicyOffer, input.PolicyOffer) ||
-		!bytes.Equal(parsed.TransportHints, input.TransportHints) {
+		!bytes.Equal(parsed.TransportHints, input.TransportHints) || !bytes.Equal(parsed.RelayRequestHeaders, input.RelayRequestHeaders) ||
+		!bytes.Equal(parsed.RelayResponseHeaders, input.RelayResponseHeaders) || !bytes.Equal(parsed.RelayTrustRoots, input.RelayTrustRoots) {
 		t.Fatalf("parsed provisioning did not preserve canonical fields: %+v", parsed)
 	}
 	input.Descriptor[0] ^= 0xff
@@ -104,6 +109,104 @@ func TestNativeProvisioningVerifiesDeploymentBeforeUse(t *testing.T) {
 	}
 	if _, err := ParseNativeProvisioning(encoded, now); err == nil {
 		t.Fatal("native provisioning accepted a descriptor hash mismatch")
+	}
+}
+
+func TestNativeProvisioningBuildsPinnedHTTP2Carrier(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	requestSeen := make(chan error, 1)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor != 2 || r.TLS == nil || r.TLS.Version != tls.VersionTLS13 || r.TLS.NegotiatedProtocol != "h2" {
+			requestSeen <- fmt.Errorf("unexpected relay connection: proto=%s tls=%+v", r.Proto, r.TLS)
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/assets/upload/42" || r.Header.Get("X-Cover-Mode") != "ordinary" {
+			requestSeen <- fmt.Errorf("unexpected relay request: method=%s path=%s headers=%v", r.Method, r.URL.Path, r.Header)
+			return
+		}
+		requestSeen <- nil
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+	}))
+	server.EnableHTTP2 = true
+	server.TLS = &tls.Config{MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	certificate := server.Certificate()
+	if certificate == nil {
+		t.Fatal("test server did not provide a certificate")
+	}
+	input := validNativeProvisioningWithOriginSPKI(t, now, auroracrypto.PreHash(certificate.RawSubjectPublicKeyInfo))
+	configureNativeProvisioningRelay(t, &input, server.URL+"/assets/upload/42", certificate.Raw)
+	encoded, err := EncodeNativeProvisioning(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provisioning, err := ParseNativeProvisioning(encoded, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opener, err := provisioning.NewHTTP2ClientCarrierOpener(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	carrier, err := opener.Open(context.Background(), bytes.Repeat([]byte{0x31}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = carrier.Close() })
+	select {
+	case err := <-requestSeen:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("native provisioning carrier did not reach the relay")
+	}
+}
+
+func TestNativeProvisioningRejectsWrongCarrierSPKIPin(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	server.EnableHTTP2 = true
+	server.TLS = &tls.Config{MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	certificate := server.Certificate()
+	if certificate == nil {
+		t.Fatal("test server did not provide a certificate")
+	}
+	input := validNativeProvisioning(t, now)
+	configureNativeProvisioningRelay(t, &input, server.URL+"/assets/upload/42", certificate.Raw)
+	encoded, err := EncodeNativeProvisioning(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provisioning, err := ParseNativeProvisioning(encoded, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opener, err := provisioning.NewHTTP2ClientCarrierOpener(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if carrier, err := opener.Open(context.Background(), bytes.Repeat([]byte{0x31}, 32)); err == nil {
+		_ = carrier.Close()
+		t.Fatal("native provisioning accepted a mismatched relay SPKI pin")
+	}
+}
+
+func TestNativeProvisioningRejectsNonCanonicalCarrierConfiguration(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	input := validNativeProvisioning(t, now)
+	input.RelayRequestHeaders = []byte{2, 3, 'X', '-', 'A', 0, 1, 'a', 3, 'X', '-', 'A', 0, 1, 'a'}
+	if _, err := EncodeNativeProvisioning(input); err == nil {
+		t.Fatal("native provisioning accepted duplicate carrier headers")
+	}
+	if _, err := EncodeNativeHeaders(http.Header{"X-Aurora-Mode": {"ordinary"}}); err == nil {
+		t.Fatal("native provisioning accepted a visible protocol marker")
 	}
 }
 
@@ -177,6 +280,10 @@ func (nativeProvisioningProofProvider) BuildProofs(_ context.Context, _ handshak
 }
 
 func validNativeProvisioning(t testing.TB, now time.Time) NativeProvisioning {
+	return validNativeProvisioningWithOriginSPKI(t, now, nativeProvisioningBytes(0x03, 48))
+}
+
+func validNativeProvisioningWithOriginSPKI(t testing.TB, now time.Time, originSPKIHash []byte) NativeProvisioning {
 	t.Helper()
 	nowUnix := uint64(now.Unix())
 	longtermClassical := nativeProvisioningECDSAKey(t)
@@ -197,7 +304,7 @@ func validNativeProvisioning(t testing.TB, now time.Time) NativeProvisioning {
 		TemplateFamilyID: nativeProvisioningBytes(0x02, 16),
 		ValidFromUnix:    nowUnix - 60,
 		ValidUntilUnix:   nowUnix + 3600,
-		OriginSPKIHash:   nativeProvisioningBytes(0x03, 48),
+		OriginSPKIHash:   append([]byte(nil), originSPKIHash...),
 		PublicNameHash:   nativeProvisioningBytes(0x04, 48),
 		RequestClasses: []protocol.RequestClass{{
 			ClassID:             7,
@@ -361,6 +468,18 @@ func validNativeProvisioning(t testing.TB, now time.Time) NativeProvisioning {
 	if err != nil {
 		t.Fatal(err)
 	}
+	requestHeaders, err := EncodeNativeHeaders(http.Header{"X-Cover-Mode": {"ordinary"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseHeaders, err := EncodeNativeHeaders(http.Header{"Content-Type": {"application/octet-stream"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustRoots, err := EncodeNativeTrustRoots(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return NativeProvisioning{
 		RelayURL:              "https://relay.example/assets/upload/42",
 		IssuerURL:             "https://issuer.example",
@@ -374,7 +493,22 @@ func validNativeProvisioning(t testing.TB, now time.Time) NativeProvisioning {
 		AccessHint:            accessHintBytes,
 		PolicyOffer:           policyBytes,
 		TransportHints:        hintsBytes,
+		RelayExpectedStatus:   http.StatusOK,
+		RelayRequestHeaders:   requestHeaders,
+		RelayResponseHeaders:  responseHeaders,
+		RelayTrustRoots:       trustRoots,
 	}
+}
+
+func configureNativeProvisioningRelay(t testing.TB, input *NativeProvisioning, relayURL string, trustRoot []byte) {
+	t.Helper()
+	trustRoots, err := EncodeNativeTrustRoots([][]byte{trustRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.RelayURL = relayURL
+	input.RelayExpectedStatus = http.StatusOK
+	input.RelayTrustRoots = trustRoots
 }
 
 func nativeProvisioningECDSAKey(t testing.TB) *ecdsa.PrivateKey {

@@ -1,7 +1,6 @@
 package logging
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
@@ -10,7 +9,7 @@ import (
 
 func TestSecretStringRedactsData(t *testing.T) {
 	secret := Secret{Kind: HintSecret, Data: []byte{0xde, 0xad, 0xbe, 0xef}}
-	got := fmt.Sprintf("%s", secret)
+	got := secret.String()
 	if strings.Contains(got, "deadbeef") || !strings.Contains(got, "[redacted:hint-secret:4-bytes]") {
 		t.Fatalf("unexpected redaction string: %s", got)
 	}

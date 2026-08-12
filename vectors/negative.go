@@ -2,7 +2,6 @@ package vectors
 
 import (
 	"crypto"
-	"crypto/elliptic"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -111,7 +110,10 @@ func addWrongSignatureCase(report *NegativeVectorReport) error {
 	if err != nil {
 		return err
 	}
-	publicKey := elliptic.Marshal(elliptic.P256(), signer.PublicKey.X, signer.PublicKey.Y)
+	publicKey, err := signer.PublicKey.Bytes()
+	if err != nil {
+		return err
+	}
 	message := repeated(0x62, 48)
 	signature, err := signer.Sign(nil, message, crypto.SHA384)
 	if err != nil {

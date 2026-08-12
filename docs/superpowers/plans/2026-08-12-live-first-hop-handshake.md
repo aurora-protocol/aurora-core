@@ -861,7 +861,7 @@ git commit -m "test: add live first-hop session evidence"
 - Consumes: the complete live first-hop slice.
 - Produces: a reviewed, pushed branch with zero known P0-P3 findings and exact verification evidence.
 
-- [ ] **Step 1: Run formatting, unit, race, vet, and static analysis**
+- [x] **Step 1: Run formatting, unit, race, vet, and static analysis**
 
 Run:
 

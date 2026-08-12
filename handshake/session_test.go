@@ -244,7 +244,7 @@ func signedCoverPreludeVerificationInput(t *testing.T) CoverPreludeVerificationI
 	classicalKey := protocol.PublicKeyRecord{
 		SignatureScheme: registry.SigECDSAP256SHA384DER,
 		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
-		PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+		PublicKey:       mustECDSAPublicKeyBytes(t, &priv.PublicKey),
 	}
 	descriptor := protocol.RelayDescriptor{
 		DescriptorVersion:            registry.Version20,
@@ -335,4 +335,13 @@ func signedCoverPreludeVerificationInput(t *testing.T) CoverPreludeVerificationI
 		Prelude1:           p1,
 		Descriptor:         descriptor,
 	}
+}
+
+func mustECDSAPublicKeyBytes(t testing.TB, key *ecdsa.PublicKey) []byte {
+	t.Helper()
+	encoded, err := key.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }

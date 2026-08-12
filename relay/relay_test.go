@@ -28,7 +28,7 @@ import (
 )
 
 func TestRelayFailureKindsUseCoreClassifier(t *testing.T) {
-	var kind failure.Kind = FailureBadAccessHint
+	kind := FailureBadAccessHint
 	got := failure.Classify(kind)
 	if got.Action != failure.CoverOrigin || got.LogKey != "f0001" {
 		t.Fatalf("relay failure kind is not core-classified: %+v", got)
@@ -942,7 +942,7 @@ func relayVerifierService(t *testing.T, relayBucketID []byte) (protocol.IssuerVe
 		ServiceAuthKey: protocol.PublicKeyRecord{
 			SignatureScheme: registry.SigECDSAP256SHA384DER,
 			KeyEncoding:     registry.KeyP256SEC1Uncompressed,
-			PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+			PublicKey:       mustECDSAPublicKeyBytes(t, &priv.PublicKey),
 		},
 		AllowedProofTypes:     []uint64{registry.ProofVOPRFP384SHA384},
 		AllowedRelayBucketIDs: [][]byte{append([]byte(nil), relayBucketID...)},
@@ -951,6 +951,15 @@ func relayVerifierService(t *testing.T, relayBucketID []byte) (protocol.IssuerVe
 		ValidUntilUnix:        900,
 		ServiceStatus:         registry.IssuerStatusActive,
 	}, priv
+}
+
+func mustECDSAPublicKeyBytes(t testing.TB, key *ecdsa.PublicKey) []byte {
+	t.Helper()
+	encoded, err := key.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func relayTokenMetadataForProof(proof protocol.AdmissionProof) []byte {

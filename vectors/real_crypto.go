@@ -3,6 +3,7 @@ package vectors
 import (
 	"bytes"
 	"crypto"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"encoding/hex"
@@ -113,7 +114,10 @@ func GenerateTrustMetadataRealCryptoBundle() (TrustMetadataRealCryptoBundle, err
 	if err != nil {
 		return TrustMetadataRealCryptoBundle{}, err
 	}
-	directoryClassicalKey := ecdsaPublicKeyRecord(directoryClassicalSigner)
+	directoryClassicalKey, err := ecdsaPublicKeyRecord(directoryClassicalSigner)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
 	directoryClassicalKeyID, err := authorityKeyID(directoryClassicalKey)
 	if err != nil {
 		return TrustMetadataRealCryptoBundle{}, err
@@ -156,7 +160,10 @@ func GenerateTrustMetadataRealCryptoBundle() (TrustMetadataRealCryptoBundle, err
 	if err != nil {
 		return TrustMetadataRealCryptoBundle{}, err
 	}
-	relayLongtermClassicalKey := ecdsaPublicKeyRecord(relayLongtermClassicalSigner)
+	relayLongtermClassicalKey, err := ecdsaPublicKeyRecord(relayLongtermClassicalSigner)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
 	var relayLongtermPQSeed [mldsa65.SeedSize]byte
 	copy(relayLongtermPQSeed[:], repeated(0xd5, len(relayLongtermPQSeed)))
 	relayLongtermPQPublic, relayLongtermPQPrivate := mldsa65.NewKeyFromSeed(&relayLongtermPQSeed)
@@ -169,7 +176,10 @@ func GenerateTrustMetadataRealCryptoBundle() (TrustMetadataRealCryptoBundle, err
 	if err != nil {
 		return TrustMetadataRealCryptoBundle{}, err
 	}
-	relayEpochClassicalKey := ecdsaPublicKeyRecord(relayEpochClassicalSigner)
+	relayEpochClassicalKey, err := ecdsaPublicKeyRecord(relayEpochClassicalSigner)
+	if err != nil {
+		return TrustMetadataRealCryptoBundle{}, err
+	}
 	var relayEpochPQSeed [mldsa65.SeedSize]byte
 	copy(relayEpochPQSeed[:], repeated(0xd7, len(relayEpochPQSeed)))
 	relayEpochPQPublic, _ := mldsa65.NewKeyFromSeed(&relayEpochPQSeed)
@@ -373,7 +383,10 @@ func GenerateFirstHopRealCryptoBundle() (FirstHopRealCryptoBundle, error) {
 	if err != nil {
 		return FirstHopRealCryptoBundle{}, err
 	}
-	classicalPublic := elliptic.Marshal(elliptic.P256(), classicalSigner.PublicKey.X, classicalSigner.PublicKey.Y)
+	classicalPublic, err := classicalSigner.PublicKey.Bytes()
+	if err != nil {
+		return FirstHopRealCryptoBundle{}, err
+	}
 	var pqSeed [mldsa65.SeedSize]byte
 	copy(pqSeed[:], repeated(0x71, len(pqSeed)))
 	pqPublic, pqPrivate := mldsa65.NewKeyFromSeed(&pqSeed)
@@ -700,7 +713,10 @@ func GenerateRoutePreludeRealCryptoBundle() (RoutePreludeRealCryptoBundle, error
 	if err != nil {
 		return RoutePreludeRealCryptoBundle{}, err
 	}
-	classicalPublic := elliptic.Marshal(elliptic.P256(), classicalSigner.PublicKey.X, classicalSigner.PublicKey.Y)
+	classicalPublic, err := classicalSigner.PublicKey.Bytes()
+	if err != nil {
+		return RoutePreludeRealCryptoBundle{}, err
+	}
 	var pqSeed [mldsa65.SeedSize]byte
 	copy(pqSeed[:], repeated(0xb6, len(pqSeed)))
 	pqPublic, pqPrivate := mldsa65.NewKeyFromSeed(&pqSeed)
@@ -1105,22 +1121,30 @@ func ecdsaPrivateKeyFromScalar(scalar []byte) (*ecdsa.PrivateKey, error) {
 	if d.Sign() == 0 || d.Cmp(elliptic.P256().Params().N) >= 0 {
 		return nil, fmt.Errorf("vectors: invalid deterministic ECDSA scalar")
 	}
-	x, y := elliptic.P256().ScalarBaseMult(scalar)
-	if x == nil || y == nil {
-		return nil, fmt.Errorf("vectors: invalid deterministic ECDSA public point")
+	ecdhPrivateKey, err := ecdh.P256().NewPrivateKey(scalar)
+	if err != nil {
+		return nil, fmt.Errorf("vectors: derive deterministic ECDSA public key: %w", err)
+	}
+	publicKey, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), ecdhPrivateKey.PublicKey().Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("vectors: parse deterministic ECDSA public key: %w", err)
 	}
 	return &ecdsa.PrivateKey{
-		PublicKey: ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y},
+		PublicKey: *publicKey,
 		D:         d,
 	}, nil
 }
 
-func ecdsaPublicKeyRecord(privateKey *ecdsa.PrivateKey) protocol.PublicKeyRecord {
+func ecdsaPublicKeyRecord(privateKey *ecdsa.PrivateKey) (protocol.PublicKeyRecord, error) {
+	encoded, err := privateKey.PublicKey.Bytes()
+	if err != nil {
+		return protocol.PublicKeyRecord{}, err
+	}
 	return protocol.PublicKeyRecord{
 		SignatureScheme: registry.SigECDSAP256SHA384DER,
 		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
-		PublicKey:       elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y),
-	}
+		PublicKey:       encoded,
+	}, nil
 }
 
 func authorityKeyID(record protocol.PublicKeyRecord) ([]byte, error) {

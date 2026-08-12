@@ -22,7 +22,7 @@ func TestVerifySignatureAcceptsECDSAP256SEC1DER(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	publicKey := elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y)
+	publicKey := mustECDSAPublicKeyBytes(t, &priv.PublicKey)
 	if err := VerifySignature(registry.SigECDSAP256SHA384DER, registry.KeyP256SEC1Uncompressed, publicKey, messageDigest, sig); err != nil {
 		t.Fatalf("valid ECDSA P-256 signature rejected: %v", err)
 	}
@@ -32,6 +32,15 @@ func TestVerifySignatureAcceptsECDSAP256SEC1DER(t *testing.T) {
 	if err := VerifySignature(registry.SigECDSAP256SHA384DER, registry.KeyP384SEC1Uncompressed, publicKey, messageDigest, sig); err == nil {
 		t.Fatalf("mismatched SEC1 key encoding accepted")
 	}
+}
+
+func mustECDSAPublicKeyBytes(t testing.TB, key *ecdsa.PublicKey) []byte {
+	t.Helper()
+	encoded, err := key.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func TestVerifySignatureAcceptsECDSAP384SPKIDER(t *testing.T) {

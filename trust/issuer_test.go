@@ -120,7 +120,7 @@ func TestVerifyIssuerMetadataSignatureAcceptsAuthorizedAuthority(t *testing.T) {
 		PublicKey: protocol.PublicKeyRecord{
 			SignatureScheme: m.SignatureScheme,
 			KeyEncoding:     m.KeyEncoding,
-			PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+			PublicKey:       mustECDSAPublicKeyBytes(t, &priv.PublicKey),
 		},
 		ValidFromUnix:  90,
 		ValidUntilUnix: 400,
@@ -185,7 +185,7 @@ func TestVerifyIssuerMetadataSignatureRejectsStructurallyInvalidMetadata(t *test
 				PublicKey: protocol.PublicKeyRecord{
 					SignatureScheme: m.SignatureScheme,
 					KeyEncoding:     m.KeyEncoding,
-					PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+					PublicKey:       mustECDSAPublicKeyBytes(t, &priv.PublicKey),
 				},
 				ValidFromUnix:  90,
 				ValidUntilUnix: 400,
@@ -304,7 +304,7 @@ func TestVerifyIssuerVerifierResponseVerifiesServiceSignature(t *testing.T) {
 	service.ServiceAuthKey = protocol.PublicKeyRecord{
 		SignatureScheme: registry.SigECDSAP256SHA384DER,
 		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
-		PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+		PublicKey:       mustECDSAPublicKeyBytes(t, &priv.PublicKey),
 	}
 	input, err := IssuerVerifierResponseSignatureInput(resp.RequestHash, resp)
 	if err != nil {

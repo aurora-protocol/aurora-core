@@ -365,6 +365,7 @@ func TestHTTP2ClientCarrierCancellationClosesStalledTLS(t *testing.T) {
 		}
 	}()
 	opener := newRawHTTP2TestOpener(t, listener.Addr().String())
+	//lint:ignore SA1012 This call verifies that the public API rejects a nil context.
 	if _, err := opener.Open(nil, bytes.Repeat([]byte{0x61}, 32)); err == nil {
 		t.Fatal("nil context accepted")
 	}

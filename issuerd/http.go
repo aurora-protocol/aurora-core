@@ -285,9 +285,9 @@ func RunHTTPReadinessHarness(nowUnix uint64) (HTTPReadinessReport, error) {
 	}
 
 	if issued.AdmissionProof != "" {
-		spend := serveHarnessRequest(handler, http.MethodPost, "/token/spend", mustMarshalJSON(SpendRequest{AdmissionProof: issued.AdmissionProof}))
+		spend := serveHarnessRequest(handler, http.MethodPost, "/token/spend", mustMarshalJSON(SpendRequest(issued)))
 		report.SpendEndpoint = spend.status == http.StatusOK && containsAll(spend.body, []string{`"spent":true`})
-		duplicate := serveHarnessRequest(handler, http.MethodPost, "/token/spend", mustMarshalJSON(SpendRequest{AdmissionProof: issued.AdmissionProof}))
+		duplicate := serveHarnessRequest(handler, http.MethodPost, "/token/spend", mustMarshalJSON(SpendRequest(issued)))
 		report.DuplicateSpendRejected = duplicate.status == http.StatusConflict
 		report.RedactedFailureBodies = report.DuplicateSpendRejected && !containsAll(duplicate.body, []string{issued.AdmissionProof})
 	}
@@ -337,10 +337,14 @@ func verifyBinaryVerifierMTLSEndpoint(service *Service, nowUnix uint64) error {
 	if err != nil {
 		return err
 	}
+	clientPublicKey, err := clientKey.PublicKey.Bytes()
+	if err != nil {
+		return err
+	}
 	service.AuthorizeRelayClientKey(verifierService.RequestAuthPolicyID, protocol.PublicKeyRecord{
 		SignatureScheme: registry.SigECDSAP256SHA384DER,
 		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
-		PublicKey:       elliptic.Marshal(elliptic.P256(), clientKey.PublicKey.X, clientKey.PublicKey.Y),
+		PublicKey:       clientPublicKey,
 	})
 	verifierRequest, err := harnessIssuerVerifierRequest(service, verifierService, nowUnix)
 	if err != nil {

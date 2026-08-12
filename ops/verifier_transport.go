@@ -134,7 +134,10 @@ func certificateECDSAKeyMatchesRecord(cert *x509.Certificate, curve elliptic.Cur
 	var err error
 	switch key.KeyEncoding {
 	case sec1Encoding:
-		encoded = elliptic.Marshal(curve, pk.X, pk.Y)
+		encoded, err = pk.Bytes()
+		if err != nil {
+			return err
+		}
 	case spkiEncoding:
 		encoded, err = x509.MarshalPKIXPublicKey(pk)
 		if err != nil {

@@ -185,7 +185,7 @@ func issuerOperationsProfileFixture(t *testing.T) (IssuerOperationsProfile, *ecd
 			ServiceAuthKey: protocol.PublicKeyRecord{
 				SignatureScheme: registry.SigECDSAP256SHA384DER,
 				KeyEncoding:     registry.KeyP256SEC1Uncompressed,
-				PublicKey:       elliptic.Marshal(elliptic.P256(), serviceSigner.PublicKey.X, serviceSigner.PublicKey.Y),
+				PublicKey:       mustECDSAPublicKeyBytes(t, &serviceSigner.PublicKey),
 			},
 			AllowedProofTypes:     []uint64{registry.ProofVOPRFP384SHA384},
 			AllowedRelayBucketIDs: [][]byte{rb(0x81, 16)},
@@ -207,7 +207,7 @@ func issuerOperationsProfileFixture(t *testing.T) (IssuerOperationsProfile, *ecd
 			PublicKey: protocol.PublicKeyRecord{
 				SignatureScheme: metadata.SignatureScheme,
 				KeyEncoding:     metadata.KeyEncoding,
-				PublicKey:       elliptic.Marshal(elliptic.P256(), authoritySigner.PublicKey.X, authoritySigner.PublicKey.Y),
+				PublicKey:       mustECDSAPublicKeyBytes(t, &authoritySigner.PublicKey),
 			},
 			ValidFromUnix:  90,
 			ValidUntilUnix: 1100,

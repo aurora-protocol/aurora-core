@@ -733,9 +733,18 @@ func attachVerifierServiceSigningKey(t *testing.T, service *protocol.IssuerVerif
 	service.ServiceAuthKey = protocol.PublicKeyRecord{
 		SignatureScheme: registry.SigECDSAP256SHA384DER,
 		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
-		PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+		PublicKey:       mustECDSAPublicKeyBytes(t, &priv.PublicKey),
 	}
 	return priv
+}
+
+func mustECDSAPublicKeyBytes(t testing.TB, key *ecdsa.PublicKey) []byte {
+	t.Helper()
+	encoded, err := key.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func signVerifierResponse(t *testing.T, priv *ecdsa.PrivateKey, resp *protocol.IssuerVerifierResponse) {

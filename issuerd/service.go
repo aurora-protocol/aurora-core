@@ -89,6 +89,14 @@ func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service
 	if err != nil {
 		return nil, err
 	}
+	servicePublicKey, err := serviceSigner.PublicKey.Bytes()
+	if err != nil {
+		return nil, err
+	}
+	authorityPublicKey, err := authoritySigner.PublicKey.Bytes()
+	if err != nil {
+		return nil, err
+	}
 	blindRSAKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, err
@@ -160,7 +168,7 @@ func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service
 			ServiceAuthKey: protocol.PublicKeyRecord{
 				SignatureScheme: registry.SigECDSAP256SHA384DER,
 				KeyEncoding:     registry.KeyP256SEC1Uncompressed,
-				PublicKey:       elliptic.Marshal(elliptic.P256(), serviceSigner.PublicKey.X, serviceSigner.PublicKey.Y),
+				PublicKey:       servicePublicKey,
 			},
 			AllowedProofTypes:     []uint64{registry.ProofVOPRFP384SHA384},
 			AllowedRelayBucketIDs: [][]byte{repeatedByte(0x81, 16)},
@@ -187,7 +195,7 @@ func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service
 		PublicKey: protocol.PublicKeyRecord{
 			SignatureScheme: metadata.SignatureScheme,
 			KeyEncoding:     metadata.KeyEncoding,
-			PublicKey:       elliptic.Marshal(elliptic.P256(), authoritySigner.PublicKey.X, authoritySigner.PublicKey.Y),
+			PublicKey:       authorityPublicKey,
 		},
 		ValidFromUnix:  authorityValidFrom,
 		ValidUntilUnix: authorityValidUntil,
@@ -615,7 +623,10 @@ func certificateECDSAKeyMatchesRecord(cert *x509.Certificate, curve elliptic.Cur
 	var err error
 	switch key.KeyEncoding {
 	case sec1Encoding:
-		encoded = elliptic.Marshal(curve, pk.X, pk.Y)
+		encoded, err = pk.Bytes()
+		if err != nil {
+			return false
+		}
 	case spkiEncoding:
 		encoded, err = x509.MarshalPKIXPublicKey(pk)
 		if err != nil {

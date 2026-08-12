@@ -648,10 +648,14 @@ func newSigner() (signer, error) {
 	if err != nil {
 		return signer{}, err
 	}
+	encodedPublicKey, err := privateKey.PublicKey.Bytes()
+	if err != nil {
+		return signer{}, err
+	}
 	publicKey := protocol.PublicKeyRecord{
 		SignatureScheme: registry.SigECDSAP256SHA384DER,
 		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
-		PublicKey:       elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y),
+		PublicKey:       encodedPublicKey,
 	}
 	keyID, err := releaseSigningKeyID(publicKey)
 	if err != nil {

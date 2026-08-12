@@ -210,6 +210,7 @@ func NewFirstHopHTTPServer(address string, handler *FirstHopHandler, tlsConfig *
 	if tlsConfig.Time != nil {
 		return nil, fmt.Errorf("server: first-hop custom TLS time is forbidden")
 	}
+	//lint:ignore SA1019 Reject the deprecated map so it cannot bypass owned certificate selection.
 	if tlsConfig.NameToCertificate != nil {
 		return nil, fmt.Errorf("server: first-hop deprecated certificate map is forbidden")
 	}
@@ -237,7 +238,6 @@ func NewFirstHopHTTPServer(address string, handler *FirstHopHandler, tlsConfig *
 	}
 	ownedTLS := tlsConfig.Clone()
 	ownedTLS.Certificates = ownedCertificates
-	ownedTLS.NameToCertificate = nil
 	ownedTLS.GetCertificate = nil
 	ownedTLS.GetClientCertificate = nil
 	ownedTLS.GetConfigForClient = nil

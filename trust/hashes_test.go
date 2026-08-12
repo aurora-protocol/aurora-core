@@ -90,7 +90,7 @@ func TestVerifyDirectoryConsensusSignaturesAcceptsValidECDSAAuthority(t *testing
 		PublicKey: protocol.PublicKeyRecord{
 			SignatureScheme: entry.SignatureScheme,
 			KeyEncoding:     entry.KeyEncoding,
-			PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+			PublicKey:       mustECDSAPublicKeyBytes(t, &priv.PublicKey),
 		},
 		ValidFromUnix:  10,
 		ValidUntilUnix: 30,
@@ -133,7 +133,7 @@ func TestVerifyDirectoryConsensusSignaturesRequiresDistinctAuthoritiesForThresho
 		PublicKey: protocol.PublicKeyRecord{
 			SignatureScheme: entry.SignatureScheme,
 			KeyEncoding:     entry.KeyEncoding,
-			PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+			PublicKey:       mustECDSAPublicKeyBytes(t, &priv.PublicKey),
 		},
 		ValidFromUnix:  10,
 		ValidUntilUnix: 30,
@@ -172,7 +172,7 @@ func TestVerifyStrictDirectoryConsensusSignaturesRequiresDistinctMLDSAQuorum(t *
 	c.AuthoritySignatures[0].Signature = signDirectoryEntry(t, c, classicalEntry, classicalPriv)
 	c.AuthoritySignatures[1].Signature = signDirectoryEntryMLDSA65(t, c, pqEntry, pqPrivate)
 	keys := []protocol.AuthorityKeyRecord{
-		authorityKeyForECDSA(classicalEntry.AuthorityID, classicalEntry.AuthorityKeyID, classicalPriv, registry.AuthorityActive, registry.UsageMaySignDirectoryConsensus),
+		authorityKeyForECDSA(t, classicalEntry.AuthorityID, classicalEntry.AuthorityKeyID, classicalPriv, registry.AuthorityActive, registry.UsageMaySignDirectoryConsensus),
 		authorityKeyForMLDSA65(pqEntry.AuthorityID, pqEntry.AuthorityKeyID, pqPublic, registry.AuthorityActive, registry.UsageMaySignDirectoryConsensus),
 	}
 
@@ -215,8 +215,8 @@ func TestValidateAuthorityKeyRotationRequiresOverlapUnlessPinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldKey := authorityKeyForECDSA(rb(0xa0, 16), rb(0x01, 16), oldPriv, registry.AuthorityActive, registry.UsageMaySignDirectoryConsensus|registry.UsageMayRotateDirectoryAuthority)
-	newKey := authorityKeyForECDSA(rb(0xa1, 16), rb(0x02, 16), newPriv, registry.AuthorityActive, registry.UsageMaySignDirectoryConsensus|registry.UsageMayRotateDirectoryAuthority)
+	oldKey := authorityKeyForECDSA(t, rb(0xa0, 16), rb(0x01, 16), oldPriv, registry.AuthorityActive, registry.UsageMaySignDirectoryConsensus|registry.UsageMayRotateDirectoryAuthority)
+	newKey := authorityKeyForECDSA(t, rb(0xa1, 16), rb(0x02, 16), newPriv, registry.AuthorityActive, registry.UsageMaySignDirectoryConsensus|registry.UsageMayRotateDirectoryAuthority)
 
 	next := directoryConsensusForSignatureTest(protocol.SignatureEntry{
 		AuthorityID:     oldKey.AuthorityID,
@@ -296,20 +296,30 @@ func TestRelayDescriptorHashIgnoresSignatureBytes(t *testing.T) {
 	}
 }
 
-func authorityKeyForECDSA(authorityID, keyID []byte, priv *ecdsa.PrivateKey, status uint8, usage uint32) protocol.AuthorityKeyRecord {
+func authorityKeyForECDSA(t testing.TB, authorityID, keyID []byte, priv *ecdsa.PrivateKey, status uint8, usage uint32) protocol.AuthorityKeyRecord {
+	t.Helper()
 	return protocol.AuthorityKeyRecord{
 		AuthorityID:    authorityID,
 		AuthorityKeyID: keyID,
 		PublicKey: protocol.PublicKeyRecord{
 			SignatureScheme: registry.SigECDSAP256SHA384DER,
 			KeyEncoding:     registry.KeyP256SEC1Uncompressed,
-			PublicKey:       elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y),
+			PublicKey:       mustECDSAPublicKeyBytes(t, &priv.PublicKey),
 		},
 		ValidFromUnix:  10,
 		ValidUntilUnix: 30,
 		KeyStatus:      status,
 		UsageFlags:     usage,
 	}
+}
+
+func mustECDSAPublicKeyBytes(t testing.TB, key *ecdsa.PublicKey) []byte {
+	t.Helper()
+	encoded, err := key.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func authorityKeyForMLDSA65(authorityID, keyID []byte, publicKey *mldsa65.PublicKey, status uint8, usage uint32) protocol.AuthorityKeyRecord {

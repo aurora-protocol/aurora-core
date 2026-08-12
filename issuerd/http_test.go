@@ -110,11 +110,11 @@ func TestHTTPDaemonPublishesMetadataIssuesVerifiesAndSpends(t *testing.T) {
 		t.Fatalf("voprf response = %d %s", voprfResponse.Code, voprfResponse.Body.String())
 	}
 
-	spendResponse := serveHTTP(t, handler, http.MethodPost, "/token/spend", mustJSON(t, SpendRequest{AdmissionProof: issued.AdmissionProof}))
+	spendResponse := serveHTTP(t, handler, http.MethodPost, "/token/spend", mustJSON(t, SpendRequest(issued)))
 	if spendResponse.Code != http.StatusOK || !strings.Contains(spendResponse.Body.String(), `"spent":true`) {
 		t.Fatalf("spend response = %d %s", spendResponse.Code, spendResponse.Body.String())
 	}
-	duplicate := serveHTTP(t, handler, http.MethodPost, "/token/spend", mustJSON(t, SpendRequest{AdmissionProof: issued.AdmissionProof}))
+	duplicate := serveHTTP(t, handler, http.MethodPost, "/token/spend", mustJSON(t, SpendRequest(issued)))
 	if duplicate.Code != http.StatusConflict {
 		t.Fatalf("duplicate spend response = %d %s", duplicate.Code, duplicate.Body.String())
 	}
@@ -319,7 +319,7 @@ func startVerifierHTTPTestServer(t *testing.T, service *Service, verifierService
 		service.AuthorizeRelayClientKey(verifierService.RequestAuthPolicyID, protocol.PublicKeyRecord{
 			SignatureScheme: registry.SigECDSAP256SHA384DER,
 			KeyEncoding:     registry.KeyP256SEC1Uncompressed,
-			PublicKey:       elliptic.Marshal(elliptic.P256(), clientSigner.PublicKey.X, clientSigner.PublicKey.Y),
+			PublicKey:       mustECDSAPublicKeyBytes(t, &clientSigner.PublicKey),
 		})
 	}
 
@@ -350,6 +350,15 @@ func startVerifierHTTPTestServer(t *testing.T, service *Service, verifierService
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}}
 	server.StartTLS()
 	return server, client
+}
+
+func mustECDSAPublicKeyBytes(t testing.TB, key *ecdsa.PublicKey) []byte {
+	t.Helper()
+	encoded, err := key.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func verifierHTTPTestRequest(t *testing.T, service *Service, verifierService protocol.IssuerVerifierServiceRecord) protocol.IssuerVerifierRequest {

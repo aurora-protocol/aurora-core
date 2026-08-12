@@ -129,6 +129,14 @@ func issuerOperationsHarnessProfile(nowUnix uint64) (IssuerOperationsProfile, er
 	if err != nil {
 		return IssuerOperationsProfile{}, err
 	}
+	servicePublicKey, err := serviceSigner.PublicKey.Bytes()
+	if err != nil {
+		return IssuerOperationsProfile{}, err
+	}
+	authorityPublicKey, err := authoritySigner.PublicKey.Bytes()
+	if err != nil {
+		return IssuerOperationsProfile{}, err
+	}
 	voprfKey := []byte("aurora harness voprf token verification key")
 	voprfKeyID := sha256.Sum256(voprfKey)
 	blindRSAKey := []byte("aurora harness blind rsa token verification key")
@@ -182,7 +190,7 @@ func issuerOperationsHarnessProfile(nowUnix uint64) (IssuerOperationsProfile, er
 			ServiceAuthKey: protocol.PublicKeyRecord{
 				SignatureScheme: registry.SigECDSAP256SHA384DER,
 				KeyEncoding:     registry.KeyP256SEC1Uncompressed,
-				PublicKey:       elliptic.Marshal(elliptic.P256(), serviceSigner.PublicKey.X, serviceSigner.PublicKey.Y),
+				PublicKey:       servicePublicKey,
 			},
 			AllowedProofTypes:     []uint64{registry.ProofVOPRFP384SHA384},
 			AllowedRelayBucketIDs: [][]byte{repeatedOpsByte(0x81, 16)},
@@ -211,7 +219,7 @@ func issuerOperationsHarnessProfile(nowUnix uint64) (IssuerOperationsProfile, er
 			PublicKey: protocol.PublicKeyRecord{
 				SignatureScheme: metadata.SignatureScheme,
 				KeyEncoding:     metadata.KeyEncoding,
-				PublicKey:       elliptic.Marshal(elliptic.P256(), authoritySigner.PublicKey.X, authoritySigner.PublicKey.Y),
+				PublicKey:       authorityPublicKey,
 			},
 			ValidFromUnix:  90,
 			ValidUntilUnix: 1100,

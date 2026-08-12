@@ -83,11 +83,11 @@ func verifyMLDSA87(keyEncoding uint64, publicKey, message, signature []byte) err
 func decodeECDSAPublicKey(keyEncoding uint64, curve elliptic.Curve, sec1Encoding, spkiEncoding uint64, encoded []byte) (*ecdsa.PublicKey, error) {
 	switch keyEncoding {
 	case sec1Encoding:
-		x, y := elliptic.Unmarshal(curve, encoded)
-		if x == nil || y == nil {
-			return nil, fmt.Errorf("crypto: invalid ECDSA SEC1 public key")
+		pk, err := ecdsa.ParseUncompressedPublicKey(curve, encoded)
+		if err != nil {
+			return nil, fmt.Errorf("crypto: invalid ECDSA SEC1 public key: %w", err)
 		}
-		return &ecdsa.PublicKey{Curve: curve, X: x, Y: y}, nil
+		return pk, nil
 	case spkiEncoding:
 		parsed, err := x509.ParsePKIXPublicKey(encoded)
 		if err != nil {

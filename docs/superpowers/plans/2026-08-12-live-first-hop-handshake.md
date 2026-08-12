@@ -686,7 +686,10 @@ git commit -m "feat: add fresh http2 bootstrap carrier"
 **Files:**
 - Create: `server/first_hop.go`
 - Create: `server/first_hop_test.go`
+- Create: `server/first_hop_integration_test.go`
+- Modify: `server/cover_origin.go`
 - Modify: `server/server.go`
+- Modify: `server/server_test.go`
 
 **Interfaces:**
 - Consumes: `handshake.RelayDriver`, bounded record codec, and `transport.RunPacketDuplex`.
@@ -711,43 +714,43 @@ type FirstHopOptions struct {
 }
 ```
 
-- [ ] **Step 1: Write failing connection-gate tests**
+- [x] **Step 1: Write failing connection-gate tests**
 
 Construct a real `http.Server` with `ConnContext: handler.ConnContext`, TLS 1.3 only, session tickets disabled, and HTTP/2 only. Assert the exact configured POST as the first request may claim the connection; a prior ordinary request consumes the claim; non-TLS, HTTP/1, resumed, wrong authority/path/method, or a handler without connection context receives byte-identical cover; and a second request after a carrier claim cancels the active carrier before that second request receives cover.
 
 Race 32 concurrent requests on one HTTP/2 connection and assert at most one enters the handshake driver. Repeat under the race detector.
 
-- [ ] **Step 2: Write failing pre-header and post-header behavior tests**
+- [x] **Step 2: Write failing pre-header and post-header behavior tests**
 
 Use a blocking spent-hint cache. Write a valid Prelude0 and assert the client receives no response headers before atomic hint insertion completes. For malformed record prefix/body, malformed Prelude0, bad class/binding/share/hint, duplicate hint, and hint-store error, assert the configured cover status, headers, and body are byte-identical and the failed request body is not forwarded to the cover origin.
 
 After a valid Prelude1 has flushed headers, inject malformed Capsule1, bad ClientFinished, verifier error, replay, or policy failure. Assert no ordinary cover body, no public error text/status change, no session callback, and stream cancellation within the configured one-second test deadline.
 
-- [ ] **Step 3: Run server tests and verify red**
+- [x] **Step 3: Run server tests and verify red**
 
 Run: `GOCACHE=/private/tmp/aurora-first-hop-cache go test ./server -run 'TestFirstHop' -count=1`
 
 Expected: FAIL because the connection gate and handler do not exist.
 
-- [ ] **Step 4: Implement connection-scoped first-request ownership**
+- [x] **Step 4: Implement connection-scoped first-request ownership**
 
-Attach one unexported state object per accepted `net.Conn` through `ConnContext`. At request entry, atomically increment the request serial and install that request's cancel function. Only serial `1` may continue to candidate validation. Any serial greater than `1` atomically extracts and invokes the active carrier cancel before falling through to cover. A first ordinary or invalid candidate permanently consumes serial `1`.
+Attach one unexported state object per accepted `net.Conn` through `ConnContext`. At request entry, obtain the actual HTTP/2 stream identifier from the pinned standard-library response writer and fail closed if the runtime shape is unsupported. Only stream `1` may continue to candidate validation. Any higher stream poisons the claim and atomically extracts and invokes the active carrier cancel before falling through to cover. A first ordinary or invalid candidate permanently consumes stream `1`.
 
 The candidate gate must require `r.TLS != nil`, TLS 1.3, `h2`, no resumption, exact authority/path/method, configured request class/method, and a bounded request body. It must not infer a class from a public header.
 
 `NewFirstHopHTTPServer` clones and validates the TLS config, sets minimum and maximum TLS versions to TLS 1.3, disables session tickets, advertises only `h2`, installs HTTP/2-only `http.Protocols`, installs `handler.ConnContext`, and sets bounded header/idle/write timeouts. It rejects a nil handler, empty address, certificate-free TLS config, or a conflicting protocol/session setting.
 
-- [ ] **Step 5: Implement pre-header bootstrap and cover fallback**
+- [x] **Step 5: Implement pre-header bootstrap and cover fallback**
 
 Read only the first bounded record, strictly decode Prelude0, derive live binding from `*r.TLS` plus `Prelude0.ClientCoverRandom`, and call `RelayDriver.Begin`. Until Begin succeeds, do not mutate response headers. On any failure, close/cancel the bootstrap state and call `serveCoverFailure` with a sanitized body-less request so gateway-owned failed bytes cannot reach an upstream origin.
 
 After Begin succeeds, copy only configured cover response headers, write configured status, write the Prelude1 record, and flush with `http.ResponseController.Flush`. Then read Capsule1, call `Finish`, write/flush Capsule2, and only then start application duplex. After headers, all errors cancel the request, set immediate read/write deadlines through `ResponseController`, close application state, and return without another body write.
 
-- [ ] **Step 6: Hand aligned bodies to the persistent packet pump**
+- [x] **Step 6: Hand aligned bodies to the persistent packet pump**
 
 Wrap `r.Body` as the read closer and the response writer as a write closer whose `Close` sets a write deadline and cancels the request. Invoke `transport.RunPacketDuplex` with the established relay application, configured frame handler, and the same maximum record body. The session context owns the pump, second-request cancel, client disconnect, server shutdown, and callback lifetime.
 
-- [ ] **Step 7: Run server gate and failure verification**
+- [x] **Step 7: Run server gate and failure verification**
 
 Run:
 
@@ -759,10 +762,10 @@ GOCACHE=/private/tmp/aurora-first-hop-cache go test -race ./server -run 'TestFir
 
 Expected: one claim per connection, exact cover fallback before headers, and bounded cancellation after headers.
 
-- [ ] **Step 8: Commit the relay HTTP/2 adapter**
+- [x] **Step 8: Commit the relay HTTP/2 adapter**
 
 ```bash
-git add server/first_hop.go server/first_hop_test.go server/server.go
+git add server/first_hop.go server/first_hop_test.go server/first_hop_integration_test.go server/cover_origin.go server/server.go server/server_test.go
 git commit -m "feat: bind relay handshake to fresh http2"
 ```
 

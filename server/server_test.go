@@ -281,6 +281,27 @@ func TestReverseProxyCoverOriginSanitizesFailedGatewayOwnedBodies(t *testing.T) 
 	}
 }
 
+func TestSanitizedCoverFailureRequestRemovesBodyFramingAndTrailers(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "https://cover.example/gateway", bytes.NewReader([]byte("secret body")))
+	request.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("secret body"))), nil
+	}
+	request.TransferEncoding = []string{"chunked"}
+	request.Trailer = http.Header{"X-Gateway-State": {"secret trailer"}}
+	request.Header.Set("Trailer", "X-Gateway-State")
+	request.Header.Set("Expect", "100-continue")
+
+	sanitized := sanitizedCoverFailureRequest(request)
+	if sanitized.Method != http.MethodGet || sanitized.Body != http.NoBody || sanitized.GetBody != nil || sanitized.ContentLength != 0 || len(sanitized.TransferEncoding) != 0 || len(sanitized.Trailer) != 0 {
+		t.Fatalf("failure request retained body framing: %+v", sanitized)
+	}
+	for _, name := range []string{"Content-Type", "Content-Length", "Transfer-Encoding", "Trailer", "Expect"} {
+		if sanitized.Header.Get(name) != "" {
+			t.Fatalf("failure request retained %s", name)
+		}
+	}
+}
+
 func TestDevicePacketExchangerWritesInboundPacketsToDevice(t *testing.T) {
 	device := newScriptedPacketDevice()
 	exchanger, err := NewDevicePacketExchanger(device, DevicePacketExchangerOptions{

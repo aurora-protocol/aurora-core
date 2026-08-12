@@ -55,10 +55,12 @@ func sanitizedCoverFailureRequest(r *http.Request) *http.Request {
 	cloned.GetBody = nil
 	cloned.ContentLength = 0
 	cloned.TransferEncoding = nil
+	cloned.Trailer = nil
 	cloned.Header = cloned.Header.Clone()
 	cloned.Header.Del("Content-Type")
 	cloned.Header.Del("Content-Length")
 	cloned.Header.Del("Transfer-Encoding")
+	cloned.Header.Del("Trailer")
 	cloned.Header.Del("Expect")
 	return cloned
 }

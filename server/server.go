@@ -244,11 +244,12 @@ func serveCoverFailure(w http.ResponseWriter, r *http.Request, origin relay.Orig
 		serveCoverOrigin(w, origin)
 		return
 	}
+	sanitized := sanitizedCoverFailureRequest(r)
 	if failureOrigin, ok := coverOrigin.(CoverOrigin); ok {
-		failureOrigin.ServeFailureHTTP(w, r)
+		failureOrigin.ServeFailureHTTP(w, sanitized)
 		return
 	}
-	coverOrigin.ServeHTTP(w, sanitizedCoverFailureRequest(r))
+	coverOrigin.ServeHTTP(w, sanitized)
 }
 
 func isCarrierRequest(r *http.Request) bool {

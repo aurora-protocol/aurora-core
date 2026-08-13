@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -349,6 +350,82 @@ func TestDevicePacketExchangerDrainsOutboundDevicePackets(t *testing.T) {
 	}
 }
 
+func TestDevicePacketExchangerCloseUnblocksWrite(t *testing.T) {
+	device := newBlockingPacketDevice()
+	exchanger, err := NewDevicePacketExchanger(device, DevicePacketExchangerOptions{
+		MTU:          1280,
+		QueuePackets: 4,
+	})
+	if err != nil {
+		t.Fatalf("NewDevicePacketExchanger failed: %v", err)
+	}
+
+	writeResult := make(chan error, 1)
+	go func() {
+		_, err := exchanger.ExchangePacketBatch(PacketBatch{
+			Packets:         [][]byte{{0x45, 0x00, 0x00, 0x14}},
+			ProtocolNumbers: []uint16{2},
+		})
+		writeResult <- err
+	}()
+
+	select {
+	case <-device.writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for packet-device write")
+	}
+
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- exchanger.Close()
+	}()
+
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		device.ReleaseWrite()
+		<-writeResult
+		<-closeResult
+		t.Fatal("Close did not interrupt the blocked packet-device write")
+	}
+
+	select {
+	case err := <-writeResult:
+		if err == nil {
+			t.Fatal("ExchangePacketBatch succeeded after its write was interrupted")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ExchangePacketBatch did not return after device close")
+	}
+}
+
+func TestDevicePacketExchangerCloseReturnsSameDeviceError(t *testing.T) {
+	expected := errors.New("device close failed")
+	device := &closeErrorPacketDevice{
+		scriptedPacketDevice: newScriptedPacketDevice(),
+		err:                  expected,
+	}
+	exchanger, err := NewDevicePacketExchanger(device, DevicePacketExchangerOptions{
+		MTU:          1280,
+		QueuePackets: 4,
+	})
+	if err != nil {
+		t.Fatalf("NewDevicePacketExchanger failed: %v", err)
+	}
+
+	results := make(chan error, 2)
+	go func() { results <- exchanger.Close() }()
+	go func() { results <- exchanger.Close() }()
+	for range 2 {
+		if err := <-results; !errors.Is(err, expected) {
+			t.Fatalf("Close error = %v, want %v", err, expected)
+		}
+	}
+}
+
 func TestRunReadinessHarnessCoversLinuxServerSurface(t *testing.T) {
 	report, err := RunReadinessHarness(200)
 	if err != nil {
@@ -507,4 +584,58 @@ func (d *scriptedPacketDevice) Writes() [][]byte {
 		out[i] = append([]byte(nil), packet...)
 	}
 	return out
+}
+
+type closeErrorPacketDevice struct {
+	*scriptedPacketDevice
+	err error
+}
+
+func (d *closeErrorPacketDevice) Close() error {
+	_ = d.scriptedPacketDevice.Close()
+	return d.err
+}
+
+type blockingPacketDevice struct {
+	writeStarted chan struct{}
+	releaseWrite chan struct{}
+	closed       chan struct{}
+	closeOnce    sync.Once
+}
+
+func newBlockingPacketDevice() *blockingPacketDevice {
+	return &blockingPacketDevice{
+		writeStarted: make(chan struct{}, 1),
+		releaseWrite: make(chan struct{}),
+		closed:       make(chan struct{}),
+	}
+}
+
+func (d *blockingPacketDevice) Read([]byte) (int, error) {
+	<-d.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (d *blockingPacketDevice) Write(p []byte) (int, error) {
+	select {
+	case d.writeStarted <- struct{}{}:
+	default:
+	}
+	select {
+	case <-d.closed:
+		return 0, io.ErrClosedPipe
+	case <-d.releaseWrite:
+		return len(p), nil
+	}
+}
+
+func (d *blockingPacketDevice) Close() error {
+	d.closeOnce.Do(func() {
+		close(d.closed)
+	})
+	return nil
+}
+
+func (d *blockingPacketDevice) ReleaseWrite() {
+	close(d.releaseWrite)
 }

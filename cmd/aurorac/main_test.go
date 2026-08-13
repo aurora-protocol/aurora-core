@@ -37,7 +37,7 @@ func TestProxyRejectsNonLinuxHostBeforeProvisioning(t *testing.T) {
 	restore := setProxyGOOSForTest("darwin")
 	defer restore()
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"proxy", "--provisioning", "/private/provisioning.bin"}, &stdout, &stderr); code != 2 {
+	if code := run([]string{"proxy", "--provisioning", "/private/provisioning.bin", "--wallet-state", "/private/wallet-state.bin"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("non-Linux proxy code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "requires a Linux host") {
@@ -49,7 +49,7 @@ func TestProxyRejectsPublicListenersBeforeProvisioning(t *testing.T) {
 	restore := setProxyGOOSForTest("linux")
 	defer restore()
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"proxy", "--provisioning", "/private/provisioning.bin", "--http-listen", "0.0.0.0:8080"}, &stdout, &stderr); code != 2 {
+	if code := run([]string{"proxy", "--provisioning", "/private/provisioning.bin", "--wallet-state", "/private/wallet-state.bin", "--http-listen", "0.0.0.0:8080"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("public listener proxy code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "loopback") {
@@ -63,11 +63,12 @@ func TestParseProxyConfigValidatesProvisioningSource(t *testing.T) {
 		args []string
 		want bool
 	}{
-		{"single provisioning", []string{"--provisioning", "/private/provisioning.bin"}, true},
+		{"single provisioning", []string{"--provisioning", "/private/provisioning.bin", "--wallet-state", "/private/wallet-state.bin"}, true},
 		{"wallet provisioning", []string{"--provisioning-wallet", "/private/wallet.bin", "--wallet-state", "/private/wallet-state.bin"}, true},
 		{"both sources", []string{"--provisioning", "/private/provisioning.bin", "--provisioning-wallet", "/private/wallet.bin", "--wallet-state", "/private/wallet-state.bin"}, false},
+		{"single missing state", []string{"--provisioning", "/private/provisioning.bin"}, false},
 		{"wallet missing state", []string{"--provisioning-wallet", "/private/wallet.bin"}, false},
-		{"state without wallet", []string{"--provisioning", "/private/provisioning.bin", "--wallet-state", "/private/wallet-state.bin"}, false},
+		{"state without source", []string{"--wallet-state", "/private/wallet-state.bin"}, false},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			_, err := parseProxyConfig(testCase.args, io.Discard)
@@ -82,7 +83,7 @@ func TestTUNRejectsNonLinuxHostBeforeProvisioning(t *testing.T) {
 	restore := setProxyGOOSForTest("darwin")
 	defer restore()
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"tun", "--provisioning", "/private/provisioning.bin"}, &stdout, &stderr); code != 2 {
+	if code := run([]string{"tun", "--provisioning", "/private/provisioning.bin", "--wallet-state", "/private/wallet-state.bin"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("non-Linux tunnel code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "requires a Linux host") {

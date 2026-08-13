@@ -225,8 +225,8 @@ func validateProvisioningSource(provisioningPath, walletPath, statePath string) 
 	if single == wallet {
 		return fmt.Errorf("client: exactly one provisioning source is required")
 	}
-	if wallet != state {
-		return fmt.Errorf("client: wallet provisioning requires a wallet state file")
+	if (single || wallet) != state {
+		return fmt.Errorf("client: provisioning requires a wallet state file")
 	}
 	return nil
 }
@@ -275,17 +275,12 @@ func runProxyAttempt(ctx context.Context, config proxyConfig, stdout io.Writer) 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	encoded, err := readRestrictedProvisioningFile(config.provisioningPath)
+	reservation, err := reserveSingleNativeProvisioning(config.provisioningPath, config.walletStatePath, time.Now().UTC())
 	if err != nil {
 		return err
 	}
-	provisioning, err := client.ParseNativeProvisioning(encoded, time.Now())
-	zeroProxyBytes(encoded)
-	if err != nil {
-		return fmt.Errorf("client: parse provisioning: %w", err)
-	}
-	defer zeroProxyProvisioning(&provisioning)
-	return runProxyWithProvisioning(ctx, config, provisioning, stdout)
+	defer reservation.Zero()
+	return runProxyWithProvisioning(ctx, config, reservation.Provisioning, stdout)
 }
 
 func runProxyWithProvisioningWallet(ctx context.Context, config proxyConfig, stdout io.Writer) error {
@@ -369,17 +364,12 @@ func runTUNAttempt(ctx context.Context, config tunConfig, stdout io.Writer) erro
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	encoded, err := readRestrictedProvisioningFile(config.provisioningPath)
+	reservation, err := reserveSingleNativeProvisioning(config.provisioningPath, config.walletStatePath, time.Now().UTC())
 	if err != nil {
 		return err
 	}
-	provisioning, err := client.ParseNativeProvisioning(encoded, time.Now())
-	zeroProxyBytes(encoded)
-	if err != nil {
-		return fmt.Errorf("client: parse provisioning: %w", err)
-	}
-	defer zeroProxyProvisioning(&provisioning)
-	return runTUNWithProvisioning(ctx, config, provisioning, stdout)
+	defer reservation.Zero()
+	return runTUNWithProvisioning(ctx, config, reservation.Provisioning, stdout)
 }
 
 func runTUNWithProvisioningWallet(ctx context.Context, config tunConfig, stdout io.Writer) error {
@@ -769,6 +759,34 @@ func readRestrictedProvisioningFile(path string) ([]byte, error) {
 
 func readRestrictedProvisioningWalletFile(path string) ([]byte, error) {
 	return readRestrictedOwnerFile(path, client.MaximumNativeProvisioningWalletBytes, "provisioning wallet file")
+}
+
+func reserveSingleNativeProvisioning(provisioningPath, statePath string, now time.Time) (client.NativeProvisioningReservation, error) {
+	encoded, err := readRestrictedProvisioningFile(provisioningPath)
+	if err != nil {
+		return client.NativeProvisioningReservation{}, err
+	}
+	provisioning, err := client.ParseNativeProvisioning(encoded, now)
+	zeroProxyBytes(encoded)
+	if err != nil {
+		return client.NativeProvisioningReservation{}, fmt.Errorf("client: parse provisioning: %w", err)
+	}
+	walletEncoded, err := client.EncodeNativeProvisioningWallet([]client.NativeProvisioning{provisioning})
+	zeroProxyProvisioning(&provisioning)
+	if err != nil {
+		return client.NativeProvisioningReservation{}, fmt.Errorf("client: encode single provisioning wallet: %w", err)
+	}
+	wallet, err := client.ParseNativeProvisioningWallet(walletEncoded, now)
+	zeroProxyBytes(walletEncoded)
+	if err != nil {
+		return client.NativeProvisioningReservation{}, fmt.Errorf("client: load single provisioning wallet: %w", err)
+	}
+	defer wallet.Zero()
+	store, err := newProvisioningWalletStateStore(statePath)
+	if err != nil {
+		return client.NativeProvisioningReservation{}, err
+	}
+	return store.Reserve(wallet, now)
 }
 
 func readRestrictedOwnerFile(path string, maximumBytes int, label string) ([]byte, error) {

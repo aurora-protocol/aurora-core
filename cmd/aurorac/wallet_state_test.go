@@ -202,6 +202,22 @@ type recordingProvisioningWalletSource struct {
 	sawPreviousReservation bool
 }
 
+func FuzzParseProvisioningWalletState(f *testing.F) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	state := newProvisioningWalletState()
+	if err := state.Add(bytes.Repeat([]byte{0x55}, provisioningWalletSpentHintKeyBytes), uint64(now.Add(time.Hour).Unix())); err != nil {
+		f.Fatal(err)
+	}
+	encoded, err := state.Encode()
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(encoded)
+	f.Fuzz(func(t *testing.T, encoded []byte) {
+		_, _ = parseProvisioningWalletState(encoded, now)
+	})
+}
+
 func (source *recordingProvisioningWalletSource) Reserve(alreadyReserved func([]byte) bool, _ time.Time) (client.NativeProvisioningReservation, error) {
 	if source.calls > 0 {
 		source.sawPreviousReservation = alreadyReserved(source.previous)

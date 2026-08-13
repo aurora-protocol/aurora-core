@@ -263,3 +263,20 @@ func nativeProvisioningSpentHintKey(t testing.TB, provisioning NativeProvisionin
 	}
 	return key
 }
+
+func FuzzParseNativeProvisioningWallet(f *testing.F) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	provisioning := validNativeProvisioning(f, now)
+	encoded, err := EncodeNativeProvisioningWallet([]NativeProvisioning{provisioning})
+	zeroNativeProvisioning(&provisioning)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(encoded)
+	f.Fuzz(func(t *testing.T, encoded []byte) {
+		wallet, _ := ParseNativeProvisioningWallet(encoded, now)
+		if wallet != nil {
+			wallet.Zero()
+		}
+	})
+}

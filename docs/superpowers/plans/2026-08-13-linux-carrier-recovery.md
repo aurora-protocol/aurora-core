@@ -45,7 +45,7 @@
 
 - [x] Make `proxy` and `tun` load the wallet and reserve a new entry for each session attempt.
 - [x] Rebuild all session-bound resources after a classified carrier failure only when another entry exists.
-- [x] Keep a one-entry legacy provisioning invocation terminal after its session ends; it must never perform automatic recovery.
+- [x] Keep a one-entry provisioning invocation durable and terminal after its session ends; it must never perform automatic recovery.
 - [ ] Add real first-hop integration coverage proving that the failed and recovered sessions use different access hints and distinct application state.
 
 ## Task 5: Verify And Review

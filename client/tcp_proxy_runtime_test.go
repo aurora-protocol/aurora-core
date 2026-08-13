@@ -265,12 +265,13 @@ func TestTCPProxyRuntimeEnforcesFlowLimit(t *testing.T) {
 	secondResult := make(chan error, 1)
 	go func() { secondResult <- runtime.serveConnection(context.Background(), secondServer) }()
 	if _, writeErr := io.WriteString(secondClient, "CONNECT two.example:443 HTTP/1.1\r\nHost: two.example:443\r\n\r\n"); writeErr == nil {
-		if err := secondClient.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		if err := secondClient.SetReadDeadline(time.Now().Add(time.Second)); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, net.ErrClosed) {
 			t.Fatal(err)
-		}
-		buffer := make([]byte, 1)
-		if _, err := secondClient.Read(buffer); err == nil {
-			t.Fatal("flow-limited CONNECT unexpectedly returned a response")
+		} else if err == nil {
+			buffer := make([]byte, 1)
+			if _, err := secondClient.Read(buffer); err == nil {
+				t.Fatal("flow-limited CONNECT unexpectedly returned a response")
+			}
 		}
 	} else if !errors.Is(writeErr, io.ErrClosedPipe) {
 		t.Fatal(writeErr)

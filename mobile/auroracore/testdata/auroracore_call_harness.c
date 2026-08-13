@@ -66,6 +66,23 @@ int main(void) {
             return 1;
         }
         uint8_t *input = NULL;
+        if (operation == INT_MAX) {
+            uint8_t sentinel = 0;
+            int output_length = 0;
+            uint8_t *output = AuroraCoreCall(0, &sentinel, INT_MAX, argument, &output_length);
+            if (output_length <= 0 || output == NULL) {
+                AuroraCoreFree(output);
+                return 1;
+            }
+            uint8_t output_header[4];
+            write_u32(output_header, (uint32_t)output_length);
+            if (write_full(output_header, sizeof(output_header)) != 0 || write_full(output, (size_t)output_length) != 0) {
+                AuroraCoreFree(output);
+                return 1;
+            }
+            AuroraCoreFree(output);
+            continue;
+        }
         if (input_length != 0) {
             input = malloc(input_length);
             if (input == NULL || read_full(input, input_length) != 1) {

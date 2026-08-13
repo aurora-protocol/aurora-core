@@ -78,6 +78,7 @@ const (
 	nativeProvisioningReservationRelayBucketBytes  = 16
 	maximumNativeProvisioningReservationKeys       = 64
 	maximumNativeProvisioningReservationInput      = client.MaximumNativeProvisioningWalletBytes + nativeProvisioningReservationSourceLengthBytes + nativeProvisioningReservationCountBytes + maximumNativeProvisioningReservationKeys*nativeProvisioningReservationSpentHintKeyBytes
+	maximumNativeCallInputBytes                    = maximumNativeProvisioningReservationInput
 )
 
 type parsedAdmissionProof struct {
@@ -115,7 +116,7 @@ func AuroraCoreCall(op C.int, in *C.uint8_t, inLen C.int, arg C.uint64_t, outLen
 		return nil
 	}
 	var input []byte
-	if inLen < 0 || (inLen > 0 && in == nil) {
+	if !nativeCallInputLengthValid(int(inLen)) || (inLen > 0 && in == nil) {
 		return cBytes([]byte{statusError}, outLen)
 	}
 	if inLen > 0 {
@@ -130,6 +131,11 @@ func AuroraCoreCall(op C.int, in *C.uint8_t, inLen C.int, arg C.uint64_t, outLen
 	zeroNativeBytes(payload)
 	zeroNativeBytes(result)
 	return output
+}
+
+// nativeCallInputLengthValid bounds the caller-controlled copy before C.GoBytes.
+func nativeCallInputLengthValid(length int) bool {
+	return length >= 0 && length <= maximumNativeCallInputBytes
 }
 
 //export AuroraCoreFree

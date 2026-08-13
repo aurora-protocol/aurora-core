@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"net/netip"
 	"testing"
 	"time"
@@ -324,6 +325,140 @@ func TestPacketAdapterOpensIPv6TCPFlow(t *testing.T) {
 	open := protocol.DecodeFlowOpen(packetAdapterReader(blocks[0].Frames[0].Payload))
 	if open.FlowKind != flow.FlowKindTCPStream || open.LocalBindingMode != flow.LocalBindingTUNPacketFlow || !bytes.Equal(open.TargetHost, target.AsSlice()) {
 		t.Fatalf("unexpected IPv6 transparent TCP FLOW_OPEN: %+v", open)
+	}
+}
+
+func TestPacketAdapterOpensIPv6TCPFlowWithOptionsHeaders(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	source := netip.MustParseAddr("2001:db8::2")
+	target := netip.MustParseAddr("2606:4700:4700::1111")
+	syn, err := buildPacketAdapterTCPPacket(6, source, target, 50000, 443, 100, 0, tcpFlagSYN, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syn = packetAdapterIPv6WithOptionsHeader(t, syn, 60)
+	syn = packetAdapterIPv6WithOptionsHeader(t, syn, 0)
+	syn[42] = 0x1e
+	syn[43] = 2
+	syn[44] = 0xa0
+	syn[45] = 0xb1
+	if err := adapter.Ingress(context.Background(), syn, now); err != nil {
+		t.Fatal(err)
+	}
+	localPackets := adapter.DrainLocalPackets()
+	if len(localPackets) != 1 {
+		t.Fatalf("IPv6 options TCP SYN returned %d local packets", len(localPackets))
+	}
+	local, err := parsePacketAdapterIPPacket(localPackets[0], 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if local.version != 6 || local.tcp.flags != tcpFlagSYN|tcpFlagACK || local.source != target || local.target != source {
+		t.Fatalf("unexpected IPv6 options synthetic SYN-ACK: %+v", local)
+	}
+	encrypted, err := adapter.NextEncryptedPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := relayApplication.HandlePacket(context.Background(), now, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || len(blocks[0].Frames) != 1 {
+		t.Fatalf("IPv6 options TCP SYN did not emit one FLOW_OPEN: %+v", blocks)
+	}
+	open := protocol.DecodeFlowOpen(packetAdapterReader(blocks[0].Frames[0].Payload))
+	if open.FlowKind != flow.FlowKindTCPStream || open.LocalBindingMode != flow.LocalBindingTUNPacketFlow || !bytes.Equal(open.TargetHost, target.AsSlice()) {
+		t.Fatalf("unexpected IPv6 options transparent TCP FLOW_OPEN: %+v", open)
+	}
+}
+
+func TestPacketAdapterOpensIPv6UDPFlowWithDestinationOptions(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, UDPMode: transport.UDPNativeDatagram, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	source := netip.MustParseAddr("2001:db8::2")
+	target := netip.MustParseAddr("2606:4700:4700::1111")
+	packet, err := buildPacketAdapterUDPPacket(6, source, target, 50000, 443, []byte("ping"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet = packetAdapterIPv6WithOptionsHeader(t, packet, 60)
+	if err := adapter.Ingress(context.Background(), packet, now); err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := adapter.NextEncryptedPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := relayApplication.HandlePacket(context.Background(), now, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || len(blocks[0].Frames) != 2 || blocks[0].Frames[0].FrameType != registry.FrameFlowOpen || blocks[0].Frames[1].FrameType != registry.FrameDatagramData {
+		t.Fatalf("IPv6 options UDP packet did not emit FLOW_OPEN and DATAGRAM_DATA: %+v", blocks)
+	}
+	open := protocol.DecodeFlowOpen(packetAdapterReader(blocks[0].Frames[0].Payload))
+	if open.FlowKind != flow.FlowKindUDPAssociation || open.LocalBindingMode != flow.LocalBindingTUNPacketFlow || !bytes.Equal(open.TargetHost, target.AsSlice()) {
+		t.Fatalf("unexpected IPv6 options UDP FLOW_OPEN: %+v", open)
+	}
+}
+
+func TestPacketAdapterRejectsUnsafeIPv6ExtensionsWithoutFlowAllocation(t *testing.T) {
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := netip.MustParseAddr("2001:db8::2")
+	target := netip.MustParseAddr("2606:4700:4700::1111")
+	packet, err := buildPacketAdapterTCPPacket(6, source, target, 50000, 443, 100, 0, tcpFlagSYN, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	malformedLength := packetAdapterIPv6WithOptionsHeader(t, packet, 60)
+	malformedLength[41] = 1
+	unsupportedOption := packetAdapterIPv6WithOptionsHeader(t, packet, 60)
+	unsupportedOption[42] = 0x80
+	routingHeader := packetAdapterIPv6WithOptionsHeader(t, packet, 43)
+	fragmentHeader := packetAdapterIPv6WithFragmentHeader(t, packet)
+	invalidOrder := packetAdapterIPv6WithOptionsHeader(t, packet, 0)
+	invalidOrder = packetAdapterIPv6WithOptionsHeader(t, invalidOrder, 60)
+	tooManyOptions := packetAdapterIPv6WithOptionsHeader(t, packet, 60)
+	tooManyOptions = packetAdapterIPv6WithOptionsHeader(t, tooManyOptions, 60)
+	tooManyOptions = packetAdapterIPv6WithOptionsHeader(t, tooManyOptions, 0)
+	badChecksum := packetAdapterIPv6WithOptionsHeader(t, packet, 60)
+	badChecksum[len(badChecksum)-1] ^= 0xff
+	for name, encoded := range map[string][]byte{
+		"malformed options length":  malformedLength,
+		"unsupported option action": unsupportedOption,
+		"routing header":            routingHeader,
+		"fragment header":           fragmentHeader,
+		"invalid options order":     invalidOrder,
+		"too many options headers":  tooManyOptions,
+		"bad transport checksum":    badChecksum,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := adapter.Ingress(context.Background(), encoded, time.Unix(1_700_000_000, 0)); err == nil {
+				t.Fatal("unsafe IPv6 extension packet was accepted")
+			}
+		})
+	}
+	if adapter.FlowCount() != 0 || len(adapter.DrainLocalPackets()) != 0 {
+		t.Fatal("unsafe IPv6 extension packet allocated local adapter state")
 	}
 }
 
@@ -653,6 +788,34 @@ func packetAdapterUDPv4(t testing.TB, source, target [4]byte, sourcePort, target
 	return packet
 }
 
+func packetAdapterIPv6WithOptionsHeader(t testing.TB, encoded []byte, headerType byte) []byte {
+	t.Helper()
+	if len(encoded) < 40 || encoded[0]>>4 != 6 {
+		t.Fatal("packet adapter test packet is not IPv6")
+	}
+	packet := make([]byte, 0, len(encoded)+8)
+	packet = append(packet, encoded[:40]...)
+	packet[6] = headerType
+	packet = append(packet, encoded[6], 0, 0, 0, 0, 0, 0, 0)
+	packet = append(packet, encoded[40:]...)
+	binary.BigEndian.PutUint16(packet[4:6], uint16(len(packet)-40))
+	return packet
+}
+
+func packetAdapterIPv6WithFragmentHeader(t testing.TB, encoded []byte) []byte {
+	t.Helper()
+	if len(encoded) < 40 || encoded[0]>>4 != 6 {
+		t.Fatal("packet adapter test packet is not IPv6")
+	}
+	packet := make([]byte, 0, len(encoded)+8)
+	packet = append(packet, encoded[:40]...)
+	packet[6] = 44
+	packet = append(packet, encoded[6], 0, 0, 0, 0, 0, 0, 1)
+	packet = append(packet, encoded[40:]...)
+	binary.BigEndian.PutUint16(packet[4:6], uint16(len(packet)-40))
+	return packet
+}
+
 func packetAdapterParseUDPv4(t testing.TB, encoded []byte) packetAdapterUDPPacket {
 	t.Helper()
 	packet, err := parsePacketAdapterIPPacket(encoded, defaultPacketAdapterPacketBytes)
@@ -736,7 +899,16 @@ func FuzzPacketAdapterIngress(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
+	ipv6Seed, err := buildPacketAdapterTCPPacket(6, netip.MustParseAddr("2001:db8::2"), netip.MustParseAddr("2606:4700:4700::1111"), 50000, 443, 100, 0, tcpFlagSYN, nil, 1)
+	if err != nil {
+		f.Fatal(err)
+	}
+	ipv6Seed = packetAdapterIPv6WithOptionsHeader(f, ipv6Seed, 60)
+	malformedIPv6Seed := append([]byte(nil), ipv6Seed...)
+	malformedIPv6Seed[41] = 1
 	f.Add(seed)
+	f.Add(ipv6Seed)
+	f.Add(malformedIPv6Seed)
 	f.Add([]byte{0x45, 0x00, 0x00, 0x14})
 	f.Add(make([]byte, 1501))
 	f.Fuzz(func(t *testing.T, encoded []byte) {

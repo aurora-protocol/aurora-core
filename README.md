@@ -26,7 +26,7 @@ Implemented now:
 - `ops`: operational verifier and directory helper logic.
 - `vectors`: generated structural vector bundle and drift tests.
 - `mobile/auroracore`: C-archive (`buildmode=c-archive`) binding exposing the portable wire, AdmissionProof, and cover-issuance carrier codec to native thin adapters (e.g. the Apple `AuroraCore.xcframework`), so platform adapters never reimplement protocol logic (Section 35.10).
-- `cmd/aurorac`: Linux local proxy process using an owner-only native provisioning file.
+- `cmd/aurorac`: Linux local proxy and TUN client process using an owner-only native provisioning file.
 - `cmd/auroractl`: local vector, config, and capability diagnostics.
 
 Native app or driver repositories should be split out only when they need their own platform build systems.
@@ -68,12 +68,15 @@ GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl p0-p11-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/aurorad harness --readiness-check
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/aurorad serve --listen 0.0.0.0:9443 --authority cover.example:443 --path /assets/upload/42 --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem --cover-origin-url https://cover.example --relay-descriptor /etc/aurora/relay-descriptor.bin --trusted-descriptor-hash /etc/aurora/relay-descriptor.hash --cover-template /etc/aurora/cover-template.bin --template-authority-key /etc/aurora/template-authority-key.bin --request-class 7 --suite 2 --classical-signer-key /etc/aurora/epoch-classical.pem --pq-signer-key /etc/aurora/epoch-pq.bin --access-hints /etc/aurora/access-hints.bin --token-verification-key /etc/aurora/token-verification-key.der --hint-spent-cache /var/lib/aurora/hint-spent.log --token-spent-cache /var/lib/aurora/token-spent.log --bootstrap-cache /var/lib/aurora/bootstrap-replay.log --max-sessions 256
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/aurorac proxy --provisioning /etc/aurora/client-provisioning.bin
+GOCACHE=/private/tmp/aurora-gocache go run ./cmd/aurorac tun --provisioning /etc/aurora/client-provisioning.bin
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl capabilities
 ```
 
 `aurorad harness` is a local diagnostic surface. `aurorad serve` is the Linux production entry point: it requires a verified canonical deployment, both epoch signing keys, bounded access-hint credentials, a validated admission verification key, three independent durable replay caches, TLS, a cover origin, and an explicit concurrent-session limit. Private key and access-hint files must be regular files with owner-only permissions. The daemon rejects harness flags, loopback listen addresses, malformed objects, mismatched epoch keys, and missing production dependencies before binding its socket. Egress defaults are bounded and deny private destination ranges; use `aurorad serve --help` to tune the explicit queue, rate, timeout, and destination-policy limits.
 
-`aurorac proxy` is the Linux local TCP client entry point. It validates and erases the provisioning bundle after use, posts issuer work over non-redirecting HTTPS, and starts loopback-only HTTP CONNECT and SOCKS5 listeners by default. The provisioning file must be a regular owner-only file. Public listeners require `--allow-public-listeners`; TCP proxy traffic is covered in this increment, while local UDP association, local DNS service, and TUN route management remain separate deployment surfaces.
+`aurorac proxy` is the Linux local TCP client entry point. It validates and erases the provisioning bundle after use, posts issuer work over non-redirecting HTTPS, and starts loopback-only HTTP CONNECT and SOCKS5 listeners by default. The provisioning file must be a regular owner-only file. Public listeners require `--allow-public-listeners`; local UDP association and local DNS service remain separate proxy deployment surfaces.
+
+`aurorac tun` is the Linux packet-tunnel entry point. It requires access to the configured TUN device, a standard system `ip` executable, and network-administration permission. It resolves the relay before changing routes, adds exact relay bypass routes, then adds lower-metric IPv4 and IPv6 defaults through the TUN. It refuses a route layout where a safe tunnel precedence cannot be established, and removes only routes and addresses it added before closing the device. The command does not modify resolver configuration; DNS packets captured by the tunnel use the encrypted packet path. Use `aurorac tun --help` to set the TUN device, interface name, MTU, host addresses, or issuer timeout.
 
 Config examples follow Section 28:
 

@@ -100,6 +100,9 @@ func parseTUNConfig(arguments []string, stderr io.Writer) (tunConfig, error) {
 	if strings.TrimSpace(config.provisioningPath) == "" || strings.TrimSpace(config.provisioningPath) != config.provisioningPath {
 		return tunConfig{}, fmt.Errorf("client: provisioning file is required")
 	}
+	if !validLinuxInterfaceName(config.interfaceName) {
+		return tunConfig{}, fmt.Errorf("client: Linux tunnel interface name is invalid")
+	}
 	if config.issuerTimeout <= 0 || config.issuerTimeout > 5*time.Minute {
 		return tunConfig{}, fmt.Errorf("client: issuer timeout is invalid")
 	}
@@ -170,7 +173,7 @@ func validateLinuxTUNNetworkConfig(config linuxTUNNetworkConfig) error {
 }
 
 func validLinuxInterfaceName(name string) bool {
-	if name == "" || strings.TrimSpace(name) != name || len(name) >= 16 || strings.ContainsAny(name, "/\x00") {
+	if name == "" || strings.TrimSpace(name) != name || len(name) >= 16 || strings.ContainsAny(name, "/%\x00") {
 		return false
 	}
 	return true

@@ -196,9 +196,9 @@ git commit -m "feat: configure Linux tunnel routes safely"
 **Interfaces:**
 - Produces `aurorac tun --provisioning PATH [--tun-device PATH] [--tun-iface NAME] [--tun-mtu BYTES] [--ipv4-address ADDR/32] [--ipv6-address ADDR/128]`.
 - Produces `func runTUN(context.Context, tunConfig, io.Writer) error`.
-- Produces `func runTUNComponents(context.Context, *handshake.EstablishedSession, *client.PacketTUNRuntime) error`.
+- Produces `func runTUNComponents(context.Context, *handshake.EstablishedSession, *client.PacketTUNRuntime, func() error) error`.
 
-- [ ] **Step 1: Write failing command lifecycle tests**
+- [x] **Step 1: Write failing command lifecycle tests**
 
 ```go
 func TestTUNRejectsNonLinuxBeforeProvisioning(t *testing.T) {
@@ -213,20 +213,20 @@ func TestRunTUNComponentsClosesDeviceAndCarrierOnCancellation(t *testing.T) {
     established, runtime, device := packetTUNComponentsFixture(t)
     ctx, cancel := context.WithCancel(context.Background())
     done := make(chan error, 1)
-    go func() { done <- runTUNComponents(ctx, established, runtime) }()
+    go func() { done <- runTUNComponents(ctx, established, runtime, func() error { return nil }) }()
     cancel()
     requireNoError(t, <-done)
     requireDeviceClosed(t, device)
 }
 ```
 
-- [ ] **Step 2: Run command tests and verify they fail**
+- [x] **Step 2: Run command tests and verify they fail**
 
 Run: `GOCACHE=/private/tmp/aurora-gocache go test ./cmd/aurorac -run 'TUN|Tun' -count=1`
 
 Expected: failure because `tun` is not a recognized command.
 
-- [ ] **Step 3: Compose the provisioned session, device, routes, and duplex**
+- [x] **Step 3: Compose the provisioned session, device, routes, and duplex**
 
 Read the restricted provisioning file and retain only the relay origin required
 for preflight route lookup. Open and complete one provisioned session before
@@ -236,7 +236,7 @@ construct `PacketTUNRuntime`, then run its local pump together with
 `transport.RunPacketDuplex`. On first failure or signal, close the packet
 runtime, established session, and owned routes, preserving terminal errors.
 
-- [ ] **Step 4: Update user-facing command documentation and verify builds**
+- [x] **Step 4: Update user-facing command documentation and verify builds**
 
 Document the Linux host prerequisite, owner-only provisioning file, root or
 network-administration permission requirement, and route-safety failure modes
@@ -250,7 +250,7 @@ Run: `GOCACHE=/private/tmp/aurora-gocache GOOS=darwin GOARCH=arm64 go build ./cm
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add cmd/aurorac/main.go cmd/aurorac/main_test.go README.md

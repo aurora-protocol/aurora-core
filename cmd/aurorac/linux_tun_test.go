@@ -163,10 +163,11 @@ func TestLinuxTUNNetworkRejectsUnsafeRelayRouteData(t *testing.T) {
 
 func TestParseTUNConfigRequiresSafeHostPrefixes(t *testing.T) {
 	for name, arguments := range map[string][]string{
-		"IPv4 subnet":   {"--provisioning", "/private/provisioning.bin", "--ipv4-address", "10.77.0.2/24"},
-		"IPv6 subnet":   {"--provisioning", "/private/provisioning.bin", "--ipv6-address", "fd77::2/64"},
-		"bad interface": {"--provisioning", "/private/provisioning.bin", "--tun-iface", "aurora/0"},
-		"bad MTU":       {"--provisioning", "/private/provisioning.bin", "--tun-mtu", "575"},
+		"IPv4 subnet":       {"--provisioning", "/private/provisioning.bin", "--ipv4-address", "10.77.0.2/24"},
+		"IPv6 subnet":       {"--provisioning", "/private/provisioning.bin", "--ipv6-address", "fd77::2/64"},
+		"bad interface":     {"--provisioning", "/private/provisioning.bin", "--tun-iface", "aurora/0"},
+		"dynamic interface": {"--provisioning", "/private/provisioning.bin", "--tun-iface", "aurora%d"},
+		"bad MTU":           {"--provisioning", "/private/provisioning.bin", "--tun-mtu", "575"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parseTUNConfig(arguments, io.Discard); err == nil {

@@ -20,6 +20,7 @@ import (
 
 	"github.com/aurora-protocol/aurora-core/client"
 	"github.com/aurora-protocol/aurora-core/handshake"
+	"github.com/aurora-protocol/aurora-core/platform"
 	"github.com/aurora-protocol/aurora-core/transport"
 )
 
@@ -34,6 +35,9 @@ var (
 	proxyListen         = net.Listen
 	proxySignalContext  = defaultProxySignalContext
 	newIssuerHTTPClient = defaultIssuerHTTPClient
+	openLinuxClientTUN  = func(config platform.LinuxTUNConfig) (io.ReadWriteCloser, error) {
+		return platform.OpenLinuxTUNDevice(config)
+	}
 )
 
 type proxyConfig struct {
@@ -56,14 +60,16 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: aurorac proxy [options]")
+		fmt.Fprintln(stderr, "usage: aurorac <proxy|tun> [options]")
 		return 2
 	}
 	switch args[0] {
 	case "proxy":
 		return runProxyCommand(args[1:], stdout, stderr)
+	case "tun":
+		return runTUNCommand(args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "aurorac: unknown command %q; use proxy\n", args[0])
+		fmt.Fprintf(stderr, "aurorac: unknown command %q; use proxy or tun\n", args[0])
 		return 2
 	}
 }
@@ -84,6 +90,28 @@ func runProxyCommand(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := proxySignalContext()
 	defer stop()
 	if err := runProxy(ctx, config, stdout); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	return 0
+}
+
+func runTUNCommand(args []string, stdout, stderr io.Writer) int {
+	config, err := parseTUNConfig(args, stderr)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	if proxyGOOS != "linux" {
+		fmt.Fprintln(stderr, "client: tunnel command requires a Linux host")
+		return 2
+	}
+	ctx, stop := proxySignalContext()
+	defer stop()
+	if err := runTUN(ctx, config, stdout); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
@@ -206,6 +234,76 @@ func runProxy(ctx context.Context, config proxyConfig, stdout io.Writer) error {
 
 	fmt.Fprintf(stdout, "aurorac local proxy http=%s socks=%s\n", httpListener.Addr(), socksListener.Addr())
 	return runProxyComponents(ctx, established, runtime, httpListener, socksListener)
+}
+
+func runTUN(ctx context.Context, config tunConfig, stdout io.Writer) error {
+	if ctx == nil {
+		return fmt.Errorf("client: tunnel context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	encoded, err := readRestrictedProvisioningFile(config.provisioningPath)
+	if err != nil {
+		return err
+	}
+	provisioning, err := client.ParseNativeProvisioning(encoded, time.Now())
+	zeroProxyBytes(encoded)
+	if err != nil {
+		return fmt.Errorf("client: parse provisioning: %w", err)
+	}
+	defer zeroProxyProvisioning(&provisioning)
+	platformConfig, err := config.platformTUNConfig()
+	if err != nil {
+		return err
+	}
+	network, err := newLinuxTUNNetworkManager(linuxTUNNetworkConfig{
+		InterfaceName: platformConfig.InterfaceName,
+		MTU:           platformConfig.MTU,
+		IPv4:          config.ipv4,
+		IPv6:          config.ipv6,
+	})
+	if err != nil {
+		return err
+	}
+	relayRoutes, err := network.DiscoverRelayRoutes(ctx, provisioning.RelayURL)
+	if err != nil {
+		return err
+	}
+	provisioned, work, err := client.BeginProvisionedSession(ctx, provisioning, client.ProvisionedSessionOptions{IssuerTimeout: config.issuerTimeout})
+	zeroProxyProvisioning(&provisioning)
+	if err != nil {
+		return fmt.Errorf("client: begin provisioned session: %w", err)
+	}
+	issuerResponse, err := exchangeIssuerWork(ctx, config.issuerTimeout, work)
+	work.Zero()
+	if err != nil {
+		return errors.Join(err, provisioned.Close())
+	}
+	defer zeroProxyBytes(issuerResponse)
+	established, err := provisioned.Complete(ctx, issuerResponse)
+	if err != nil {
+		return errors.Join(err, provisioned.Close())
+	}
+	device, err := openLinuxClientTUN(platformConfig)
+	if err != nil {
+		return errors.Join(fmt.Errorf("client: open Linux tunnel device: %w", err), established.Close(), provisioned.Close())
+	}
+	state, err := network.Configure(ctx, relayRoutes)
+	if err != nil {
+		return errors.Join(err, device.Close(), established.Close(), provisioned.Close())
+	}
+	adapter, err := client.NewPacketAdapter(established.Application, client.PacketAdapterOptions{MaxPacketBytes: platformConfig.MTU})
+	if err != nil {
+		return errors.Join(err, state.Close(), device.Close(), established.Close(), provisioned.Close())
+	}
+	runtime, err := client.NewPacketTUNRuntime(adapter, device, client.PacketTUNRuntimeOptions{ReadBufferBytes: platformConfig.MTU})
+	if err != nil {
+		return errors.Join(err, state.Close(), device.Close(), established.Close(), provisioned.Close())
+	}
+	fmt.Fprintf(stdout, "aurorac tunnel interface=%s\n", platformConfig.InterfaceName)
+	componentErr := runTUNComponents(ctx, established, runtime, state.Close)
+	return errors.Join(componentErr, provisioned.Close())
 }
 
 func exchangeIssuerWork(ctx context.Context, timeout time.Duration, work client.IssuerWork) ([]byte, error) {
@@ -334,6 +432,56 @@ func runProxyComponents(ctx context.Context, established *handshake.EstablishedS
 		return errors.Join(fmt.Errorf("client: %s: %w", terminal.name, terminal.err), closeErr)
 	}
 	return fmt.Errorf("client: %s: %w", terminal.name, terminal.err)
+}
+
+func runTUNComponents(ctx context.Context, established *handshake.EstablishedSession, runtime *client.PacketTUNRuntime, beforeDeviceClose func() error) error {
+	if ctx == nil || established == nil || established.Application == nil || established.ReadCarrier == nil || established.WriteCarrier == nil || runtime == nil {
+		return fmt.Errorf("client: tunnel components are incomplete")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	componentContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	results := make(chan proxyComponentResult, 2)
+	go func() {
+		results <- proxyComponentResult{name: "Linux tunnel device", err: runtime.Serve(componentContext)}
+	}()
+	go func() {
+		results <- proxyComponentResult{
+			name: "encrypted carrier",
+			err:  transport.RunPacketDuplex(componentContext, established.ReadCarrier, established.WriteCarrier, established.Application, runtime.HandleFrameBlock, transport.DefaultMaxRecordBodyBytes),
+		}
+	}()
+
+	var terminal proxyComponentResult
+	collected := 0
+	select {
+	case terminal = <-results:
+		collected = 1
+	case <-ctx.Done():
+		terminal = proxyComponentResult{err: ctx.Err()}
+	}
+
+	// Keep the device alive while owned routes are removed, so cleanup never
+	// depends on a tunnel interface that has already disappeared.
+	closeErr := established.Close()
+	if beforeDeviceClose != nil {
+		closeErr = errors.Join(closeErr, beforeDeviceClose())
+	}
+	closeErr = errors.Join(closeErr, runtime.Close())
+	cancel()
+	for collected < 2 {
+		<-results
+		collected++
+	}
+	if ctx.Err() != nil {
+		return closeErr
+	}
+	if terminal.err == nil {
+		return errors.Join(fmt.Errorf("client: %s stopped unexpectedly", terminal.name), closeErr)
+	}
+	return errors.Join(fmt.Errorf("client: %s: %w", terminal.name, terminal.err), closeErr)
 }
 
 func closeProxyListener(listener net.Listener) error {

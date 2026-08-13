@@ -2,6 +2,7 @@ package admission
 
 import (
 	"errors"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +22,45 @@ func TestReplayCacheDurabilityMarkers(t *testing.T) {
 	t.Cleanup(func() { _ = cache.Close() })
 	if !cache.Durable() {
 		t.Fatal("file replay cache did not report durable")
+	}
+}
+
+func TestMemoryReplayCacheExpiresRetainedEntry(t *testing.T) {
+	cache := NewMemoryReplayCache()
+	if inserted, err := cache.InsertIfAbsentUntil([]byte("key"), 110, 100); err != nil || !inserted {
+		t.Fatalf("insert retained key: inserted=%t err=%v", inserted, err)
+	}
+	if inserted, err := cache.InsertIfAbsentUntil([]byte("key"), 120, 109); err != nil || inserted {
+		t.Fatalf("duplicate before expiry: inserted=%t err=%v", inserted, err)
+	}
+	if inserted, err := cache.InsertIfAbsentUntil([]byte("key"), 130, 110); err != nil || !inserted {
+		t.Fatalf("expired key was retained: inserted=%t err=%v", inserted, err)
+	}
+}
+
+func TestInsertIfAbsentRetainedFailsClosedWithoutRetentionSupport(t *testing.T) {
+	if _, err := InsertIfAbsentRetained(replayCacheWithoutRetention{}, []byte("key"), 110, 100); err == nil {
+		t.Fatal("cache without retention support was accepted")
+	}
+}
+
+func TestRetentionDeadlineAddsGraceAndRejectsInvalidBase(t *testing.T) {
+	if deadline, err := RetentionDeadline(100); err != nil || deadline != 700 {
+		t.Fatalf("retention deadline = %d, %v; want 700, nil", deadline, err)
+	}
+	for _, base := range []uint64{0, math.MaxUint64 - 599} {
+		if _, err := RetentionDeadline(base); err == nil {
+			t.Fatalf("invalid retention base %d was accepted", base)
+		}
+	}
+}
+
+func TestMaximumRetentionDeadlineUsesLatestAuthenticatedTime(t *testing.T) {
+	if deadline, err := MaximumRetentionDeadline(200, 300, 250); err != nil || deadline != 900 {
+		t.Fatalf("maximum retention deadline = %d, %v; want 900, nil", deadline, err)
+	}
+	if _, err := MaximumRetentionDeadline(200, 0); err == nil {
+		t.Fatal("zero authenticated retention time was accepted")
 	}
 }
 
@@ -175,6 +215,12 @@ func TestVerifyAndSpendReplayRequiresReplayCaches(t *testing.T) {
 type failingReplayCache struct {
 	err error
 }
+
+type replayCacheWithoutRetention struct{}
+
+func (replayCacheWithoutRetention) InsertIfAbsent([]byte) (bool, error) { return true, nil }
+
+func (replayCacheWithoutRetention) Has([]byte) bool { return false }
 
 func (c failingReplayCache) InsertIfAbsent([]byte) (bool, error) {
 	return false, c.err

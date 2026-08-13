@@ -414,6 +414,7 @@ func loadPQTranscriptSigner(path string) (handshake.TranscriptSigner, error) {
 	if err := private.UnmarshalBinary(encoded); err != nil {
 		return nil, fmt.Errorf("server: parse PQ signer key: %w", err)
 	}
+	defer zeroMLDSA65PrivateKey(private)
 	return handshake.NewMLDSA65TranscriptSigner(private)
 }
 
@@ -618,6 +619,12 @@ func serveProduction(ctx context.Context, service *server.ProductionFirstHopServ
 func zeroProductionBytes(bytes []byte) {
 	for index := range bytes {
 		bytes[index] = 0
+	}
+}
+
+func zeroMLDSA65PrivateKey(private *mldsa65.PrivateKey) {
+	if private != nil {
+		*private = mldsa65.PrivateKey{}
 	}
 }
 

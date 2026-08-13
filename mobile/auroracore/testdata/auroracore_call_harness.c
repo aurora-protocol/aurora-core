@@ -71,16 +71,16 @@ int main(void) {
             int output_length = 0;
             uint8_t *output = AuroraCoreCall(0, &sentinel, INT_MAX, argument, &output_length);
             if (output_length <= 0 || output == NULL) {
-                AuroraCoreFree(output);
+                AuroraCoreZeroFree(output, output_length);
                 return 1;
             }
             uint8_t output_header[4];
             write_u32(output_header, (uint32_t)output_length);
             if (write_full(output_header, sizeof(output_header)) != 0 || write_full(output, (size_t)output_length) != 0) {
-                AuroraCoreFree(output);
+                AuroraCoreZeroFree(output, output_length);
                 return 1;
             }
-            AuroraCoreFree(output);
+            AuroraCoreZeroFree(output, output_length);
             continue;
         }
         if (input_length != 0) {
@@ -94,15 +94,15 @@ int main(void) {
         uint8_t *output = AuroraCoreCall((int)operation, input, (int)input_length, argument, &output_length);
         free(input);
         if (output_length <= 0 || output == NULL) {
-            AuroraCoreFree(output);
+            AuroraCoreZeroFree(output, output_length);
             return 1;
         }
         uint8_t output_header[4];
         write_u32(output_header, (uint32_t)output_length);
         if (write_full(output_header, sizeof(output_header)) != 0 || write_full(output, (size_t)output_length) != 0) {
-            AuroraCoreFree(output);
+            AuroraCoreZeroFree(output, output_length);
             return 1;
         }
-        AuroraCoreFree(output);
+        AuroraCoreZeroFree(output, output_length);
     }
 }

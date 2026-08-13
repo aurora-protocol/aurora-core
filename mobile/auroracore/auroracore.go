@@ -16,6 +16,8 @@ package main
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+void aurora_core_secure_zero(void *p, size_t length);
 */
 import "C"
 
@@ -107,7 +109,7 @@ type nativeLocalPacketsJSON struct {
 // AuroraCoreCall dispatches a single portable-core operation. in/inLen is the
 // input buffer; arg carries a scalar argument (e.g. token expiry). The returned
 // buffer is malloc'd and owned by the caller, who MUST release it with
-// AuroraCoreFree. Its first byte is a status; the remaining bytes are the
+// AuroraCoreZeroFree. Its first byte is a status; the remaining bytes are the
 // payload.
 //
 //export AuroraCoreCall
@@ -138,11 +140,28 @@ func nativeCallInputLengthValid(length int) bool {
 	return length >= 0 && length <= maximumNativeCallInputBytes
 }
 
+// AuroraCoreFree releases an output buffer from AuroraCoreCall.
+//
+// Deprecated: use AuroraCoreZeroFree to scrub the buffer before release.
+//
 //export AuroraCoreFree
 func AuroraCoreFree(p *C.uint8_t) {
 	if p != nil {
 		C.free(unsafe.Pointer(p))
 	}
+}
+
+// AuroraCoreZeroFree scrubs and releases an output buffer from AuroraCoreCall.
+//
+//export AuroraCoreZeroFree
+func AuroraCoreZeroFree(p *C.uint8_t, length C.int) {
+	if p == nil {
+		return
+	}
+	if length > 0 {
+		C.aurora_core_secure_zero(unsafe.Pointer(p), C.size_t(length))
+	}
+	C.free(unsafe.Pointer(p))
 }
 
 func cBytes(b []byte, outLen *C.int) *C.uint8_t {

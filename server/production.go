@@ -104,13 +104,26 @@ func (s *ProductionFirstHopServer) Serve(listener net.Listener) error {
 
 // Shutdown stops accepting new connections, cancels active first-hop sessions, and closes remaining connections after its deadline.
 func (s *ProductionFirstHopServer) Shutdown(ctx context.Context) error {
-	if s == nil || s.server == nil {
+	if s == nil || s.handler == nil || s.server == nil {
 		return fmt.Errorf("server: production first-hop server is not initialized")
 	}
 	if ctx == nil {
 		return fmt.Errorf("server: production first-hop shutdown context is required")
 	}
-	err := s.server.Shutdown(ctx)
+	s.handler.shutdown()
+	shutdownResult := make(chan error, 1)
+	go func() {
+		shutdownResult <- s.server.Shutdown(ctx)
+	}()
+	if err := s.handler.waitForSessions(ctx); err != nil {
+		closeErr := s.server.Close()
+		shutdownErr := <-shutdownResult
+		if closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+			return errors.Join(err, shutdownErr, closeErr)
+		}
+		return errors.Join(err, shutdownErr)
+	}
+	err := <-shutdownResult
 	if err == nil {
 		return nil
 	}

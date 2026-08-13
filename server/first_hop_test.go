@@ -20,6 +20,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/relay"
 	"github.com/aurora-protocol/aurora-core/transport"
+	"golang.org/x/net/http2"
 )
 
 func TestFirstHopWithholdsHeadersUntilBeginCompletes(t *testing.T) {
@@ -376,6 +377,20 @@ func TestFirstHopMissingConnectionContextUsesSanitizedCover(t *testing.T) {
 	}
 	if beginCalls.Load() != 0 {
 		t.Fatal("request without connection context entered Begin")
+	}
+}
+
+func TestFirstHopMissingConnectionContextForwardsOrdinaryBody(t *testing.T) {
+	recorder := &recordingFirstHopCoverOrigin{}
+	handler := newFirstHopGateTestHandler(t, "cover.example:443", recorder)
+	request := httptest.NewRequest(http.MethodPost, "https://cover.example:443/ordinary", nil)
+	request.Body = &firstHopCloseSensitiveBody{reader: bytes.NewReader([]byte("ordinary request body"))}
+	request.Host = handler.authority
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	method, body := recorder.snapshot()
+	if response.Code != http.StatusTeapot || response.Body.String() != "cover-body" || method != http.MethodPost || string(body) != "ordinary request body" {
+		t.Fatalf("ordinary fallback changed: status=%d response=%q method=%s body=%q", response.Code, response.Body.String(), method, body)
 	}
 }
 
@@ -1152,6 +1167,81 @@ func TestFirstHopHTTPServerOwnsHardenedTLSConfiguration(t *testing.T) {
 	}
 }
 
+func TestFirstHopHTTPServerLimitsConcurrentHTTP2Streams(t *testing.T) {
+	certificateServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	certificate := certificateServer.TLS.Certificates[0]
+	clientTLS := certificateServer.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	certificateServer.Close()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := newFirstHopGateTestHandler(t, listener.Addr().String(), nil)
+	server, err := NewFirstHopHTTPServer(listener.Addr().String(), handler, &tls.Config{Certificates: []tls.Certificate{certificate}})
+	if err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- server.Serve(tls.NewListener(listener, server.TLSConfig)) }()
+	t.Cleanup(func() {
+		_ = server.Close()
+		select {
+		case err := <-serveResult:
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				t.Errorf("first-hop server: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("first-hop server did not stop")
+		}
+	})
+
+	clientTLS.MinVersion = tls.VersionTLS13
+	clientTLS.MaxVersion = tls.VersionTLS13
+	clientTLS.NextProtos = []string{"h2"}
+	clientTLS.InsecureSkipVerify = true //nolint:gosec // The test uses a local self-signed identity.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	connection, err := (&net.Dialer{}).DialContext(ctx, "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsConnection := tls.Client(connection, clientTLS)
+	defer tlsConnection.Close()
+	if err := tlsConnection.HandshakeContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if tlsConnection.ConnectionState().NegotiatedProtocol != "h2" {
+		t.Fatalf("negotiated protocol = %q, want h2", tlsConnection.ConnectionState().NegotiatedProtocol)
+	}
+	if _, err := io.WriteString(tlsConnection, http2.ClientPreface); err != nil {
+		t.Fatal(err)
+	}
+	framer := http2.NewFramer(tlsConnection, tlsConnection)
+	if err := framer.WriteSettings(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tlsConnection.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	defer tlsConnection.SetReadDeadline(time.Time{})
+	frame, err := framer.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, ok := frame.(*http2.SettingsFrame)
+	if !ok {
+		t.Fatalf("first HTTP/2 frame = %T, want SETTINGS", frame)
+	}
+	maximum, ok := settings.Value(http2.SettingMaxConcurrentStreams)
+	if !ok {
+		t.Fatal("HTTP/2 settings omit MAX_CONCURRENT_STREAMS")
+	}
+	if maximum != 1 {
+		t.Fatalf("HTTP/2 MAX_CONCURRENT_STREAMS = %d, want 1", maximum)
+	}
+}
+
 func TestFirstHopHTTPServerServesTLS13H2WithoutResumption(t *testing.T) {
 	certificateServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	certificate := certificateServer.TLS.Certificates[0]
@@ -1200,7 +1290,7 @@ func TestFirstHopHTTPServerServesTLS13H2WithoutResumption(t *testing.T) {
 	}
 }
 
-func TestFirstHopHTTPServerShutdownCancelsActiveCarrier(t *testing.T) {
+func TestFirstHopHandlerShutdownWaitsForActiveCarrier(t *testing.T) {
 	certificateServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	certificate := certificateServer.TLS.Certificates[0]
 	clientTLS := certificateServer.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
@@ -1248,8 +1338,11 @@ func TestFirstHopHTTPServerShutdownCancelsActiveCarrier(t *testing.T) {
 	if _, err := reader.Read(); err != nil {
 		t.Fatalf("read Prelude1: %v", err)
 	}
-	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancelShutdown()
+	if err := handler.shutdownAndWait(shutdownContext); err != nil {
+		t.Fatalf("first-hop handler shutdown: %v", err)
+	}
 	shutdownResult := make(chan error, 1)
 	go func() { shutdownResult <- server.Shutdown(shutdownContext) }()
 	select {
@@ -1257,7 +1350,7 @@ func TestFirstHopHTTPServerShutdownCancelsActiveCarrier(t *testing.T) {
 		if err != nil {
 			t.Fatalf("graceful shutdown did not cancel active carrier: %v", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("graceful shutdown remained blocked on active carrier")
 	}
 	if _, err := reader.Read(); err == nil {
@@ -1538,6 +1631,23 @@ func openFirstHopStreamingRequest(t *testing.T, client *http.Client, target stri
 		t.Fatal("first-hop response headers did not arrive")
 		return nil, nil
 	}
+}
+
+type firstHopCloseSensitiveBody struct {
+	reader *bytes.Reader
+	closed bool
+}
+
+func (b *firstHopCloseSensitiveBody) Read(p []byte) (int, error) {
+	if b.closed {
+		return 0, errors.New("test request body closed")
+	}
+	return b.reader.Read(p)
+}
+
+func (b *firstHopCloseSensitiveBody) Close() error {
+	b.closed = true
+	return nil
 }
 
 type firstHopTestEndpoint struct {

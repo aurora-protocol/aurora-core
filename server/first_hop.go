@@ -21,16 +21,18 @@ import (
 	"github.com/aurora-protocol/aurora-core/relay"
 	"github.com/aurora-protocol/aurora-core/transport"
 	"github.com/aurora-protocol/aurora-core/wire"
+	"golang.org/x/net/http2"
 )
 
 const (
-	defaultFirstHopPostHeaderTimeout = time.Second
-	defaultFirstHopPreHeaderTimeout  = 5 * time.Second
-	defaultFirstHopReadHeaderTimeout = 5 * time.Second
-	defaultFirstHopIdleTimeout       = 2 * time.Minute
-	minimumFirstHopWriteTimeout      = 5 * time.Second
-	maximumFirstHopPostHeaderTimeout = 30 * time.Second
-	maximumFirstHopRecordBodyBytes   = 0xffffff
+	defaultFirstHopPostHeaderTimeout  = time.Second
+	defaultFirstHopPreHeaderTimeout   = 5 * time.Second
+	defaultFirstHopReadHeaderTimeout  = 5 * time.Second
+	defaultFirstHopIdleTimeout        = 2 * time.Minute
+	minimumFirstHopWriteTimeout       = 5 * time.Second
+	maximumFirstHopPostHeaderTimeout  = 30 * time.Second
+	maximumFirstHopRecordBodyBytes    = 0xffffff
+	firstHopHTTP2MaxConcurrentStreams = 1
 )
 
 // FirstHopOptions defines one authenticated HTTP/2 gateway-owned request slot.
@@ -132,6 +134,7 @@ type FirstHopHandler struct {
 	sessionAdmission   func(context.Context) (func(), error)
 	sessionMu          sync.Mutex
 	sessions           map[uint64]context.CancelFunc
+	sessionWG          sync.WaitGroup
 	nextSessionID      uint64
 	shuttingDown       bool
 }
@@ -346,6 +349,10 @@ func NewFirstHopHTTPServer(address string, handler *FirstHopHandler, tlsConfig *
 		Protocols:         protocols,
 	}
 	server.RegisterOnShutdown(handler.shutdown)
+	if err := http2.ConfigureServer(server, &http2.Server{MaxConcurrentStreams: firstHopHTTP2MaxConcurrentStreams}); err != nil {
+		return nil, fmt.Errorf("server: configure first-hop HTTP/2 limits: %w", err)
+	}
+	server.TLSConfig.NextProtos = []string{"h2"}
 	return server, nil
 }
 
@@ -392,22 +399,29 @@ func (h *FirstHopHandler) ServeHTTP(w http.ResponseWriter, request *http.Request
 	if h == nil || request == nil {
 		return
 	}
+	if request.Body == nil {
+		request.Body = http.NoBody
+	}
+	sessionContext, stopSession := context.WithCancel(request.Context())
+	cancelSession := func() {
+		_ = request.Body.Close()
+		stopSession()
+	}
 	state, hasConnectionState := request.Context().Value(firstHopConnectionContextKey{}).(*firstHopConnectionState)
-	sessionContext, cancel := context.WithCancel(request.Context())
 	if !hasConnectionState {
-		cancel()
+		stopSession()
 		h.serveUnclaimedCover(w, request)
 		return
 	}
 	streamID, hasStreamID := firstHopHTTP2StreamID(w)
 	if !hasStreamID {
-		cancel()
+		stopSession()
 		h.serveUnclaimedCover(w, request)
 		return
 	}
-	claimed, priorCancel := state.enterStream(streamID, cancel)
+	claimed, priorCancel := state.enterStream(streamID, cancelSession)
 	if !claimed {
-		cancel()
+		stopSession()
 		if priorCancel != nil {
 			priorCancel()
 		}
@@ -415,10 +429,7 @@ func (h *FirstHopHandler) ServeHTTP(w http.ResponseWriter, request *http.Request
 		return
 	}
 	defer state.clearActive()
-	defer cancel()
-	if request.Body == nil {
-		request.Body = http.NoBody
-	}
+	defer stopSession()
 	defer request.Body.Close()
 	if !h.isCandidate(request) {
 		if h.isGatewayTarget(request) {
@@ -436,13 +447,13 @@ func (h *FirstHopHandler) ServeHTTP(w http.ResponseWriter, request *http.Request
 		}
 		defer release()
 	}
-	sessionID, registered := h.registerSession(cancel)
+	sessionID, registered := h.registerSession(cancelSession)
 	if !registered {
 		h.servePreHeaderFailure(w, request)
 		return
 	}
 	defer h.unregisterSession(sessionID)
-	if err := h.serveCandidate(sessionContext, cancel, w, request); err != nil {
+	if err := h.serveCandidate(sessionContext, cancelSession, w, request); err != nil {
 		return
 	}
 }
@@ -456,6 +467,7 @@ func (h *FirstHopHandler) registerSession(cancel context.CancelFunc) (uint64, bo
 	h.nextSessionID++
 	sessionID := h.nextSessionID
 	h.sessions[sessionID] = cancel
+	h.sessionWG.Add(1)
 	return sessionID, true
 }
 
@@ -463,6 +475,7 @@ func (h *FirstHopHandler) unregisterSession(sessionID uint64) {
 	h.sessionMu.Lock()
 	delete(h.sessions, sessionID)
 	h.sessionMu.Unlock()
+	h.sessionWG.Done()
 }
 
 func (h *FirstHopHandler) shutdown() {
@@ -479,12 +492,38 @@ func (h *FirstHopHandler) shutdown() {
 	}
 }
 
+func (h *FirstHopHandler) shutdownAndWait(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("server: first-hop shutdown context is required")
+	}
+	h.shutdown()
+	return h.waitForSessions(ctx)
+}
+
+func (h *FirstHopHandler) waitForSessions(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("server: first-hop shutdown context is required")
+	}
+	done := make(chan struct{})
+	go func() {
+		h.sessionWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (h *FirstHopHandler) serveCandidate(ctx context.Context, cancel context.CancelFunc, w http.ResponseWriter, request *http.Request) error {
 	controller := http.NewResponseController(w)
 	var headersCommitted atomic.Bool
 	cancellationDeadlineDone := make(chan struct{})
 	stopCancellationDeadline := context.AfterFunc(ctx, func() {
 		defer close(cancellationDeadlineDone)
+		_ = request.Body.Close()
 		now := time.Now()
 		_ = controller.SetReadDeadline(now)
 		if headersCommitted.Load() {
@@ -800,7 +839,7 @@ func firstHopHTTP2StreamID(writer http.ResponseWriter) (streamID uint32, ok bool
 		return 0, false
 	}
 	value = value.Elem()
-	if value.Kind() != reflect.Struct || value.Type().PkgPath() != "net/http" || value.Type().Name() != "http2responseWriter" {
+	if value.Kind() != reflect.Struct || !firstHopHTTP2ResponseWriterType(value.Type().PkgPath(), value.Type().Name()) {
 		return 0, false
 	}
 	state := value.FieldByName("rws")
@@ -817,6 +856,11 @@ func firstHopHTTP2StreamID(writer http.ResponseWriter) (streamID uint32, ok bool
 	}
 	streamID = uint32(id.Uint())
 	return streamID, streamID != 0
+}
+
+func firstHopHTTP2ResponseWriterType(packagePath, name string) bool {
+	return (packagePath == "net/http" && name == "http2responseWriter") ||
+		(packagePath == "golang.org/x/net/http2" && name == "responseWriter")
 }
 
 type firstHopResponseWriteCloser struct {

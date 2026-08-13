@@ -234,6 +234,48 @@ func TestNativeProvisioningWalletFiltersExpiredEntriesAndReportsRefillNeed(t *te
 	zeroNativeProvisioning(&malformedExpired)
 }
 
+func TestReserveNativeProvisioningSupportsSingleAndWalletSources(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	first := validNativeProvisioning(t, now)
+	second := nativeProvisioningWithDistinctHint(t, first, 0x42)
+	firstEncoded, err := EncodeNativeProvisioning(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeProvisioningBytes(firstEncoded)
+	firstReservation, err := ReserveNativeProvisioning(firstEncoded, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstReservation.Zero()
+	if _, err := ReserveNativeProvisioning(firstEncoded, func(key []byte) bool {
+		return bytes.Equal(key, firstReservation.SpentHintKey)
+	}, now); !errors.Is(err, ErrNoUsableNativeProvisioning) {
+		t.Fatalf("single provisioning reuse error = %v, want no usable provisioning", err)
+	}
+
+	walletEncoded, err := EncodeNativeProvisioningWallet([]NativeProvisioning{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeProvisioningBytes(walletEncoded)
+	walletFirst, err := ReserveNativeProvisioning(walletEncoded, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer walletFirst.Zero()
+	walletSecond, err := ReserveNativeProvisioning(walletEncoded, func(key []byte) bool {
+		return bytes.Equal(key, walletFirst.SpentHintKey)
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer walletSecond.Zero()
+	if bytes.Equal(walletFirst.SpentHintKey, walletSecond.SpentHintKey) {
+		t.Fatal("wallet source reused the first access hint")
+	}
+}
+
 func nativeProvisioningWithDistinctHint(t testing.TB, input NativeProvisioning, selector byte) NativeProvisioning {
 	t.Helper()
 	output := cloneProvisioningForSession(input)

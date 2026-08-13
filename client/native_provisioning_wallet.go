@@ -176,6 +176,37 @@ func ParseNativeProvisioningWallet(encoded []byte, now time.Time) (*NativeProvis
 	return result, nil
 }
 
+// ReserveNativeProvisioning validates and reserves one entry from either a
+// canonical wallet or a single native provisioning bundle. The returned entry
+// is consumed regardless of subsequent session setup outcome.
+func ReserveNativeProvisioning(encoded []byte, alreadyReserved func([]byte) bool, now time.Time) (NativeProvisioningReservation, error) {
+	wallet, walletErr := ParseNativeProvisioningWallet(encoded, now)
+	if walletErr == nil {
+		defer wallet.Zero()
+		return wallet.Reserve(alreadyReserved, now)
+	}
+	provisioning, err := ParseNativeProvisioning(encoded, now)
+	if err != nil {
+		return NativeProvisioningReservation{}, fmt.Errorf("client: parse native provisioning reservation source: %w", walletErr)
+	}
+	entry, err := nativeProvisioningWalletEntryFor(provisioning, nil)
+	if err != nil {
+		zeroNativeProvisioning(&provisioning)
+		return NativeProvisioningReservation{}, err
+	}
+	defer entry.zero()
+	if alreadyReserved != nil && alreadyReserved(entry.spentHintKey) {
+		zeroNativeProvisioning(&provisioning)
+		return NativeProvisioningReservation{}, ErrNoUsableNativeProvisioning
+	}
+	return NativeProvisioningReservation{
+		SpentHintKey:         append([]byte(nil), entry.spentHintKey...),
+		RelayBucketID:        append([]byte(nil), entry.relayBucketID...),
+		AccessHintExpiryUnix: entry.expiryUnix,
+		Provisioning:         provisioning,
+	}, nil
+}
+
 // Reserve removes and returns one entry that has not already been reserved by
 // persistent caller state. No network activity occurs before this method returns.
 func (w *NativeProvisioningWallet) Reserve(alreadyReserved func([]byte) bool, now time.Time) (NativeProvisioningReservation, error) {

@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -153,6 +154,22 @@ func TestExitSessionCloseIsIdempotentAndTerminal(t *testing.T) {
 	}
 }
 
+func TestExitSessionCloseReturnsSameEgressError(t *testing.T) {
+	expected := errors.New("egress close failed")
+	exitSession, err := NewExitSession(closeErrorExitEgress{err: expected}, &recordingFrameSink{}, ExitSessionOptions{})
+	if err != nil {
+		t.Fatalf("NewExitSession failed: %v", err)
+	}
+	results := make(chan error, 2)
+	go func() { results <- exitSession.Close() }()
+	go func() { results <- exitSession.Close() }()
+	for range 2 {
+		if err := <-results; !errors.Is(err, expected) {
+			t.Fatalf("Close error = %v, want %v", err, expected)
+		}
+	}
+}
+
 func TestExitSessionCloseInterruptsBackpressure(t *testing.T) {
 	sink := &blockingBackpressureSink{called: make(chan struct{}, 1)}
 	exitSession, err := NewExitSession(&recordingEgress{}, sink, ExitSessionOptions{
@@ -197,6 +214,48 @@ func TestExitSessionCloseInterruptsBackpressure(t *testing.T) {
 	}
 }
 
+func TestExitSessionCloseInterruptsBlockedEgress(t *testing.T) {
+	egress := newBlockingExitEgress()
+	exitSession, err := NewExitSession(egress, &recordingFrameSink{}, ExitSessionOptions{})
+	if err != nil {
+		t.Fatalf("NewExitSession failed: %v", err)
+	}
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{
+		flowOpenFrame(t, relayTCPFlowOpen(43, "example.com")),
+	}}
+	handleResult := make(chan error, 1)
+	go func() {
+		handleResult <- exitSession.HandleFrameBlock(context.Background(), block)
+	}()
+	select {
+	case <-egress.started:
+	case <-time.After(time.Second):
+		t.Fatal("egress did not begin handling the flow event")
+	}
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- exitSession.Close() }()
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		egress.Release()
+		<-handleResult
+		<-closeResult
+		t.Fatal("Close did not interrupt blocked egress")
+	}
+	select {
+	case err := <-handleResult:
+		if !errors.Is(err, ErrExitSessionClosed) {
+			t.Fatalf("HandleFrameBlock error = %v, want ErrExitSessionClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("HandleFrameBlock did not return after egress close")
+	}
+}
+
 func TestExitSessionPreservesImmediateResponseOrder(t *testing.T) {
 	closeFrame, err := protocol.NewFlowCloseFrame(protocol.FlowClose{
 		FlowID:    51,
@@ -227,6 +286,55 @@ func TestExitSessionPreservesImmediateResponseOrder(t *testing.T) {
 	if got[0].FlowID != 51 || got[1].FlowID != 52 {
 		t.Fatalf("response flow order = [%d %d], want [51 52]", got[0].FlowID, got[1].FlowID)
 	}
+}
+
+type blockingExitEgress struct {
+	started chan struct{}
+	release chan struct{}
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func newBlockingExitEgress() *blockingExitEgress {
+	return &blockingExitEgress{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+		closed:  make(chan struct{}),
+	}
+}
+
+func (e *blockingExitEgress) HandleEvent(context.Context, ExitFrameEvent) ([]protocol.AuroraFrame, error) {
+	select {
+	case e.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-e.closed:
+		return nil, ErrExitSessionClosed
+	case <-e.release:
+		return nil, nil
+	}
+}
+
+func (e *blockingExitEgress) Close() error {
+	e.once.Do(func() { close(e.closed) })
+	return nil
+}
+
+func (e *blockingExitEgress) Release() {
+	close(e.release)
+}
+
+type closeErrorExitEgress struct {
+	err error
+}
+
+func (e closeErrorExitEgress) HandleEvent(context.Context, ExitFrameEvent) ([]protocol.AuroraFrame, error) {
+	return nil, nil
+}
+
+func (e closeErrorExitEgress) Close() error {
+	return e.err
 }
 
 func TestExitSessionRejectsCanceledContextBeforeMutation(t *testing.T) {

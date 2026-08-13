@@ -23,7 +23,7 @@ type FrameSink interface {
 	QueueFrames(context.Context, protocol.FrameBlock) error
 }
 
-// Egress consumes only events emitted by ExitFlowHandler.
+// Egress consumes only events emitted by ExitFlowHandler. Close must safely interrupt an in-flight HandleEvent call.
 type Egress interface {
 	HandleEvent(context.Context, ExitFrameEvent) ([]protocol.AuroraFrame, error)
 	Close() error
@@ -45,7 +45,6 @@ type ExitSession struct {
 	egress    Egress
 	sink      FrameSink
 	retry     time.Duration
-	closed    bool
 	closeErr  error
 }
 
@@ -151,14 +150,10 @@ func (s *ExitSession) Close() error {
 	if s == nil {
 		return nil
 	}
-	s.closeOnce.Do(func() { close(s.closing) })
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return s.closeErr
-	}
-	s.closed = true
-	s.closeErr = s.egress.Close()
+	s.closeOnce.Do(func() {
+		close(s.closing)
+		s.closeErr = s.egress.Close()
+	})
 	return s.closeErr
 }
 

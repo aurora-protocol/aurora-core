@@ -21,7 +21,9 @@ import "C"
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -38,24 +40,25 @@ import (
 
 // Operation codes for AuroraCoreCall. Kept stable as part of the ABI contract.
 const (
-	opEncodeMetadataRequest    = 1
-	opEncodeIssueRequest       = 2
-	opEncodeSpendRequest       = 3
-	opDecodeMetadataResponse   = 4
-	opDecodeIssueResponse      = 5
-	opDecodeSpendResponse      = 6
-	opParseAdmissionProof      = 7
-	opBeginNativeSession       = 8
-	opCompleteNativeSession    = 9
-	opCloseNativeSession       = 10
-	opQueueFrameBlock          = 11
-	opNextPacket               = 12
-	opHandlePacket             = 13
-	opIngressLocalPacket       = 14
-	opNextLocalPacket          = 15
-	opBeginNativeSessionJSON   = 16
-	opCompleteNativeSessionRaw = 17
-	opIngressLocalPacketJSON   = 18
+	opEncodeMetadataRequest     = 1
+	opEncodeIssueRequest        = 2
+	opEncodeSpendRequest        = 3
+	opDecodeMetadataResponse    = 4
+	opDecodeIssueResponse       = 5
+	opDecodeSpendResponse       = 6
+	opParseAdmissionProof       = 7
+	opBeginNativeSession        = 8
+	opCompleteNativeSession     = 9
+	opCloseNativeSession        = 10
+	opQueueFrameBlock           = 11
+	opNextPacket                = 12
+	opHandlePacket              = 13
+	opIngressLocalPacket        = 14
+	opNextLocalPacket           = 15
+	opBeginNativeSessionJSON    = 16
+	opCompleteNativeSessionRaw  = 17
+	opIngressLocalPacketJSON    = 18
+	opReserveNativeProvisioning = 19
 )
 
 // Result status bytes.
@@ -66,6 +69,15 @@ const (
 )
 
 const issueRequestInputLen = 32 + 48 // token_nonce || redemption_context_hash
+
+const (
+	nativeProvisioningReservationSourceLengthBytes = 4
+	nativeProvisioningReservationCountBytes        = 1
+	nativeProvisioningReservationSpentHintKeyBytes = 48
+	nativeProvisioningReservationRelayBucketBytes  = 16
+	maximumNativeProvisioningReservationKeys       = 64
+	maximumNativeProvisioningReservationInput      = client.MaximumNativeProvisioningWalletBytes + nativeProvisioningReservationSourceLengthBytes + nativeProvisioningReservationCountBytes + maximumNativeProvisioningReservationKeys*nativeProvisioningReservationSpentHintKeyBytes
+)
 
 type parsedAdmissionProof struct {
 	RelayBucketIDHex      string `json:"relay_bucket_id"`
@@ -341,9 +353,144 @@ func dispatch(op int, in []byte, arg uint64) (byte, []byte) {
 			return statusError, nil
 		}
 		return statusOK, encoded
+	case opReserveNativeProvisioning:
+		if arg == 0 || arg > uint64(^uint64(0)>>1) {
+			return statusError, nil
+		}
+		reservation, err := reserveNativeProvisioning(in, time.Unix(int64(arg), 0).UTC())
+		if err != nil {
+			return statusError, nil
+		}
+		defer reservation.Zero()
+		encoded, err := encodeNativeProvisioningReservation(reservation)
+		if err != nil {
+			return statusError, nil
+		}
+		return statusOK, encoded
 	default:
 		return statusError, nil
 	}
+}
+
+type nativeProvisioningReservation struct {
+	Provisioning         []byte
+	SpentHintKey         []byte
+	RelayBucketID        []byte
+	AccessHintExpiryUnix uint64
+}
+
+func reserveNativeProvisioning(encoded []byte, now time.Time) (client.NativeProvisioningReservation, error) {
+	source, spentHintKeys, err := decodeNativeProvisioningReservationRequest(encoded)
+	if err != nil {
+		return client.NativeProvisioningReservation{}, err
+	}
+	return client.ReserveNativeProvisioning(source, func(candidate []byte) bool {
+		for _, spentHintKey := range spentHintKeys {
+			if subtle.ConstantTimeCompare(candidate, spentHintKey) == 1 {
+				return true
+			}
+		}
+		return false
+	}, now)
+}
+
+func encodeNativeProvisioningReservationRequest(source []byte, spentHintKeys [][]byte) ([]byte, error) {
+	if len(source) == 0 || len(source) > client.MaximumNativeProvisioningWalletBytes || len(spentHintKeys) > maximumNativeProvisioningReservationKeys {
+		return nil, fmt.Errorf("auroracore: native provisioning reservation request is invalid")
+	}
+	encoded := make([]byte, nativeProvisioningReservationSourceLengthBytes+len(source)+nativeProvisioningReservationCountBytes+len(spentHintKeys)*nativeProvisioningReservationSpentHintKeyBytes)
+	binary.BigEndian.PutUint32(encoded[:nativeProvisioningReservationSourceLengthBytes], uint32(len(source)))
+	copy(encoded[nativeProvisioningReservationSourceLengthBytes:], source)
+	offset := nativeProvisioningReservationSourceLengthBytes + len(source)
+	encoded[offset] = byte(len(spentHintKeys))
+	offset += nativeProvisioningReservationCountBytes
+	for _, spentHintKey := range spentHintKeys {
+		if len(spentHintKey) != nativeProvisioningReservationSpentHintKeyBytes {
+			zeroNativeBytes(encoded)
+			return nil, fmt.Errorf("auroracore: native provisioning reservation spent hint key is invalid")
+		}
+		copy(encoded[offset:], spentHintKey)
+		offset += nativeProvisioningReservationSpentHintKeyBytes
+	}
+	return encoded, nil
+}
+
+func decodeNativeProvisioningReservationRequest(encoded []byte) ([]byte, [][]byte, error) {
+	if len(encoded) < nativeProvisioningReservationSourceLengthBytes+nativeProvisioningReservationCountBytes || len(encoded) > maximumNativeProvisioningReservationInput {
+		return nil, nil, fmt.Errorf("auroracore: native provisioning reservation request size is invalid")
+	}
+	sourceLength := int(binary.BigEndian.Uint32(encoded[:nativeProvisioningReservationSourceLengthBytes]))
+	if sourceLength == 0 || sourceLength > client.MaximumNativeProvisioningWalletBytes {
+		return nil, nil, fmt.Errorf("auroracore: native provisioning reservation source is invalid")
+	}
+	offset := nativeProvisioningReservationSourceLengthBytes
+	if sourceLength > len(encoded)-offset-nativeProvisioningReservationCountBytes {
+		return nil, nil, fmt.Errorf("auroracore: native provisioning reservation source is truncated")
+	}
+	source := encoded[offset : offset+sourceLength]
+	offset += sourceLength
+	count := int(encoded[offset])
+	offset += nativeProvisioningReservationCountBytes
+	if count > maximumNativeProvisioningReservationKeys || len(encoded)-offset != count*nativeProvisioningReservationSpentHintKeyBytes {
+		return nil, nil, fmt.Errorf("auroracore: native provisioning reservation spent hint keys are invalid")
+	}
+	spentHintKeys := make([][]byte, count)
+	for index := range count {
+		spentHintKeys[index] = encoded[offset : offset+nativeProvisioningReservationSpentHintKeyBytes]
+		offset += nativeProvisioningReservationSpentHintKeyBytes
+	}
+	return source, spentHintKeys, nil
+}
+
+func encodeNativeProvisioningReservation(reservation client.NativeProvisioningReservation) ([]byte, error) {
+	if len(reservation.SpentHintKey) != nativeProvisioningReservationSpentHintKeyBytes || len(reservation.RelayBucketID) != nativeProvisioningReservationRelayBucketBytes || reservation.AccessHintExpiryUnix == 0 {
+		return nil, fmt.Errorf("auroracore: native provisioning reservation is invalid")
+	}
+	provisioning, err := client.EncodeNativeProvisioning(reservation.Provisioning)
+	if err != nil {
+		return nil, err
+	}
+	defer zeroNativeBytes(provisioning)
+	encoded := make([]byte, 3+len(provisioning)+nativeProvisioningReservationSpentHintKeyBytes+nativeProvisioningReservationRelayBucketBytes+8)
+	encoded[0] = byte(len(provisioning) >> 16)
+	encoded[1] = byte(len(provisioning) >> 8)
+	encoded[2] = byte(len(provisioning))
+	offset := 3
+	copy(encoded[offset:], provisioning)
+	offset += len(provisioning)
+	copy(encoded[offset:], reservation.SpentHintKey)
+	offset += nativeProvisioningReservationSpentHintKeyBytes
+	copy(encoded[offset:], reservation.RelayBucketID)
+	offset += nativeProvisioningReservationRelayBucketBytes
+	binary.BigEndian.PutUint64(encoded[offset:], reservation.AccessHintExpiryUnix)
+	return encoded, nil
+}
+
+func decodeNativeProvisioningReservation(encoded []byte) (nativeProvisioningReservation, error) {
+	if len(encoded) < 3+nativeProvisioningReservationSpentHintKeyBytes+nativeProvisioningReservationRelayBucketBytes+8 {
+		return nativeProvisioningReservation{}, fmt.Errorf("auroracore: native provisioning reservation result is invalid")
+	}
+	provisioningLength := int(encoded[0])<<16 | int(encoded[1])<<8 | int(encoded[2])
+	offset := 3
+	if provisioningLength == 0 || provisioningLength > client.MaximumNativeProvisioningWalletBytes || provisioningLength != len(encoded)-offset-nativeProvisioningReservationSpentHintKeyBytes-nativeProvisioningReservationRelayBucketBytes-8 {
+		return nativeProvisioningReservation{}, fmt.Errorf("auroracore: native provisioning reservation result is malformed")
+	}
+	reservation := nativeProvisioningReservation{
+		Provisioning: append([]byte(nil), encoded[offset:offset+provisioningLength]...),
+	}
+	offset += provisioningLength
+	reservation.SpentHintKey = append([]byte(nil), encoded[offset:offset+nativeProvisioningReservationSpentHintKeyBytes]...)
+	offset += nativeProvisioningReservationSpentHintKeyBytes
+	reservation.RelayBucketID = append([]byte(nil), encoded[offset:offset+nativeProvisioningReservationRelayBucketBytes]...)
+	offset += nativeProvisioningReservationRelayBucketBytes
+	reservation.AccessHintExpiryUnix = binary.BigEndian.Uint64(encoded[offset:])
+	if reservation.AccessHintExpiryUnix == 0 {
+		zeroNativeBytes(reservation.Provisioning)
+		zeroNativeBytes(reservation.SpentHintKey)
+		zeroNativeBytes(reservation.RelayBucketID)
+		return nativeProvisioningReservation{}, fmt.Errorf("auroracore: native provisioning reservation expiry is invalid")
+	}
+	return reservation, nil
 }
 
 // parseAdmissionProof decodes and binding-validates an AdmissionProof using the

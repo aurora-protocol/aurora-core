@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/admission"
+	"github.com/aurora-protocol/aurora-core/carrier"
 	"github.com/aurora-protocol/aurora-core/handshake"
 	"github.com/aurora-protocol/aurora-core/issuerd"
 	"github.com/aurora-protocol/aurora-core/protocol"
-	"github.com/aurora-protocol/aurora-core/server"
 )
 
 const (
@@ -331,12 +331,12 @@ func buildProvisionedIssuerWork(issuerURL, issuerCarrierPath string, request han
 	if _, err := io.ReadFull(random, tokenNonce); err != nil {
 		return IssuerWork{}, fmt.Errorf("client: generate provisioned issuer token nonce: %w", err)
 	}
-	payload, err := server.EncodeCarrierIssueRequest(tokenNonce, request.AdmissionContextHash, expiry)
+	payload, err := carrier.EncodeIssueRequest(tokenNonce, request.AdmissionContextHash, expiry)
 	if err != nil {
 		return IssuerWork{}, fmt.Errorf("client: encode provisioned issuer request: %w", err)
 	}
 	defer zeroProvisionedBytes(payload)
-	body := server.EncodeCarrier(server.CarrierBlindRSAIssueReq, payload)
+	body := carrier.Encode(carrier.BlindRSAIssueRequest, payload)
 	if len(body) == 0 || len(body) > maximumProvisionedIssuerResponse {
 		zeroProvisionedBytes(body)
 		return IssuerWork{}, fmt.Errorf("client: provisioned issuer request size is invalid")
@@ -349,8 +349,8 @@ func buildProvisionedIssuerWork(issuerURL, issuerCarrierPath string, request han
 }
 
 func provisionedProofsForIssuerResponse(request handshake.ClientProofRequest, issuerResponse []byte, random io.Reader) (protocol.AdmissionProof, protocol.ReplayProof, error) {
-	carrierType, payload, err := server.DecodeCarrier(issuerResponse)
-	if err != nil || carrierType != server.CarrierBlindRSAIssueResp || len(payload) == 0 {
+	carrierType, payload, err := carrier.Decode(issuerResponse)
+	if err != nil || carrierType != carrier.BlindRSAIssueResponse || len(payload) == 0 {
 		return protocol.AdmissionProof{}, protocol.ReplayProof{}, fmt.Errorf("client: invalid provisioned issuer response")
 	}
 	proof, err := issuerd.DecodeAdmissionProofBytes(payload)

@@ -141,6 +141,9 @@ func NewHTTPHandler(service *Service) http.Handler {
 			IssuerMetadataHash: hex.EncodeToString(hash),
 		})
 	}))
+	if service == nil || !service.allowHarnessHTTPEndpoints {
+		return mux
+	}
 	mux.HandleFunc("/blind-rsa/issue", methodHandler(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		if service == nil || !service.ready() {
 			writeError(w, http.StatusServiceUnavailable, "issuer unavailable")
@@ -429,12 +432,14 @@ func DecodeAdmissionProofBytes(raw []byte) (protocol.AdmissionProof, error) {
 }
 
 func (s *Service) ready() bool {
-	return s != nil &&
-		s.blindRSAKey != nil &&
-		s.spentTokens != nil &&
-		len(s.metadata.IssuerID) == 16 &&
-		len(s.metadata.RelayBucketScopes) > 0 &&
-		len(s.metadata.OriginInfoPolicies) > 0
+	nowUnix := s.currentUnix()
+	if s == nil || nowUnix == 0 || s.blindRSAKey == nil || s.spentTokens == nil || len(s.metadata.IssuerID) != 16 || nowUnix < s.metadata.ValidFromUnix || nowUnix >= s.metadata.ValidUntilUnix {
+		return false
+	}
+	if err := validateCurrentIssuanceScope(s.metadata, s.issuanceScope, s.issuanceOriginInfoPolicyID, nowUnix); err != nil {
+		return false
+	}
+	return validateProductionBlindRSAKey(s.metadata, s.blindRSATokenKeyDER, nowUnix) == nil
 }
 
 func verifyIssuedProof(service *Service, proof protocol.AdmissionProof, nowUnix uint64) error {

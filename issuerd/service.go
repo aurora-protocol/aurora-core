@@ -24,15 +24,20 @@ import (
 )
 
 type Service struct {
-	nowUnix                uint64
-	metadata               protocol.IssuerMetadata
-	authorityKeys          []protocol.AuthorityKeyRecord
-	blindRSAKey            *rsa.PrivateKey
-	blindRSATokenKeyDER    []byte
-	spentTokens            admission.RetentionReplayCache
-	verifierServiceSigners map[string]*ecdsa.PrivateKey
-	authorizedRelayKeys    map[uint64][]protocol.PublicKeyRecord
-	voprfVerifierAvailable bool
+	nowUnix                    uint64
+	now                        func() uint64
+	metadata                   protocol.IssuerMetadata
+	authorityKeys              []protocol.AuthorityKeyRecord
+	blindRSAKey                *rsa.PrivateKey
+	blindRSATokenKeyDER        []byte
+	spentTokens                admission.RetentionReplayCache
+	issuanceScope              protocol.RelayBucketScope
+	issuanceOriginInfo         []byte
+	issuanceOriginInfoPolicyID uint64
+	allowHarnessHTTPEndpoints  bool
+	verifierServiceSigners     map[string]*ecdsa.PrivateKey
+	authorizedRelayKeys        map[uint64][]protocol.PublicKeyRecord
+	voprfVerifierAvailable     bool
 }
 
 type ServiceOptions struct {
@@ -211,15 +216,19 @@ func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service
 		UsageFlags:     registry.UsageMaySignIssuerMetadata,
 	}}
 	return &Service{
-		nowUnix:                nowUnix,
-		metadata:               metadata,
-		authorityKeys:          authorityKeys,
-		blindRSAKey:            blindRSAKey,
-		blindRSATokenKeyDER:    blindRSAKeyDER,
-		spentTokens:            retentionCache,
-		verifierServiceSigners: map[string]*ecdsa.PrivateKey{string(metadata.VerifierServices[0].ServiceID): serviceSigner},
-		authorizedRelayKeys:    make(map[uint64][]protocol.PublicKeyRecord),
-		voprfVerifierAvailable: true,
+		nowUnix:                    nowUnix,
+		metadata:                   metadata,
+		authorityKeys:              authorityKeys,
+		blindRSAKey:                blindRSAKey,
+		blindRSATokenKeyDER:        blindRSAKeyDER,
+		spentTokens:                retentionCache,
+		issuanceScope:              cloneRelayBucketScope(metadata.RelayBucketScopes[0]),
+		issuanceOriginInfo:         append([]byte(nil), metadata.OriginInfoPolicies[0].OriginInfo...),
+		issuanceOriginInfoPolicyID: metadata.OriginInfoPolicies[0].PolicyID,
+		allowHarnessHTTPEndpoints:  true,
+		verifierServiceSigners:     map[string]*ecdsa.PrivateKey{string(metadata.VerifierServices[0].ServiceID): serviceSigner},
+		authorizedRelayKeys:        make(map[uint64][]protocol.PublicKeyRecord),
+		voprfVerifierAvailable:     true,
 	}, nil
 }
 
@@ -316,11 +325,25 @@ func RunServiceReadinessHarness(nowUnix uint64) (ServiceReadinessReport, error) 
 }
 
 func (s *Service) PublishIssuerMetadata() protocol.IssuerMetadata {
-	return s.metadata
+	if s == nil {
+		return protocol.IssuerMetadata{}
+	}
+	metadata, err := cloneIssuerMetadata(s.metadata)
+	if err != nil {
+		return protocol.IssuerMetadata{}
+	}
+	return metadata
 }
 
 func (s *Service) AuthorityKeys() []protocol.AuthorityKeyRecord {
-	return append([]protocol.AuthorityKeyRecord(nil), s.authorityKeys...)
+	if s == nil {
+		return nil
+	}
+	keys, err := cloneAuthorityKeyRecords(s.authorityKeys)
+	if err != nil {
+		return nil
+	}
+	return keys
 }
 
 func (s *Service) IssueBlindRSA2048(req IssueBlindRSA2048Request) (protocol.AdmissionProof, error) {
@@ -330,10 +353,20 @@ func (s *Service) IssueBlindRSA2048(req IssueBlindRSA2048Request) (protocol.Admi
 	if len(req.RedemptionContextHash) != 48 {
 		return protocol.AdmissionProof{}, fmt.Errorf("issuerd: redemption context hash length %d, want 48", len(req.RedemptionContextHash))
 	}
-	if req.ExpiryUnix <= s.nowUnix || req.ExpiryUnix > s.metadata.ValidUntilUnix {
+	nowUnix := s.currentUnix()
+	if nowUnix == 0 || req.ExpiryUnix <= nowUnix || req.ExpiryUnix > s.metadata.ValidUntilUnix {
 		return protocol.AdmissionProof{}, fmt.Errorf("issuerd: token expiry outside issuer metadata validity")
 	}
-	scope := s.metadata.RelayBucketScopes[0]
+	scope := s.issuanceScope
+	if len(scope.RelayBucketID) != 16 || len(scope.TokenScopeID) != 16 {
+		return protocol.AdmissionProof{}, fmt.Errorf("issuerd: issuance scope is unavailable")
+	}
+	if err := validateCurrentIssuanceScope(s.metadata, scope, s.issuanceOriginInfoPolicyID, nowUnix); err != nil {
+		return protocol.AdmissionProof{}, err
+	}
+	if err := validateProductionBlindRSAKey(s.metadata, s.blindRSATokenKeyDER, nowUnix); err != nil {
+		return protocol.AdmissionProof{}, err
+	}
 	keyID := sha256.Sum256(s.blindRSATokenKeyDER)
 	proof := protocol.AdmissionProof{
 		ProofVersion:          registry.Version20,
@@ -346,7 +379,7 @@ func (s *Service) IssueBlindRSA2048(req IssueBlindRSA2048Request) (protocol.Admi
 		TokenNonce:            append([]byte(nil), req.TokenNonce...),
 		RedemptionContextHash: append([]byte(nil), req.RedemptionContextHash...),
 	}
-	originInfo := s.metadata.OriginInfoPolicies[0].OriginInfo
+	originInfo := s.issuanceOriginInfo
 	challengeDigest, err := admission.RFC9577TokenChallengeDigest(proof.ProofType, s.metadata.IssuerName, originInfo, proof.RedemptionContextHash)
 	if err != nil {
 		return protocol.AdmissionProof{}, err
@@ -383,7 +416,11 @@ func (s *Service) IssueBlindRSA2048(req IssueBlindRSA2048Request) (protocol.Admi
 }
 
 func (s *Service) SpendToken(proof protocol.AdmissionProof) ([]byte, error) {
-	if err := admission.VerifyBlindRSA2048WithIssuerMetadata(proof, s.metadata, s.nowUnix); err != nil {
+	nowUnix := s.currentUnix()
+	if nowUnix == 0 {
+		return nil, fmt.Errorf("issuerd: current time is invalid")
+	}
+	if err := admission.VerifyBlindRSA2048WithIssuerMetadata(proof, s.metadata, nowUnix); err != nil {
 		return nil, err
 	}
 	redemption, err := admission.TokenRedemptionHash(proof)
@@ -398,7 +435,7 @@ func (s *Service) SpendToken(proof protocol.AdmissionProof) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("issuerd: token replay retention deadline: %w", err)
 	}
-	inserted, err := s.spentTokens.InsertIfAbsentUntil(spentKey, retentionDeadline, s.nowUnix)
+	inserted, err := s.spentTokens.InsertIfAbsentUntil(spentKey, retentionDeadline, nowUnix)
 	if err != nil {
 		return nil, fmt.Errorf("issuerd: spent-token store failed: %w", err)
 	}
@@ -409,6 +446,7 @@ func (s *Service) SpendToken(proof protocol.AdmissionProof) ([]byte, error) {
 }
 
 func (s *Service) VerifyVOPRFRequest(req VOPRFVerifierRequest) error {
+	nowUnix := s.currentUnix()
 	if !s.voprfVerifierAvailable {
 		return fmt.Errorf("issuerd: VOPRF verifier unavailable")
 	}
@@ -417,7 +455,7 @@ func (s *Service) VerifyVOPRFRequest(req VOPRFVerifierRequest) error {
 			service.ServiceProtocolID != registry.IssuerVerifierVOPRFMTLS13 ||
 			service.RequestAuthPolicyID != req.RequestAuthPolicyID ||
 			service.ServiceStatus != registry.IssuerStatusActive ||
-			s.nowUnix < service.ValidFromUnix || s.nowUnix >= service.ValidUntilUnix {
+			nowUnix == 0 || nowUnix < service.ValidFromUnix || nowUnix >= service.ValidUntilUnix {
 			continue
 		}
 		if !containsUint64(service.AllowedProofTypes, req.ProofType) {
@@ -441,7 +479,11 @@ func (s *Service) VerifyIssuerVerifierRequest(req protocol.IssuerVerifierRequest
 	if err != nil {
 		return protocol.IssuerVerifierResponse{}, err
 	}
-	validUntil, err := verifierResponseValidUntil(s.nowUnix, req, service)
+	nowUnix := s.currentUnix()
+	if nowUnix == 0 {
+		return protocol.IssuerVerifierResponse{}, fmt.Errorf("issuerd: current time is invalid")
+	}
+	validUntil, err := verifierResponseValidUntil(nowUnix, req, service)
 	if err != nil {
 		return protocol.IssuerVerifierResponse{}, err
 	}
@@ -450,7 +492,7 @@ func (s *Service) VerifyIssuerVerifierRequest(req protocol.IssuerVerifierRequest
 	if err != nil {
 		return protocol.IssuerVerifierResponse{}, fmt.Errorf("issuerd: verifier replay retention deadline: %w", err)
 	}
-	inserted, err := s.spentTokens.InsertIfAbsentUntil(req.TokenSpentKey, retentionDeadline, s.nowUnix)
+	inserted, err := s.spentTokens.InsertIfAbsentUntil(req.TokenSpentKey, retentionDeadline, nowUnix)
 	if err != nil {
 		return protocol.IssuerVerifierResponse{}, fmt.Errorf("issuerd: spent-token store failed: %w", err)
 	}
@@ -537,7 +579,7 @@ func (s *Service) verifierServiceForRequest(req protocol.IssuerVerifierRequest) 
 		if !bytes.Equal(service.ServiceID, req.ServiceID) {
 			continue
 		}
-		if err := service.Allows(req.ProofType, req.RelayBucketID, s.nowUnix, true); err != nil {
+		if err := service.Allows(req.ProofType, req.RelayBucketID, s.currentUnix(), true); err != nil {
 			continue
 		}
 		matched = append(matched, service)
@@ -600,11 +642,15 @@ func expectedVerifierRequestFieldLength(name string) int {
 }
 
 func (s *Service) hasUsableTokenKey(proofType uint64, tokenKeyID []byte) bool {
+	nowUnix := s.currentUnix()
+	if nowUnix == 0 {
+		return false
+	}
 	for _, key := range s.metadata.TokenKeyMappings {
 		if key.ProofType != proofType || !bytes.Equal(key.TokenKeyID, tokenKeyID) {
 			continue
 		}
-		if s.nowUnix < key.ValidFromUnix || s.nowUnix >= key.ValidUntilUnix {
+		if nowUnix < key.ValidFromUnix || nowUnix >= key.ValidUntilUnix {
 			return false
 		}
 		return key.KeyStatus == registry.IssuerStatusActive || key.KeyStatus == registry.IssuerStatusRetiring
@@ -665,6 +711,16 @@ func verifierResponseValidUntil(nowUnix uint64, req protocol.IssuerVerifierReque
 
 func (s *Service) SetVOPRFVerifierAvailable(available bool) {
 	s.voprfVerifierAvailable = available
+}
+
+func (s *Service) currentUnix() uint64 {
+	if s == nil {
+		return 0
+	}
+	if s.now != nil {
+		return s.now()
+	}
+	return s.nowUnix
 }
 
 func (s *Service) RedactedOperationalLog(input LogInput) string {

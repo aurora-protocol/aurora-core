@@ -106,17 +106,17 @@ func NewRelaySession(hintCache *admission.MemoryReplayCache) *RelaySession {
 }
 
 func (s *RelaySession) AcceptCoverPrelude0(p0 protocol.CoverPrelude0, cred admission.AccessHintCredential, bindingContext []byte, p1 protocol.CoverPrelude1) (protocol.CoverPrelude1, error) {
-	return s.AcceptCoverPrelude0At(p0, cred, bindingContext, p1, 0)
+	return s.AcceptCoverPrelude0At(p0, cred, bindingContext, p1, 0, 0)
 }
 
-func (s *RelaySession) AcceptCoverPrelude0At(p0 protocol.CoverPrelude0, cred admission.AccessHintCredential, bindingContext []byte, p1 protocol.CoverPrelude1, nowUnix uint64) (protocol.CoverPrelude1, error) {
+func (s *RelaySession) AcceptCoverPrelude0At(p0 protocol.CoverPrelude0, cred admission.AccessHintCredential, bindingContext []byte, p1 protocol.CoverPrelude1, nowUnix, relayEpochValidUntilUnix uint64) (protocol.CoverPrelude1, error) {
 	if err := p0.ValidateStructural(); err != nil {
 		return protocol.CoverPrelude1{}, err
 	}
 	if err := ValidatePrelude0ClientHybridShares(p0); err != nil {
 		return protocol.CoverPrelude1{}, err
 	}
-	if err := admission.VerifyAndSpendAccessHintAt(s.hintCache, cred, bindingContext, p0.ClientNonce, p0.AccessHint, nowUnix); err != nil {
+	if err := admission.VerifyAndSpendAccessHintAt(s.hintCache, cred, bindingContext, p0.ClientNonce, p0.AccessHint, nowUnix, relayEpochValidUntilUnix); err != nil {
 		return protocol.CoverPrelude1{}, err
 	}
 	return p1, nil

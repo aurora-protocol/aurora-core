@@ -77,6 +77,13 @@ func TestRelayDriverBeginSpendsHintBeforeSigningAuthenticatedPrelude(t *testing.
 	if resolver.calls != 1 || hintCache.inserts != 1 {
 		t.Fatalf("resolver/cache calls = %d/%d, want 1/1", resolver.calls, hintCache.inserts)
 	}
+	wantRetention, err := admission.MaximumRetentionDeadline(client.config.AccessHint.ExpiryUnix, deployment.deployment.Descriptor().EpochValidUntilUnix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hintCache.retentionDeadlines; !reflect.DeepEqual(got, []uint64{wantRetention}) {
+		t.Fatalf("hint retention deadlines = %v, want [%d]", got, wantRetention)
+	}
 }
 
 func TestRelayDriverBeginFailsClosedAtEveryAdmissionBoundary(t *testing.T) {
@@ -1114,17 +1121,27 @@ func (r *orderedHintResolver) ResolveAccessHint(_ context.Context, issuerID, rel
 }
 
 type orderedRelayReplayCache struct {
-	events         *relayEventLog
-	event          string
-	inner          admission.ReplayCache
-	inserts        int
-	err            error
-	forceDuplicate bool
+	events             *relayEventLog
+	event              string
+	inner              admission.ReplayCache
+	inserts            int
+	retentionDeadlines []uint64
+	err                error
+	forceDuplicate     bool
 }
 
 func (*orderedRelayReplayCache) Durable() bool { return true }
 
 func (c *orderedRelayReplayCache) InsertIfAbsent(key []byte) (bool, error) {
+	return c.insert(key, 0, 0)
+}
+
+func (c *orderedRelayReplayCache) InsertIfAbsentUntil(key []byte, retainUntilUnix, nowUnix uint64) (bool, error) {
+	c.retentionDeadlines = append(c.retentionDeadlines, retainUntilUnix)
+	return c.insert(key, retainUntilUnix, nowUnix)
+}
+
+func (c *orderedRelayReplayCache) insert(key []byte, retainUntilUnix, nowUnix uint64) (bool, error) {
 	c.inserts++
 	if c.events != nil {
 		c.events.add(c.event)
@@ -1134,6 +1151,9 @@ func (c *orderedRelayReplayCache) InsertIfAbsent(key []byte) (bool, error) {
 	}
 	if c.forceDuplicate {
 		return false, nil
+	}
+	if retainUntilUnix != 0 {
+		return admission.InsertIfAbsentRetained(c.inner, key, retainUntilUnix, nowUnix)
 	}
 	return c.inner.InsertIfAbsent(key)
 }

@@ -145,16 +145,18 @@ func BootstrapDedupKey(replayContextHash, replayWindowID []byte) ([]byte, error)
 }
 
 type ReplayVerificationInput struct {
-	AdmissionProof          protocol.AdmissionProof
-	ReplayProof             protocol.ReplayProof
-	RouteInstanceID         uint64
-	HopIndex                uint8
-	HandshakeBindingContext []byte
-	AdmissionContextHash    []byte
-	TokenSpentCache         ReplayCache
-	BootstrapDedupCache     ReplayCache
-	NowUnix                 uint64
-	AllowLabProofs          bool
+	AdmissionProof            protocol.AdmissionProof
+	ReplayProof               protocol.ReplayProof
+	RouteInstanceID           uint64
+	HopIndex                  uint8
+	HandshakeBindingContext   []byte
+	AdmissionContextHash      []byte
+	TokenSpentCache           ReplayCache
+	BootstrapDedupCache       ReplayCache
+	NowUnix                   uint64
+	ReplayEpochValidUntilUnix uint64
+	RelayEpochValidUntilUnix  uint64
+	AllowLabProofs            bool
 }
 
 func VerifyAndSpendReplay(in ReplayVerificationInput) (tokenSpentKey, bootstrapDedupKey []byte, err error) {
@@ -169,6 +171,9 @@ func VerifyAndSpendReplay(in ReplayVerificationInput) (tokenSpentKey, bootstrapD
 	}
 	if in.BootstrapDedupCache == nil {
 		return nil, nil, fmt.Errorf("admission: missing bootstrap replay cache")
+	}
+	if in.NowUnix == 0 || in.ReplayEpochValidUntilUnix == 0 || in.RelayEpochValidUntilUnix == 0 || in.NowUnix >= in.ReplayEpochValidUntilUnix || in.NowUnix >= in.RelayEpochValidUntilUnix {
+		return nil, nil, fmt.Errorf("admission: replay retention epoch is invalid")
 	}
 	tokenRedemptionHash, err := TokenRedemptionHash(in.AdmissionProof)
 	if err != nil {
@@ -192,14 +197,22 @@ func VerifyAndSpendReplay(in ReplayVerificationInput) (tokenSpentKey, bootstrapD
 	if err != nil {
 		return nil, nil, err
 	}
-	inserted, err := in.TokenSpentCache.InsertIfAbsent(tokenSpentKey)
+	tokenRetentionDeadline, err := RetentionDeadline(in.AdmissionProof.ExpiryUnix)
+	if err != nil {
+		return nil, nil, err
+	}
+	bootstrapRetentionDeadline, err := MaximumRetentionDeadline(in.AdmissionProof.ExpiryUnix, in.ReplayEpochValidUntilUnix, in.RelayEpochValidUntilUnix)
+	if err != nil {
+		return nil, nil, err
+	}
+	inserted, err := InsertIfAbsentRetained(in.TokenSpentCache, tokenSpentKey, tokenRetentionDeadline, in.NowUnix)
 	if err != nil {
 		return nil, nil, fmt.Errorf("admission: token spent replay cache failed: %w", err)
 	}
 	if !inserted {
 		return nil, nil, fmt.Errorf("admission: token already spent")
 	}
-	inserted, err = in.BootstrapDedupCache.InsertIfAbsent(bootstrapDedupKey)
+	inserted, err = InsertIfAbsentRetained(in.BootstrapDedupCache, bootstrapDedupKey, bootstrapRetentionDeadline, in.NowUnix)
 	if err != nil {
 		return nil, nil, fmt.Errorf("admission: bootstrap replay cache failed: %w", err)
 	}

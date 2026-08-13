@@ -3160,6 +3160,16 @@ func (c *liveFirstHopDurableReplayCache) InsertIfAbsent(key []byte) (bool, error
 	return c.MemoryReplayCache.InsertIfAbsent(key)
 }
 
+func (c *liveFirstHopDurableReplayCache) InsertIfAbsentUntil(key []byte, retainUntilUnix, nowUnix uint64) (bool, error) {
+	if c.err != nil {
+		return false, c.err
+	}
+	if c.duplicate {
+		return false, nil
+	}
+	return c.MemoryReplayCache.InsertIfAbsentUntil(key, retainUntilUnix, nowUnix)
+}
+
 type liveFirstHopAdmissionVerifier struct {
 	tokenPublicKeyDER []byte
 	err               error

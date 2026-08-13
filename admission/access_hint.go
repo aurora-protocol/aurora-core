@@ -76,15 +76,18 @@ func ComputeSpentHintKey(cred AccessHintCredential) ([]byte, error) {
 }
 
 func VerifyAndSpendAccessHint(cache ReplayCache, cred AccessHintCredential, bindingContext, clientNonce, receivedHint []byte) error {
-	return VerifyAndSpendAccessHintAt(cache, cred, bindingContext, clientNonce, receivedHint, 0)
+	return VerifyAndSpendAccessHintAt(cache, cred, bindingContext, clientNonce, receivedHint, 0, 0)
 }
 
-func VerifyAndSpendAccessHintAt(cache ReplayCache, cred AccessHintCredential, bindingContext, clientNonce, receivedHint []byte, nowUnix uint64) error {
+func VerifyAndSpendAccessHintAt(cache ReplayCache, cred AccessHintCredential, bindingContext, clientNonce, receivedHint []byte, nowUnix, epochValidUntilUnix uint64) error {
 	if cache == nil {
 		return fmt.Errorf("admission: missing access hint replay cache")
 	}
 	if nowUnix != 0 && cred.ExpiryUnix != 0 && nowUnix >= cred.ExpiryUnix {
 		return fmt.Errorf("admission: access hint expired")
+	}
+	if nowUnix != 0 && (epochValidUntilUnix == 0 || nowUnix >= epochValidUntilUnix) {
+		return fmt.Errorf("admission: access hint relay epoch expired")
 	}
 	expected, err := ComputeAccessHint(cred, bindingContext, clientNonce)
 	if err != nil {
@@ -97,7 +100,16 @@ func VerifyAndSpendAccessHintAt(cache ReplayCache, cred AccessHintCredential, bi
 	if err != nil {
 		return err
 	}
-	inserted, err := cache.InsertIfAbsent(spentKey)
+	var inserted bool
+	if nowUnix == 0 {
+		inserted, err = cache.InsertIfAbsent(spentKey)
+	} else {
+		retentionDeadline, deadlineErr := MaximumRetentionDeadline(cred.ExpiryUnix, epochValidUntilUnix)
+		if deadlineErr != nil {
+			return deadlineErr
+		}
+		inserted, err = InsertIfAbsentRetained(cache, spentKey, retentionDeadline, nowUnix)
+	}
 	if err != nil {
 		return fmt.Errorf("admission: access hint replay cache failed: %w", err)
 	}

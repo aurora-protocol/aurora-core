@@ -806,6 +806,7 @@ type VerifierServiceAdmissionInput struct {
 	RouteInstanceID           uint64
 	HopIndex                  uint8
 	ReplayEpochValidUntilUnix uint64
+	RelayEpochValidUntilUnix  uint64
 	HandshakeBindingContext   []byte
 	AdmissionContextHash      []byte
 	ChallengeDigest           []byte
@@ -866,6 +867,7 @@ func (p AdmissionPolicy) AllowsVerifierServiceAdmission(in VerifierServiceAdmiss
 			RouteInstanceID:           in.RouteInstanceID,
 			HopIndex:                  in.HopIndex,
 			ReplayEpochValidUntilUnix: in.ReplayEpochValidUntilUnix,
+			RelayEpochValidUntilUnix:  in.RelayEpochValidUntilUnix,
 			HandshakeBindingContext:   append([]byte(nil), in.HandshakeBindingContext...),
 			AdmissionContextHash:      append([]byte(nil), in.AdmissionContextHash...),
 			ChallengeDigest:           append([]byte(nil), in.ChallengeDigest...),

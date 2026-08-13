@@ -137,15 +137,18 @@ func TestFileReplayCacheRejectsDuplicateFromStaleOpenInstance(t *testing.T) {
 func TestVerifyAndSpendReplayFailsClosedWhenReplayCacheWriteFails(t *testing.T) {
 	proof, replay, handshakeBinding, admissionContext := replayVerificationFixture(t)
 	_, _, err := VerifyAndSpendReplay(ReplayVerificationInput{
-		AdmissionProof:          proof,
-		ReplayProof:             replay,
-		RouteInstanceID:         0x42,
-		HopIndex:                0,
-		HandshakeBindingContext: handshakeBinding,
-		AdmissionContextHash:    admissionContext,
-		TokenSpentCache:         failingReplayCache{err: errors.New("replay store unavailable")},
-		BootstrapDedupCache:     NewMemoryReplayCache(),
-		AllowLabProofs:          true,
+		AdmissionProof:            proof,
+		ReplayProof:               replay,
+		RouteInstanceID:           0x42,
+		HopIndex:                  0,
+		HandshakeBindingContext:   handshakeBinding,
+		AdmissionContextHash:      admissionContext,
+		TokenSpentCache:           failingReplayCache{err: errors.New("replay store unavailable")},
+		BootstrapDedupCache:       NewMemoryReplayCache(),
+		ReplayEpochValidUntilUnix: proof.ExpiryUnix,
+		RelayEpochValidUntilUnix:  proof.ExpiryUnix,
+		NowUnix:                   100,
+		AllowLabProofs:            true,
 	})
 	if err == nil {
 		t.Fatalf("replay verification accepted cache write failure")
@@ -159,15 +162,18 @@ func TestVerifyAndSpendReplayRetainsTokenSpendWhenBootstrapCacheWriteFails(t *te
 	proof, replay, handshakeBinding, admissionContext := replayVerificationFixture(t)
 	tokenCache := NewMemoryReplayCache()
 	_, _, err := VerifyAndSpendReplay(ReplayVerificationInput{
-		AdmissionProof:          proof,
-		ReplayProof:             replay,
-		RouteInstanceID:         0x42,
-		HopIndex:                0,
-		HandshakeBindingContext: handshakeBinding,
-		AdmissionContextHash:    admissionContext,
-		TokenSpentCache:         tokenCache,
-		BootstrapDedupCache:     failingReplayCache{err: errors.New("replay store unavailable")},
-		AllowLabProofs:          true,
+		AdmissionProof:            proof,
+		ReplayProof:               replay,
+		RouteInstanceID:           0x42,
+		HopIndex:                  0,
+		HandshakeBindingContext:   handshakeBinding,
+		AdmissionContextHash:      admissionContext,
+		TokenSpentCache:           tokenCache,
+		BootstrapDedupCache:       failingReplayCache{err: errors.New("replay store unavailable")},
+		ReplayEpochValidUntilUnix: proof.ExpiryUnix,
+		RelayEpochValidUntilUnix:  proof.ExpiryUnix,
+		NowUnix:                   100,
+		AllowLabProofs:            true,
 	})
 	if err == nil {
 		t.Fatal("replay verification accepted bootstrap cache write failure")
@@ -223,6 +229,10 @@ func (replayCacheWithoutRetention) InsertIfAbsent([]byte) (bool, error) { return
 func (replayCacheWithoutRetention) Has([]byte) bool { return false }
 
 func (c failingReplayCache) InsertIfAbsent([]byte) (bool, error) {
+	return false, c.err
+}
+
+func (c failingReplayCache) InsertIfAbsentUntil([]byte, uint64, uint64) (bool, error) {
 	return false, c.err
 }
 

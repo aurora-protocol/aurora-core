@@ -64,6 +64,7 @@ type PolicySelector interface {
 
 type DurableReplayCache interface {
 	admission.ReplayCache
+	admission.RetentionReplayCache
 	Durable() bool
 }
 

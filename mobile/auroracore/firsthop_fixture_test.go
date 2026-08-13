@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -56,7 +57,7 @@ type Fixture struct {
 	cover        *httptest.Server
 	tcp          net.Listener
 	udp          *net.UDPConn
-	replayCaches []*admission.FileReplayCache
+	replayCaches []*admission.RetentionFileReplayCache
 	connections  atomic.Int32
 	closeOnce    sync.Once
 }
@@ -127,9 +128,9 @@ func newNativeSessionFixture(t testing.TB, now time.Time) *Fixture {
 		t.Fatal(err)
 	}
 	replayDirectory := t.TempDir()
-	hintSpentCache := firstHopFileReplayCache(t, filepath.Join(replayDirectory, "spent-hints"))
-	tokenSpentCache := firstHopFileReplayCache(t, filepath.Join(replayDirectory, "spent-tokens"))
-	bootstrapCache := firstHopFileReplayCache(t, filepath.Join(replayDirectory, "bootstrap"))
+	hintSpentCache := firstHopRetentionReplayCache(t, filepath.Join(replayDirectory, "spent-hints"), nowUnix)
+	tokenSpentCache := firstHopRetentionReplayCache(t, filepath.Join(replayDirectory, "spent-tokens"), nowUnix)
+	bootstrapCache := firstHopRetentionReplayCache(t, filepath.Join(replayDirectory, "bootstrap"), nowUnix)
 	driver, err := handshake.NewRelayDriver(handshake.RelayDriverConfig{
 		Deployment:        deployment,
 		HintResolver:      resolver,
@@ -209,7 +210,7 @@ func newNativeSessionFixture(t testing.TB, now time.Time) *Fixture {
 		cover:             cover,
 		tcp:               tcp,
 		udp:               udp,
-		replayCaches:      []*admission.FileReplayCache{hintSpentCache, tokenSpentCache, bootstrapCache},
+		replayCaches:      []*admission.RetentionFileReplayCache{hintSpentCache, tokenSpentCache, bootstrapCache},
 	}
 	go func() {
 		fixture.serveResult <- firstHop.Serve(&countingListener{Listener: listener, accepted: &fixture.connections})
@@ -450,10 +451,15 @@ func (l *countingListener) Accept() (net.Conn, error) {
 	return connection, err
 }
 
-func firstHopFileReplayCache(t testing.TB, path string) *admission.FileReplayCache {
+func firstHopRetentionReplayCache(t testing.TB, path string, nowUnix uint64) *admission.RetentionFileReplayCache {
 	t.Helper()
-	cache, err := admission.NewFileReplayCache(path)
+	directory, err := os.Open(filepath.Dir(path))
 	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := admission.NewRetentionFileReplayCacheAt(directory, filepath.Base(path), nowUnix)
+	if err != nil {
+		_ = directory.Close()
 		t.Fatal(err)
 	}
 	if !cache.Durable() {

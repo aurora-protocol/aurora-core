@@ -94,6 +94,7 @@ type IssuerVerifierRequestInput struct {
 	RouteInstanceID           uint64
 	HopIndex                  uint8
 	ReplayEpochValidUntilUnix uint64
+	RelayEpochValidUntilUnix  uint64
 	HandshakeBindingContext   []byte
 	AdmissionContextHash      []byte
 	ChallengeDigest           []byte
@@ -145,15 +146,17 @@ func BuildIssuerVerifierRequest(in IssuerVerifierRequestInput) (protocol.IssuerV
 		return protocol.IssuerVerifierRequest{}, nil, err
 	}
 	tokenSpentKey, _, err := admission.VerifyAndSpendReplay(admission.ReplayVerificationInput{
-		AdmissionProof:          in.AdmissionProof,
-		ReplayProof:             in.ReplayProof,
-		RouteInstanceID:         in.RouteInstanceID,
-		HopIndex:                in.HopIndex,
-		HandshakeBindingContext: in.HandshakeBindingContext,
-		AdmissionContextHash:    in.AdmissionContextHash,
-		TokenSpentCache:         in.TokenSpentCache,
-		BootstrapDedupCache:     in.BootstrapDedupCache,
-		NowUnix:                 in.NowUnix,
+		AdmissionProof:            in.AdmissionProof,
+		ReplayProof:               in.ReplayProof,
+		RouteInstanceID:           in.RouteInstanceID,
+		HopIndex:                  in.HopIndex,
+		HandshakeBindingContext:   in.HandshakeBindingContext,
+		AdmissionContextHash:      in.AdmissionContextHash,
+		TokenSpentCache:           in.TokenSpentCache,
+		BootstrapDedupCache:       in.BootstrapDedupCache,
+		NowUnix:                   in.NowUnix,
+		ReplayEpochValidUntilUnix: in.ReplayEpochValidUntilUnix,
+		RelayEpochValidUntilUnix:  in.RelayEpochValidUntilUnix,
 	})
 	if err != nil {
 		return protocol.IssuerVerifierRequest{}, nil, err

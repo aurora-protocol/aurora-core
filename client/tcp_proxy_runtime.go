@@ -120,6 +120,12 @@ func normalizeTCPProxyRuntimeOptions(options TCPProxyRuntimeOptions) (TCPProxyRu
 	return options, nil
 }
 
+// ValidateTCPProxyRuntimeOptions verifies local resource limits before a session is available.
+func ValidateTCPProxyRuntimeOptions(options TCPProxyRuntimeOptions) error {
+	_, err := normalizeTCPProxyRuntimeOptions(options)
+	return err
+}
+
 // Serve accepts local proxy connections until the context is canceled, the listener fails, or Close is called.
 func (r *TCPProxyRuntime) Serve(ctx context.Context, listener net.Listener) error {
 	if r == nil {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto"
@@ -335,6 +336,118 @@ func TestLiveFirstHopEncryptedTCPAndUDPEgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	queueLiveFirstHopBlock(t, ctx, established.Application, protocol.FrameBlock{Frames: []protocol.AuroraFrame{udpClose}})
+}
+
+func TestLiveFirstHopTCPProxyRuntimeEgress(t *testing.T) {
+	echoListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = echoListener.Close() })
+	echoResult := make(chan error, 1)
+	go func() {
+		connection, acceptErr := echoListener.Accept()
+		if acceptErr != nil {
+			echoResult <- acceptErr
+			return
+		}
+		defer connection.Close()
+		payload := make([]byte, len("encrypted proxy payload"))
+		if _, readErr := io.ReadFull(connection, payload); readErr != nil {
+			echoResult <- readErr
+			return
+		}
+		_, writeErr := connection.Write(payload)
+		echoResult <- writeErr
+	}()
+
+	fixture := newLiveFirstHopFixture(t, time.Now())
+	relayDriver := fixture.newRelayDriver(t)
+	sessionFactory, err := NewFirstHopProxySessionFactory(FirstHopProxySessionOptions{
+		ExitPolicy: relay.ExitPolicy{AllowPrivate: true},
+		Dialer:     &net.Dialer{},
+		Resolver:   net.DefaultResolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness := startLiveFirstHopHarnessWithSessionFactory(t, fixture, relayDriver, nil, sessionFactory)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	established, err := fixture.newClientDriver(t).Connect(ctx, harness.opener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := auroraclient.NewTCPProxyRuntime(established.Application, auroraclient.TCPProxyRuntimeOptions{MaxFlows: 1, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- runtime.Serve(ctx, proxyListener) }()
+	pumpResult := make(chan error, 1)
+	go func() {
+		pumpResult <- transport.RunPacketDuplex(
+			ctx,
+			established.ReadCarrier,
+			established.WriteCarrier,
+			established.Application,
+			runtime.HandleFrameBlock,
+			1<<20,
+		)
+	}()
+	t.Cleanup(func() {
+		_ = runtime.Close()
+		_ = established.Close()
+		for name, result := range map[string]chan error{"proxy listener": serveResult, "carrier": pumpResult} {
+			select {
+			case resultErr := <-result:
+				if resultErr != nil && !errors.Is(resultErr, context.Canceled) && !errors.Is(resultErr, session.ErrClosed) && !errors.Is(resultErr, net.ErrClosed) && !errors.Is(resultErr, io.ErrClosedPipe) && !errors.Is(resultErr, io.EOF) {
+					t.Errorf("%s stopped unexpectedly: %v", name, resultErr)
+				}
+			case <-time.After(time.Second):
+				t.Errorf("%s did not stop", name)
+			}
+		}
+	})
+
+	connection, err := net.DialTimeout("tcp4", proxyListener.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	target := echoListener.Addr().(*net.TCPAddr)
+	if _, err := fmt.Fprintf(connection, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target.String(), target.String()); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(connection)
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response != "HTTP/1.1 200 Connection Established\r\n" {
+		t.Fatalf("CONNECT response = %q", response)
+	}
+	if empty, err := reader.ReadString('\n'); err != nil || empty != "\r\n" {
+		t.Fatalf("CONNECT response terminator = %q, %v", empty, err)
+	}
+	payload := []byte("encrypted proxy payload")
+	if _, err := connection.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	responsePayload := make([]byte, len(payload))
+	if _, err := io.ReadFull(reader, responsePayload); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(responsePayload, payload) {
+		t.Fatalf("proxy response = %q, want %q", responsePayload, payload)
+	}
+	if err := <-echoResult; err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestLiveFirstHopEgressPolicyDenialPreventsDial(t *testing.T) {

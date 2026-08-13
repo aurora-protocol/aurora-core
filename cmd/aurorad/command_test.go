@@ -41,6 +41,16 @@ func TestServeRejectsMissingProductionConfiguration(t *testing.T) {
 	}
 }
 
+func TestIssuerRejectsMissingProductionConfiguration(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"issuer"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("issuer missing config code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "listen address") {
+		t.Fatalf("issuer missing config error = %s", stderr.String())
+	}
+}
+
 func TestServeRejectsHarnessOnlyFlags(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"serve", "--packet-mode", "loopback"}, &stdout, &stderr); code != 2 {
@@ -59,6 +69,18 @@ func TestServeHelpSucceeds(t *testing.T) {
 	for _, want := range []string{"-relay-descriptor", "-max-sessions", "-egress-max-flows"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("serve help missing %q: %s", want, stderr.String())
+		}
+	}
+}
+
+func TestIssuerHelpSucceeds(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"issuer", "--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("issuer help code = %d, want 0", code)
+	}
+	for _, want := range []string{"-issuer-metadata", "-blind-rsa-key", "-spent-token-cache"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("issuer help missing %q: %s", want, stderr.String())
 		}
 	}
 }

@@ -47,6 +47,24 @@ func TestNewProductionServiceLoadsVerifiedDeploymentAndPrivateDependencies(t *te
 	closeProductionCaches(caches)
 }
 
+func TestZeroMLDSA65PrivateKeyClearsPrivateMaterial(t *testing.T) {
+	_, private, err := mldsa65.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := private.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(encoded, make([]byte, len(encoded))) {
+		t.Fatal("generated ML-DSA private key is unexpectedly empty")
+	}
+	zeroMLDSA65PrivateKey(private)
+	if !private.Equal(new(mldsa65.PrivateKey)) {
+		t.Fatal("ML-DSA private key material remained after zeroization")
+	}
+}
+
 func TestRunServeStartsAndStopsProductionService(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("production serving requires Linux")

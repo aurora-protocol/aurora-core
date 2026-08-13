@@ -67,6 +67,7 @@ type tcpProxyFlow struct {
 	closeOnce      sync.Once
 	pendingWrites  int
 	localCloseSent bool
+	draining       bool
 }
 
 type socks5RequestError struct {
@@ -575,6 +576,11 @@ func (r *TCPProxyRuntime) enqueueLocalWrite(flowID uint64, payload []byte) error
 		return fmt.Errorf("client: TCP proxy flow is closed")
 	default:
 	}
+	if flow.draining {
+		flow.mu.Unlock()
+		zeroTCPProxyBytes(owned)
+		return fmt.Errorf("client: TCP proxy flow is closed")
+	}
 	if flow.pendingWrites+len(owned) > r.options.MaxPendingWriteBytes {
 		flow.mu.Unlock()
 		zeroTCPProxyBytes(owned)
@@ -605,9 +611,14 @@ func (r *TCPProxyRuntime) runLocalWritePump(flow *tcpProxyFlow) {
 			zeroTCPProxyBytes(payload)
 			flow.mu.Lock()
 			flow.pendingWrites -= len(payload)
+			drainComplete := flow.draining && flow.pendingWrites == 0
 			flow.mu.Unlock()
 			if err != nil {
 				r.abortFlow(flow.id)
+				return
+			}
+			if drainComplete {
+				_ = flow.close()
 				return
 			}
 		}
@@ -626,7 +637,7 @@ func (r *TCPProxyRuntime) handlePeerFlowClose(frame protocol.AuroraFrame) error 
 	if flow == nil {
 		return nil
 	}
-	return flow.close()
+	return flow.drainAndClose()
 }
 
 func (r *TCPProxyRuntime) abortFlow(flowID uint64) {
@@ -672,6 +683,26 @@ func (f *tcpProxyFlow) close() error {
 		}
 	})
 	return closeErr
+}
+
+func (f *tcpProxyFlow) drainAndClose() error {
+	if f == nil {
+		return nil
+	}
+	f.mu.Lock()
+	select {
+	case <-f.done:
+		f.mu.Unlock()
+		return nil
+	default:
+	}
+	f.draining = true
+	drainComplete := f.pendingWrites == 0
+	f.mu.Unlock()
+	if drainComplete {
+		return f.close()
+	}
+	return nil
 }
 
 func (r *TCPProxyRuntime) addPending(connection net.Conn) error {

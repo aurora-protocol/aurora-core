@@ -128,6 +128,7 @@ func (r *PacketTUNRuntime) Serve(ctx context.Context) error {
 }
 
 // HandleFrameBlock converts one authenticated relay frame block into local IP packets.
+// Cancellation closes the device because packet-device writes cannot observe a context directly.
 func (r *PacketTUNRuntime) HandleFrameBlock(ctx context.Context, block protocol.FrameBlock) error {
 	if r == nil {
 		return fmt.Errorf("client: nil packet TUN runtime")
@@ -141,6 +142,10 @@ func (r *PacketTUNRuntime) HandleFrameBlock(ctx context.Context, block protocol.
 	if r.isClosed() {
 		return ErrPacketTUNRuntimeClosed
 	}
+	stopClose := context.AfterFunc(ctx, func() {
+		_ = r.Close()
+	})
+	defer stopClose()
 	packets, err := r.adapter.HandleFrameBlocks(ctx, []protocol.FrameBlock{block}, r.now())
 	if err != nil {
 		return err
@@ -165,6 +170,9 @@ func (r *PacketTUNRuntime) writePackets(ctx context.Context, packets [][]byte) e
 		size, err := r.device.Write(packet)
 		r.writeMu.Unlock()
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return fmt.Errorf("client: write packet TUN device: %w", err)
 		}
 		if size != len(packet) {

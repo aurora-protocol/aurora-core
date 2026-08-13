@@ -243,10 +243,12 @@ func (f *Fixture) Provisioning(t testing.TB) client.NativeProvisioning {
 	if err != nil {
 		t.Fatal(err)
 	}
+	publishedIssuerMetadata := f.issuer.PublishIssuerMetadata()
 	accessHint, err := admission.EncodeAccessHintCredential(f.accessHint)
 	if err != nil {
 		t.Fatal(err)
 	}
+	signedSeed, signedSeedRoots := firstHopSignedSeed(t, time.Now().UTC(), publishedIssuerMetadata, f.issuer.AuthorityKeys(), f.accessHint.HintIssuerID)
 	policyOffer, err := protocol.Encode(protocol.PolicyOffer{
 		OfferedVersions:         []uint64{registry.Version20},
 		OfferedSuites:           []uint64{f.deployment.Suite()},
@@ -281,7 +283,8 @@ func (f *Fixture) Provisioning(t testing.TB) client.NativeProvisioning {
 		IssuerURL:             "https://issuer.example",
 		IssuerCarrierPath:     fixtureIssuerPath,
 		IssuerMetadata:        issuerMetadata,
-		IssuerAuthorityKeys:   f.issuer.AuthorityKeys(),
+		SignedSeed:            signedSeed,
+		SignedSeedRoots:       signedSeedRoots,
 		Descriptor:            descriptor,
 		TrustedDescriptorHash: f.deployment.DescriptorHash(),
 		Template:              template,
@@ -296,6 +299,73 @@ func (f *Fixture) Provisioning(t testing.TB) client.NativeProvisioning {
 		RelayResponseHeaders:  responseHeaders,
 		RelayTrustRoots:       roots,
 	}
+}
+
+func firstHopSignedSeed(t testing.TB, now time.Time, metadata protocol.IssuerMetadata, bootstrapKeys []protocol.AuthorityKeyRecord, issuerID []byte) ([]byte, []protocol.AuthorityKeyRecord) {
+	t.Helper()
+	rootPrivateKey := firstHopECDSAKey(t)
+	rootPublicKey := firstHopECDSAPublicRecord(t, rootPrivateKey)
+	encodedRootPublicKey, err := protocol.Encode(rootPublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := protocol.AuthorityKeyRecord{
+		AuthorityID:    firstHopRandomBytes(t, 16),
+		AuthorityKeyID: trust.AuthorityKeyID(encodedRootPublicKey),
+		AuthorityRole:  1,
+		PublicKey:      rootPublicKey,
+		ValidFromUnix:  uint64(now.Add(-time.Minute).Unix()),
+		ValidUntilUnix: uint64(now.Add(time.Hour).Unix()),
+		KeyStatus:      registry.AuthorityActive,
+		UsageFlags:     registry.UsageMaySignSignedSeedRecord,
+	}
+	metadataHash, err := trust.IssuerMetadataHash(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := protocol.SignedSeedRecord{
+		SeedVersion:                registry.Version20,
+		SeedID:                     firstHopRandomBytes(t, 16),
+		ValidFromUnix:              uint64(now.Add(-time.Minute).Unix()),
+		ValidUntilUnix:             uint64(now.Add(time.Hour).Unix()),
+		DirectoryConsensusHint:     []byte("directory"),
+		BridgeBucketHint:           []byte("bridge"),
+		TokenIssuerHint:            append([]byte(nil), issuerID...),
+		IssuerMetadataHash:         metadataHash,
+		BootstrapAuthorityKeys:     cloneFirstHopAuthorityKeys(bootstrapKeys),
+		BootstrapCoverTemplateHash: firstHopRandomBytes(t, 48),
+		NextSeedCommitment:         firstHopRandomBytes(t, 48),
+		SoftwareUpdateEpoch:        1,
+		SeedSignature: protocol.ObjectSignature{
+			SignerKeyID:     append([]byte(nil), root.AuthorityKeyID...),
+			SignatureScheme: root.PublicKey.SignatureScheme,
+			KeyEncoding:     root.PublicKey.KeyEncoding,
+		},
+	}
+	input, err := trust.SignedSeedRecordSignatureInput(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed.SeedSignature.Signature, err = ecdsa.SignASN1(rand.Reader, rootPrivateKey, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedSeed, err := protocol.Encode(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encodedSeed, []protocol.AuthorityKeyRecord{root}
+}
+
+func cloneFirstHopAuthorityKeys(keys []protocol.AuthorityKeyRecord) []protocol.AuthorityKeyRecord {
+	cloned := make([]protocol.AuthorityKeyRecord, len(keys))
+	for index, key := range keys {
+		cloned[index] = key
+		cloned[index].AuthorityID = append([]byte(nil), key.AuthorityID...)
+		cloned[index].AuthorityKeyID = append([]byte(nil), key.AuthorityKeyID...)
+		cloned[index].PublicKey.PublicKey = append([]byte(nil), key.PublicKey.PublicKey...)
+	}
+	return cloned
 }
 
 // Issue fulfills a portable-core issuer request with the fixture's bound issuer service.

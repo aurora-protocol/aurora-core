@@ -110,6 +110,16 @@ func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service
 	if err != nil {
 		return nil, err
 	}
+	authorityPublicRecord := protocol.PublicKeyRecord{
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+		PublicKey:       authorityPublicKey,
+	}
+	encodedAuthorityPublicKey, err := protocol.Encode(authorityPublicRecord)
+	if err != nil {
+		return nil, err
+	}
+	authorityKeyID := auroratrust.AuthorityKeyID(encodedAuthorityPublicKey)
 	blindRSAKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, err
@@ -190,7 +200,7 @@ func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service
 			ValidUntilUnix:        validUntil,
 			ServiceStatus:         registry.IssuerStatusActive,
 		}},
-		MetadataSigningKeyID: repeatedByte(0x84, 16),
+		MetadataSigningKeyID: authorityKeyID,
 		SignatureScheme:      registry.SigECDSAP256SHA384DER,
 		KeyEncoding:          registry.KeyP256SEC1Uncompressed,
 	}
@@ -204,11 +214,11 @@ func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service
 	}
 	authorityKeys := []protocol.AuthorityKeyRecord{{
 		AuthorityID:    repeatedByte(0x85, 16),
-		AuthorityKeyID: metadata.MetadataSigningKeyID,
+		AuthorityKeyID: authorityKeyID,
 		PublicKey: protocol.PublicKeyRecord{
-			SignatureScheme: metadata.SignatureScheme,
-			KeyEncoding:     metadata.KeyEncoding,
-			PublicKey:       authorityPublicKey,
+			SignatureScheme: authorityPublicRecord.SignatureScheme,
+			KeyEncoding:     authorityPublicRecord.KeyEncoding,
+			PublicKey:       append([]byte(nil), authorityPublicRecord.PublicKey...),
 		},
 		ValidFromUnix:  authorityValidFrom,
 		ValidUntilUnix: authorityValidUntil,

@@ -26,20 +26,20 @@ import (
 )
 
 const (
-	nativeProvisioningFormat                     uint64 = 3
-	maximumNativeProvisioningBytes                      = 1 << 20
-	maximumNativeProvisioningURLBytes                   = 2048
-	maximumNativeProvisioningObjectBytes                = 256 << 10
-	maximumNativeProvisioningIssuerAuthorityKeys        = 16
-	maximumNativeProvisioningPolicyBytes                = 32 << 10
-	maximumNativeProvisioningHintsBytes                 = 32 << 10
-	maximumNativeProvisioningHeaderBytes                = 64 << 10
-	maximumNativeProvisioningTrustRootBytes             = 64 << 10
-	maximumNativeProvisioningTrustRoots                 = 16
-	maximumNativeProvisioningHeaderEntries              = 64
-	maximumNativeProvisioningHeaderNameBytes            = 64
-	maximumNativeProvisioningHeaderValueBytes           = 4096
-	nativeTemplateFutureSkew                            = 5 * time.Minute
+	nativeProvisioningFormat                  uint64 = 4
+	maximumNativeProvisioningBytes                   = 1 << 20
+	maximumNativeProvisioningURLBytes                = 2048
+	maximumNativeProvisioningObjectBytes             = 256 << 10
+	maximumNativeProvisioningSignedSeedRoots         = 16
+	maximumNativeProvisioningPolicyBytes             = 32 << 10
+	maximumNativeProvisioningHintsBytes              = 32 << 10
+	maximumNativeProvisioningHeaderBytes             = 64 << 10
+	maximumNativeProvisioningTrustRootBytes          = 64 << 10
+	maximumNativeProvisioningTrustRoots              = 16
+	maximumNativeProvisioningHeaderEntries           = 64
+	maximumNativeProvisioningHeaderNameBytes         = 64
+	maximumNativeProvisioningHeaderValueBytes        = 4096
+	nativeTemplateFutureSkew                         = 5 * time.Minute
 )
 
 // NativeProvisioning is the bounded canonical input for a portable native client session.
@@ -48,7 +48,8 @@ type NativeProvisioning struct {
 	IssuerURL             string
 	IssuerCarrierPath     string
 	IssuerMetadata        []byte
-	IssuerAuthorityKeys   []protocol.AuthorityKeyRecord
+	SignedSeed            []byte
+	SignedSeedRoots       []protocol.AuthorityKeyRecord
 	Descriptor            []byte
 	TrustedDescriptorHash []byte
 	Template              []byte
@@ -88,8 +89,9 @@ func EncodeNativeProvisioning(provisioning NativeProvisioning) ([]byte, error) {
 	encoder.WriteOpaque16([]byte(provisioning.IssuerURL))
 	encoder.WriteOpaque16([]byte(provisioning.IssuerCarrierPath))
 	encoder.WriteOpaque24(provisioning.IssuerMetadata)
-	encoder.WriteVarint(uint64(len(provisioning.IssuerAuthorityKeys)))
-	for _, key := range provisioning.IssuerAuthorityKeys {
+	encoder.WriteOpaque24(provisioning.SignedSeed)
+	encoder.WriteVarint(uint64(len(provisioning.SignedSeedRoots)))
+	for _, key := range provisioning.SignedSeedRoots {
 		key.EncodeTo(encoder)
 	}
 	encoder.WriteOpaque24(provisioning.Descriptor)
@@ -141,7 +143,8 @@ func parseNativeProvisioningContainer(encoded []byte) (NativeProvisioning, error
 		IssuerURL:             string(readNativeProvisioningOpaque16(reader, maximumNativeProvisioningURLBytes)),
 		IssuerCarrierPath:     string(readNativeProvisioningOpaque16(reader, maximumNativeProvisioningURLBytes)),
 		IssuerMetadata:        readNativeProvisioningOpaque24(reader, maximumNativeProvisioningObjectBytes),
-		IssuerAuthorityKeys:   readNativeProvisioningIssuerAuthorityKeys(reader),
+		SignedSeed:            readNativeProvisioningOpaque24(reader, maximumNativeProvisioningObjectBytes),
+		SignedSeedRoots:       readNativeProvisioningSignedSeedRoots(reader),
 		Descriptor:            readNativeProvisioningOpaque24(reader, maximumNativeProvisioningObjectBytes),
 		TrustedDescriptorHash: reader.ReadPreHash(),
 		Template:              readNativeProvisioningOpaque24(reader, maximumNativeProvisioningObjectBytes),
@@ -261,7 +264,17 @@ func (p NativeProvisioning) validatedObjectsAndDeployment(now time.Time) (native
 	if objects.accessHint.ExpiryUnix == 0 || uint64(now.Unix()) >= objects.accessHint.ExpiryUnix {
 		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, fmt.Errorf("client: native provisioning access hint is expired")
 	}
-	if err := validateNativeIssuerMetadata(objects.issuerMetadata, p.IssuerAuthorityKeys, uint64(now.Unix())); err != nil {
+	seed, authorityKeys, err := p.verifiedSignedSeedAt(now)
+	if err != nil {
+		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, err
+	}
+	if err := validateNativeSeedIssuerMetadataBinding(seed, objects.issuerMetadata); err != nil {
+		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, err
+	}
+	if !bytes.Equal(seed.TokenIssuerHint, objects.accessHint.HintIssuerID) {
+		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, fmt.Errorf("client: signed seed issuer does not match access hint")
+	}
+	if err := validateNativeIssuerMetadata(objects.issuerMetadata, authorityKeys, uint64(now.Unix())); err != nil {
 		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, err
 	}
 	if err := validateNativeIssuerScope(objects.issuerMetadata, objects.accessHint, uint64(now.Unix())); err != nil {
@@ -305,8 +318,11 @@ func (p NativeProvisioning) validateContainer() error {
 	if len(p.IssuerMetadata) == 0 || len(p.IssuerMetadata) > maximumNativeProvisioningObjectBytes {
 		return fmt.Errorf("client: native provisioning issuer metadata size is invalid")
 	}
-	if len(p.IssuerAuthorityKeys) == 0 || len(p.IssuerAuthorityKeys) > maximumNativeProvisioningIssuerAuthorityKeys {
-		return fmt.Errorf("client: native provisioning issuer authority key count is invalid")
+	if len(p.SignedSeed) == 0 || len(p.SignedSeed) > maximumNativeProvisioningObjectBytes {
+		return fmt.Errorf("client: native provisioning signed seed size is invalid")
+	}
+	if len(p.SignedSeedRoots) == 0 || len(p.SignedSeedRoots) > maximumNativeProvisioningSignedSeedRoots {
+		return fmt.Errorf("client: native provisioning signed seed root count is invalid")
 	}
 	for _, field := range []struct {
 		label   string
@@ -411,17 +427,71 @@ func (p NativeProvisioning) verifiedIssuerMetadataAt(now time.Time) (protocol.Is
 	if err := validateNativeCarrierPath(p.IssuerCarrierPath); err != nil {
 		return protocol.IssuerMetadata{}, fmt.Errorf("client: invalid issuer carrier path: %w", err)
 	}
-	if len(p.IssuerMetadata) == 0 || len(p.IssuerMetadata) > maximumNativeProvisioningObjectBytes || len(p.IssuerAuthorityKeys) == 0 || len(p.IssuerAuthorityKeys) > maximumNativeProvisioningIssuerAuthorityKeys {
+	if len(p.IssuerMetadata) == 0 || len(p.IssuerMetadata) > maximumNativeProvisioningObjectBytes || len(p.SignedSeed) == 0 || len(p.SignedSeed) > maximumNativeProvisioningObjectBytes || len(p.SignedSeedRoots) == 0 || len(p.SignedSeedRoots) > maximumNativeProvisioningSignedSeedRoots {
 		return protocol.IssuerMetadata{}, fmt.Errorf("client: native issuer metadata inputs are invalid")
 	}
 	metadata, err := decodeNativeIssuerMetadata(p.IssuerMetadata)
 	if err != nil {
 		return protocol.IssuerMetadata{}, err
 	}
-	if err := validateNativeIssuerMetadata(metadata, p.IssuerAuthorityKeys, uint64(now.Unix())); err != nil {
+	seed, authorityKeys, err := p.verifiedSignedSeedAt(now)
+	if err != nil {
+		return protocol.IssuerMetadata{}, err
+	}
+	if err := validateNativeSeedIssuerMetadataBinding(seed, metadata); err != nil {
+		return protocol.IssuerMetadata{}, err
+	}
+	if err := validateNativeIssuerMetadata(metadata, authorityKeys, uint64(now.Unix())); err != nil {
 		return protocol.IssuerMetadata{}, err
 	}
 	return metadata, nil
+}
+
+func (p NativeProvisioning) verifiedSignedSeedAt(now time.Time) (protocol.SignedSeedRecord, []protocol.AuthorityKeyRecord, error) {
+	if now.IsZero() || now.Unix() < 0 {
+		return protocol.SignedSeedRecord{}, nil, fmt.Errorf("client: native signed seed requires a valid time")
+	}
+	if len(p.SignedSeed) == 0 || len(p.SignedSeed) > maximumNativeProvisioningObjectBytes || len(p.SignedSeedRoots) == 0 || len(p.SignedSeedRoots) > maximumNativeProvisioningSignedSeedRoots {
+		return protocol.SignedSeedRecord{}, nil, fmt.Errorf("client: native signed seed inputs are invalid")
+	}
+	seed, err := decodeNativeSignedSeed(p.SignedSeed)
+	if err != nil {
+		return protocol.SignedSeedRecord{}, nil, err
+	}
+	store, err := trust.NewSignedSeedTrustStore(p.SignedSeedRoots)
+	if err != nil {
+		return protocol.SignedSeedRecord{}, nil, fmt.Errorf("client: native signed seed roots: %w", err)
+	}
+	if err := store.Accept(seed, uint64(now.Unix())); err != nil {
+		return protocol.SignedSeedRecord{}, nil, fmt.Errorf("client: native signed seed verification: %w", err)
+	}
+	return seed, store.AuthorityKeys(), nil
+}
+
+func validateNativeSeedIssuerMetadataBinding(seed protocol.SignedSeedRecord, metadata protocol.IssuerMetadata) error {
+	if !hasNativeNonZeroPreHash(seed.IssuerMetadataHash) {
+		return fmt.Errorf("client: signed seed does not commit to issuer metadata")
+	}
+	metadataHash, err := trust.IssuerMetadataHash(metadata)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(seed.IssuerMetadataHash, metadataHash) {
+		return fmt.Errorf("client: signed seed issuer metadata hash mismatch")
+	}
+	return nil
+}
+
+func hasNativeNonZeroPreHash(value []byte) bool {
+	if len(value) != 48 {
+		return false
+	}
+	for _, byteValue := range value {
+		if byteValue != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func validateNativeIssuerMetadata(metadata protocol.IssuerMetadata, authorityKeys []protocol.AuthorityKeyRecord, nowUnix uint64) error {
@@ -463,10 +533,22 @@ func decodeNativeIssuerMetadata(encoded []byte) (protocol.IssuerMetadata, error)
 	return metadata, nil
 }
 
-func readNativeProvisioningIssuerAuthorityKeys(reader *wire.Reader) []protocol.AuthorityKeyRecord {
-	count := reader.ReadVectorCount("native issuer authority key")
-	if reader.Err() != nil || count > maximumNativeProvisioningIssuerAuthorityKeys {
-		reader.SetErr(fmt.Errorf("client: native issuer authority key count is invalid"))
+func decodeNativeSignedSeed(encoded []byte) (protocol.SignedSeedRecord, error) {
+	if len(encoded) == 0 || len(encoded) > maximumNativeProvisioningObjectBytes {
+		return protocol.SignedSeedRecord{}, fmt.Errorf("client: native signed seed size is invalid")
+	}
+	reader := wire.NewReader(encoded)
+	seed := protocol.DecodeSignedSeedRecord(reader)
+	if reader.Err() != nil || !reader.EOF() {
+		return protocol.SignedSeedRecord{}, fmt.Errorf("client: malformed native signed seed")
+	}
+	return seed, nil
+}
+
+func readNativeProvisioningSignedSeedRoots(reader *wire.Reader) []protocol.AuthorityKeyRecord {
+	count := reader.ReadVectorCount("native signed seed root")
+	if reader.Err() != nil || count > maximumNativeProvisioningSignedSeedRoots {
+		reader.SetErr(fmt.Errorf("client: native signed seed root count is invalid"))
 		return nil
 	}
 	keys := make([]protocol.AuthorityKeyRecord, 0, count)

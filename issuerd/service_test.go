@@ -1,11 +1,13 @@
 package issuerd
 
 import (
+	"bytes"
 	"encoding/hex"
 	"strings"
 	"testing"
 
 	"github.com/aurora-protocol/aurora-core/admission"
+	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	auroratrust "github.com/aurora-protocol/aurora-core/trust"
 )
@@ -106,6 +108,24 @@ func TestServicePublishesIssuesVerifiesSpendsAndRedacts(t *testing.T) {
 		if !strings.Contains(logLine, want) {
 			t.Fatalf("operational log missing redaction marker %q: %s", want, logLine)
 		}
+	}
+}
+
+func TestHarnessServiceAuthorityKeyIDIsCanonical(t *testing.T) {
+	service, err := NewHarnessService(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := service.AuthorityKeys()
+	if len(keys) != 1 {
+		t.Fatalf("authority key count = %d, want 1", len(keys))
+	}
+	encoded, err := protocol.Encode(keys[0].PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(keys[0].AuthorityKeyID, auroratrust.AuthorityKeyID(encoded)) {
+		t.Fatal("harness authority key id is not canonical")
 	}
 }
 

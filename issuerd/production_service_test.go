@@ -94,6 +94,18 @@ func TestNewProductionBlindRSAServiceRejectsMismatchedPrivateKey(t *testing.T) {
 	}
 }
 
+func TestNewProductionBlindRSAServiceRejectsNonCanonicalAuthorityKeyID(t *testing.T) {
+	options, _ := productionBlindRSAServiceOptionsForTest(t, false)
+	options.AuthorityKeys[0].AuthorityKeyID[0] ^= 0xff
+	service, err := NewProductionBlindRSAService(options)
+	if err == nil || service != nil {
+		t.Fatalf("NewProductionBlindRSAService accepted a non-canonical authority key id: service=%v err=%v", service != nil, err)
+	}
+	if !strings.Contains(err.Error(), "canonical") {
+		t.Fatalf("non-canonical authority-key error = %v", err)
+	}
+}
+
 func TestProductionBlindRSAServiceDoesNotExposeHarnessIssuanceEndpoints(t *testing.T) {
 	options, nowUnix := productionBlindRSAServiceOptionsForTest(t, false)
 	service, err := NewProductionBlindRSAService(options)
@@ -206,9 +218,18 @@ func productionBlindRSAServiceOptionsForTest(t *testing.T, includeVOPRF bool) (P
 	if err != nil {
 		t.Fatal(err)
 	}
-	metadata.MetadataSigningKeyID = fill(0xa4, 16)
 	metadata.SignatureScheme = registry.SigECDSAP256SHA384DER
 	metadata.KeyEncoding = registry.KeyP256SEC1Uncompressed
+	authorityPublicRecord := protocol.PublicKeyRecord{
+		SignatureScheme: metadata.SignatureScheme,
+		KeyEncoding:     metadata.KeyEncoding,
+		PublicKey:       authorityPublicKey,
+	}
+	encodedAuthorityPublicRecord, err := protocol.Encode(authorityPublicRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata.MetadataSigningKeyID = auroratrust.AuthorityKeyID(encodedAuthorityPublicRecord)
 	input, err := auroratrust.IssuerMetadataSignatureInput(metadata)
 	if err != nil {
 		t.Fatal(err)
@@ -223,11 +244,7 @@ func productionBlindRSAServiceOptionsForTest(t *testing.T, includeVOPRF bool) (P
 		AuthorityKeys: []protocol.AuthorityKeyRecord{{
 			AuthorityID:    fill(0xa5, 16),
 			AuthorityKeyID: append([]byte(nil), metadata.MetadataSigningKeyID...),
-			PublicKey: protocol.PublicKeyRecord{
-				SignatureScheme: metadata.SignatureScheme,
-				KeyEncoding:     metadata.KeyEncoding,
-				PublicKey:       authorityPublicKey,
-			},
+			PublicKey:      authorityPublicRecord,
 			ValidFromUnix:  100,
 			ValidUntilUnix: metadata.ValidUntilUnix,
 			KeyStatus:      registry.AuthorityActive,

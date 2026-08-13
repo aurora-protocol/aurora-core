@@ -37,6 +37,7 @@ const (
 	packetAdapterUDP                         = 17
 	packetAdapterDNSPort                     = 53
 	packetAdapterIPv6HopByHop                = 0
+	packetAdapterIPv6Fragment                = 44
 	packetAdapterIPv6Destination             = 60
 	maximumPacketAdapterIPv6Options          = 2
 	tcpFlagFIN                               = 0x01
@@ -1133,6 +1134,7 @@ func parsePacketAdapterIPv6Headers(encoded []byte) (uint8, int, error) {
 	nextHeader := encoded[6]
 	offset := 40
 	seenDestination := false
+	seenFragment := false
 	for headerCount := 0; ; headerCount++ {
 		switch nextHeader {
 		case packetAdapterTCP, packetAdapterUDP:
@@ -1146,6 +1148,11 @@ func parsePacketAdapterIPv6Headers(encoded []byte) (uint8, int, error) {
 				return 0, 0, fmt.Errorf("client: packet adapter IPv6 destination options are duplicated")
 			}
 			seenDestination = true
+		case packetAdapterIPv6Fragment:
+			if seenFragment {
+				return 0, 0, fmt.Errorf("client: packet adapter IPv6 fragment header is duplicated")
+			}
+			seenFragment = true
 		default:
 			return 0, 0, fmt.Errorf("client: packet adapter IPv6 extension header is unsupported")
 		}
@@ -1153,11 +1160,29 @@ func parsePacketAdapterIPv6Headers(encoded []byte) (uint8, int, error) {
 			return 0, 0, fmt.Errorf("client: packet adapter IPv6 extension header chain is too long")
 		}
 		var err error
-		nextHeader, offset, err = parsePacketAdapterIPv6OptionsHeader(encoded, offset)
+		if nextHeader == packetAdapterIPv6Fragment {
+			nextHeader, offset, err = parsePacketAdapterIPv6FragmentHeader(encoded, offset)
+		} else {
+			nextHeader, offset, err = parsePacketAdapterIPv6OptionsHeader(encoded, offset)
+		}
 		if err != nil {
 			return 0, 0, err
 		}
 	}
+}
+
+func parsePacketAdapterIPv6FragmentHeader(encoded []byte, offset int) (uint8, int, error) {
+	if offset < 40 || offset+8 > len(encoded) || encoded[offset+1] != 0 {
+		return 0, 0, fmt.Errorf("client: packet adapter IPv6 fragment header is malformed")
+	}
+	flags := binary.BigEndian.Uint16(encoded[offset+2 : offset+4])
+	if flags&0x0006 != 0 {
+		return 0, 0, fmt.Errorf("client: packet adapter IPv6 fragment header reserved bits are set")
+	}
+	if flags&0xfff8 != 0 || flags&0x0001 != 0 {
+		return 0, 0, fmt.Errorf("client: packet adapter IPv6 fragmented packets are unsupported")
+	}
+	return encoded[offset], offset + 8, nil
 }
 
 func parsePacketAdapterIPv6OptionsHeader(encoded []byte, offset int) (uint8, int, error) {

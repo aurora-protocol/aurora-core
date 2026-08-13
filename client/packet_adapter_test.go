@@ -587,6 +587,49 @@ func TestPacketAdapterOpensIPv6UDPFlowWithDestinationOptions(t *testing.T) {
 	}
 }
 
+func TestPacketAdapterOpensIPv6TCPFlowWithAtomicFragmentHeader(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	source := netip.MustParseAddr("2001:db8::2")
+	target := netip.MustParseAddr("2606:4700:4700::1111")
+	syn, err := buildPacketAdapterTCPPacket(6, source, target, 50000, 443, 100, 0, tcpFlagSYN, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syn = packetAdapterIPv6WithFragmentHeader(t, syn)
+	if err := adapter.Ingress(context.Background(), syn, now); err != nil {
+		t.Fatal(err)
+	}
+	localPackets := adapter.DrainLocalPackets()
+	if len(localPackets) != 1 {
+		t.Fatalf("atomic IPv6 fragment TCP SYN returned %d local packets", len(localPackets))
+	}
+	local, err := parsePacketAdapterIPPacket(localPackets[0], 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if local.version != 6 || local.tcp.flags != tcpFlagSYN|tcpFlagACK || local.source != target || local.target != source {
+		t.Fatalf("unexpected atomic IPv6 fragment synthetic SYN-ACK: %+v", local)
+	}
+	encrypted, err := adapter.NextEncryptedPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := relayApplication.HandlePacket(context.Background(), now, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || len(blocks[0].Frames) != 1 || blocks[0].Frames[0].FrameType != registry.FrameFlowOpen {
+		t.Fatalf("atomic IPv6 fragment TCP SYN did not emit one FLOW_OPEN: %+v", blocks)
+	}
+}
+
 func TestPacketAdapterRejectsUnsafeIPv6ExtensionsWithoutFlowAllocation(t *testing.T) {
 	application, _ := packetAdapterApplications(t)
 	defer application.Close()
@@ -605,7 +648,7 @@ func TestPacketAdapterRejectsUnsafeIPv6ExtensionsWithoutFlowAllocation(t *testin
 	unsupportedOption := packetAdapterIPv6WithOptionsHeader(t, packet, 60)
 	unsupportedOption[42] = 0x80
 	routingHeader := packetAdapterIPv6WithOptionsHeader(t, packet, 43)
-	fragmentHeader := packetAdapterIPv6WithFragmentHeader(t, packet)
+	fragmentHeader := packetAdapterIPv6WithFragmentHeaderFields(t, packet, 1, true)
 	invalidOrder := packetAdapterIPv6WithOptionsHeader(t, packet, 0)
 	invalidOrder = packetAdapterIPv6WithOptionsHeader(t, invalidOrder, 60)
 	tooManyOptions := packetAdapterIPv6WithOptionsHeader(t, packet, 60)
@@ -1192,14 +1235,25 @@ func packetAdapterIPv6WithOptionsHeader(t testing.TB, encoded []byte, headerType
 }
 
 func packetAdapterIPv6WithFragmentHeader(t testing.TB, encoded []byte) []byte {
+	return packetAdapterIPv6WithFragmentHeaderFields(t, encoded, 0, false)
+}
+
+func packetAdapterIPv6WithFragmentHeaderFields(t testing.TB, encoded []byte, offset uint16, more bool) []byte {
 	t.Helper()
 	if len(encoded) < 40 || encoded[0]>>4 != 6 {
 		t.Fatal("packet adapter test packet is not IPv6")
 	}
+	if offset > 0x1fff {
+		t.Fatal("packet adapter IPv6 fragment offset is invalid")
+	}
 	packet := make([]byte, 0, len(encoded)+8)
 	packet = append(packet, encoded[:40]...)
 	packet[6] = 44
-	packet = append(packet, encoded[6], 0, 0, 0, 0, 0, 0, 1)
+	flags := offset << 3
+	if more {
+		flags |= 1
+	}
+	packet = append(packet, encoded[6], 0, byte(flags>>8), byte(flags), 0, 0, 0, 1)
 	packet = append(packet, encoded[40:]...)
 	binary.BigEndian.PutUint16(packet[4:6], uint16(len(packet)-40))
 	return packet
@@ -1355,11 +1409,15 @@ func FuzzPacketAdapterIngress(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
+	atomicIPv6FragmentSeed := packetAdapterIPv6WithFragmentHeader(f, ipv6Seed)
+	fragmentedIPv6Seed := packetAdapterIPv6WithFragmentHeaderFields(f, ipv6Seed, 1, true)
 	ipv6Seed = packetAdapterIPv6WithOptionsHeader(f, ipv6Seed, 60)
 	malformedIPv6Seed := append([]byte(nil), ipv6Seed...)
 	malformedIPv6Seed[41] = 1
 	f.Add(seed)
 	f.Add(ipv4FragmentSeed)
+	f.Add(atomicIPv6FragmentSeed)
+	f.Add(fragmentedIPv6Seed)
 	f.Add(ipv6Seed)
 	f.Add(malformedIPv6Seed)
 	f.Add([]byte{0x45, 0x00, 0x00, 0x14})

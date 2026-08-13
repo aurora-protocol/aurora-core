@@ -1320,10 +1320,9 @@ func startLiveFirstHopManualClient(t testing.TB, fixture liveFirstHopFixture, ha
 	}
 	descriptor := fixture.deployment.Descriptor()
 	proofProvider := &liveFirstHopProofProvider{
-		issuerID:      fixture.accessHint.HintIssuerID,
-		relayBucketID: fixture.accessHint.RelayBucketID,
-		privateKey:    fixture.tokenPrivate,
-		publicKeyDER:  fixture.tokenPublicDER,
+		privateKey:     fixture.tokenPrivate,
+		publicKeyDER:   fixture.tokenPublicDER,
+		issuerMetadata: fixture.issuerMetadata,
 	}
 	proof, replayProof, err := proofProvider.BuildProofs(ctx, handshake.ClientProofRequest{
 		AdmissionContextHash:    admissionContextHash,
@@ -2350,10 +2349,9 @@ func startLiveFirstHopIssuer(t testing.TB, fixture liveFirstHopFixture) *httptes
 			return
 		}
 		proofProvider := &liveFirstHopProofProvider{
-			issuerID:      fixture.accessHint.HintIssuerID,
-			relayBucketID: fixture.accessHint.RelayBucketID,
-			privateKey:    fixture.tokenPrivate,
-			publicKeyDER:  fixture.tokenPublicDER,
+			privateKey:     fixture.tokenPrivate,
+			publicKeyDER:   fixture.tokenPublicDER,
+			issuerMetadata: fixture.issuerMetadata,
 		}
 		proof, _, err := proofProvider.BuildProofs(request.Context(), handshake.ClientProofRequest{
 			AdmissionContextHash:    redemptionContext,
@@ -2418,6 +2416,10 @@ func (f liveFirstHopFixture) nativeProvisioningForHarness(t testing.TB, harness 
 	if err != nil {
 		t.Fatal(err)
 	}
+	issuerMetadata, err := protocol.Encode(f.issuerMetadata)
+	if err != nil {
+		t.Fatal(err)
+	}
 	accessHint, err := admission.EncodeAccessHintCredential(f.accessHint)
 	if err != nil {
 		t.Fatal(err)
@@ -2446,6 +2448,8 @@ func (f liveFirstHopFixture) nativeProvisioningForHarness(t testing.TB, harness 
 		RelayURL:              "https://" + harness.authority + harness.path,
 		IssuerURL:             issuerURL,
 		IssuerCarrierPath:     "/assets/issue/42",
+		IssuerMetadata:        issuerMetadata,
+		IssuerAuthorityKeys:   cloneLiveFirstHopAuthorityKeys(f.issuerAuthorityKeys),
 		Descriptor:            descriptor,
 		TrustedDescriptorHash: f.deployment.DescriptorHash(),
 		Template:              template,
@@ -2468,11 +2472,23 @@ func zeroLiveFirstHopBytes(value []byte) {
 	}
 }
 
+func cloneLiveFirstHopAuthorityKeys(in []protocol.AuthorityKeyRecord) []protocol.AuthorityKeyRecord {
+	out := make([]protocol.AuthorityKeyRecord, len(in))
+	for index, key := range in {
+		out[index] = key
+		out[index].AuthorityID = append([]byte(nil), key.AuthorityID...)
+		out[index].AuthorityKeyID = append([]byte(nil), key.AuthorityKeyID...)
+		out[index].PublicKey.PublicKey = append([]byte(nil), key.PublicKey.PublicKey...)
+	}
+	return out
+}
+
 func zeroLiveFirstHopNativeProvisioning(provisioning *auroraclient.NativeProvisioning) {
 	if provisioning == nil {
 		return
 	}
 	for _, field := range [][]byte{
+		provisioning.IssuerMetadata,
 		provisioning.Descriptor,
 		provisioning.TrustedDescriptorHash,
 		provisioning.Template,
@@ -2485,6 +2501,11 @@ func zeroLiveFirstHopNativeProvisioning(provisioning *auroraclient.NativeProvisi
 		provisioning.RelayTrustRoots,
 	} {
 		zeroLiveFirstHopBytes(field)
+	}
+	for index := range provisioning.IssuerAuthorityKeys {
+		zeroLiveFirstHopBytes(provisioning.IssuerAuthorityKeys[index].AuthorityID)
+		zeroLiveFirstHopBytes(provisioning.IssuerAuthorityKeys[index].AuthorityKeyID)
+		zeroLiveFirstHopBytes(provisioning.IssuerAuthorityKeys[index].PublicKey.PublicKey)
 	}
 	*provisioning = auroraclient.NativeProvisioning{}
 }
@@ -2726,13 +2747,15 @@ func mutateLiveFirstHopPrelude1Signature(index int, record []byte) ([]byte, erro
 }
 
 type liveFirstHopFixture struct {
-	deployment        trust.VerifiedRelayDeployment
-	accessHint        admission.AccessHintCredential
-	templateAuthority protocol.PublicKeyRecord
-	epochClassical    *ecdsa.PrivateKey
-	epochPQ           *mldsa65.PrivateKey
-	tokenPrivate      *rsa.PrivateKey
-	tokenPublicDER    []byte
+	deployment          trust.VerifiedRelayDeployment
+	accessHint          admission.AccessHintCredential
+	templateAuthority   protocol.PublicKeyRecord
+	epochClassical      *ecdsa.PrivateKey
+	epochPQ             *mldsa65.PrivateKey
+	tokenPrivate        *rsa.PrivateKey
+	tokenPublicDER      []byte
+	issuerMetadata      protocol.IssuerMetadata
+	issuerAuthorityKeys []protocol.AuthorityKeyRecord
 }
 
 func newLiveFirstHopFixture(t testing.TB, now time.Time) liveFirstHopFixture {
@@ -2764,6 +2787,66 @@ func newLiveFirstHopFixtureWithOriginSPKI(t testing.TB, now time.Time, originSPK
 		t.Fatal(err)
 	}
 	nowUnix := uint64(now.Unix())
+	issuerID := randomLiveFirstHopBytes(t, 16)
+	relayBucketID := randomLiveFirstHopBytes(t, 16)
+	tokenScopeID := randomLiveFirstHopBytes(t, 16)
+	issuerAuthority := generateLiveFirstHopECDSA(t)
+	issuerAuthorityKeyID := randomLiveFirstHopBytes(t, 16)
+	tokenKeyID := sha256.Sum256(tokenPublicDER)
+	issuerMetadata := protocol.IssuerMetadata{
+		MetadataVersion:     registry.Version20,
+		IssuerID:            issuerID,
+		ValidFromUnix:       nowUnix - 60,
+		ValidUntilUnix:      nowUnix + 3600,
+		IssuerName:          []byte("issuer.invalid"),
+		SupportedProofTypes: []uint64{registry.ProofBlindRSA2048},
+		TokenKeyMappings: []protocol.IssuerTokenKeyRecord{{
+			ProofType:  registry.ProofBlindRSA2048,
+			TokenKeyID: tokenKeyID[:],
+			TokenVerificationKey: protocol.TokenVerificationKeyRecord{
+				TokenVerificationKeyScheme: registry.TokenKeyBlindRSA2048,
+				TokenVerificationKey:       tokenPublicDER,
+			},
+			ValidFromUnix:  nowUnix - 60,
+			ValidUntilUnix: nowUnix + 3600,
+			KeyStatus:      registry.IssuerStatusActive,
+		}},
+		OriginInfoPolicies: []protocol.OriginInfoPolicy{{
+			PolicyID:             7,
+			OriginInfo:           []byte("origin.invalid"),
+			AllowEmptyOriginInfo: false,
+			ValidFromUnix:        nowUnix - 60,
+			ValidUntilUnix:       nowUnix + 3600,
+		}},
+		RelayBucketScopes: []protocol.RelayBucketScope{{
+			RelayBucketID:         relayBucketID,
+			TokenScopeID:          tokenScopeID,
+			AllowedOriginPolicyID: []uint64{7},
+			ValidFromUnix:         nowUnix - 60,
+			ValidUntilUnix:        nowUnix + 3600,
+		}},
+		MetadataSigningKeyID: issuerAuthorityKeyID,
+		SignatureScheme:      registry.SigECDSAP256SHA384DER,
+		KeyEncoding:          registry.KeyP256SEC1Uncompressed,
+	}
+	issuerMetadataInput, err := trust.IssuerMetadataSignatureInput(issuerMetadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerMetadata.MetadataSignature, err = ecdsa.SignASN1(rand.Reader, issuerAuthority, issuerMetadataInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerAuthorityKeys := []protocol.AuthorityKeyRecord{{
+		AuthorityID:    randomLiveFirstHopBytes(t, 16),
+		AuthorityKeyID: issuerAuthorityKeyID,
+		AuthorityRole:  1,
+		PublicKey:      liveFirstHopECDSAPublicRecord(t, issuerAuthority),
+		ValidFromUnix:  nowUnix - 60,
+		ValidUntilUnix: nowUnix + 3600,
+		KeyStatus:      registry.AuthorityActive,
+		UsageFlags:     registry.UsageMaySignIssuerMetadata,
+	}}
 	template := protocol.CoverTemplate{
 		TemplateVersion:  registry.Version20,
 		TemplateID:       randomLiveFirstHopBytes(t, 16),
@@ -2888,19 +2971,21 @@ func newLiveFirstHopFixtureWithOriginSPKI(t testing.TB, now time.Time, originSPK
 	return liveFirstHopFixture{
 		deployment: deployment,
 		accessHint: admission.AccessHintCredential{
-			HintIssuerID:  randomLiveFirstHopBytes(t, 16),
-			RelayBucketID: randomLiveFirstHopBytes(t, 16),
+			HintIssuerID:  append([]byte(nil), issuerID...),
+			RelayBucketID: append([]byte(nil), relayBucketID...),
 			HintEpochID:   3,
 			HintSelector:  randomLiveFirstHopBytes(t, 16),
 			HintSecret:    randomLiveFirstHopBytes(t, 32),
 			ExpiryUnix:    nowUnix + 1800,
 			MaxUses:       1,
 		},
-		templateAuthority: templateAuthorityRecord,
-		epochClassical:    epochClassical,
-		epochPQ:           epochPQPrivate,
-		tokenPrivate:      tokenPrivate,
-		tokenPublicDER:    tokenPublicDER,
+		templateAuthority:   templateAuthorityRecord,
+		epochClassical:      epochClassical,
+		epochPQ:             epochPQPrivate,
+		tokenPrivate:        tokenPrivate,
+		tokenPublicDER:      tokenPublicDER,
+		issuerMetadata:      issuerMetadata,
+		issuerAuthorityKeys: issuerAuthorityKeys,
 	}
 }
 
@@ -2913,10 +2998,9 @@ func (f liveFirstHopFixture) newClientDriver(t testing.TB) *handshake.ClientDriv
 func (f liveFirstHopFixture) newClientDriverWithProofProvider(t testing.TB) (*handshake.ClientDriver, *liveFirstHopProofProvider) {
 	t.Helper()
 	proofProvider := &liveFirstHopProofProvider{
-		issuerID:      f.accessHint.HintIssuerID,
-		relayBucketID: f.accessHint.RelayBucketID,
-		privateKey:    f.tokenPrivate,
-		publicKeyDER:  f.tokenPublicDER,
+		privateKey:     f.tokenPrivate,
+		publicKeyDER:   f.tokenPublicDER,
+		issuerMetadata: f.issuerMetadata,
 	}
 	driver, err := handshake.NewClientDriver(handshake.ClientDriverConfig{
 		Deployment:     f.deployment,
@@ -3006,10 +3090,9 @@ func (f liveFirstHopFixture) newRelayDriver(t testing.TB, supplied ...liveFirstH
 }
 
 type liveFirstHopProofProvider struct {
-	issuerID            []byte
-	relayBucketID       []byte
 	privateKey          *rsa.PrivateKey
 	publicKeyDER        []byte
+	issuerMetadata      protocol.IssuerMetadata
 	tamperAuthenticator bool
 	calls               atomic.Int32
 }
@@ -3022,11 +3105,10 @@ func (p *liveFirstHopProofProvider) BuildProofs(ctx context.Context, request han
 	if p.privateKey == nil || len(p.publicKeyDER) == 0 {
 		return protocol.AdmissionProof{}, protocol.ReplayProof{}, errors.New("live first-hop proof provider is missing its RSA key")
 	}
-	keyID := sha256.Sum256(p.publicKeyDER)
-	tokenScope, err := randomLiveFirstHopBytesResult(16)
-	if err != nil {
-		return protocol.AdmissionProof{}, protocol.ReplayProof{}, err
+	if len(p.issuerMetadata.IssuerID) != 16 || len(p.issuerMetadata.RelayBucketScopes) != 1 || len(p.issuerMetadata.OriginInfoPolicies) != 1 {
+		return protocol.AdmissionProof{}, protocol.ReplayProof{}, errors.New("live first-hop proof provider is missing issuer metadata")
 	}
+	keyID := sha256.Sum256(p.publicKeyDER)
 	tokenNonce, err := randomLiveFirstHopBytesResult(32)
 	if err != nil {
 		return protocol.AdmissionProof{}, protocol.ReplayProof{}, err
@@ -3034,21 +3116,21 @@ func (p *liveFirstHopProofProvider) BuildProofs(ctx context.Context, request han
 	proof := protocol.AdmissionProof{
 		ProofVersion:          registry.Version20,
 		ProofType:             registry.ProofBlindRSA2048,
-		IssuerID:              append([]byte(nil), p.issuerID...),
+		IssuerID:              append([]byte(nil), p.issuerMetadata.IssuerID...),
 		TokenKeyID:            keyID[:],
-		RelayBucketID:         append([]byte(nil), p.relayBucketID...),
-		TokenScopeID:          tokenScope,
+		RelayBucketID:         append([]byte(nil), p.issuerMetadata.RelayBucketScopes[0].RelayBucketID...),
+		TokenScopeID:          append([]byte(nil), p.issuerMetadata.RelayBucketScopes[0].TokenScopeID...),
 		ExpiryUnix:            request.ReplayEpochValidUntil - 1,
 		TokenNonce:            tokenNonce,
 		RedemptionContextHash: append([]byte(nil), request.AdmissionContextHash...),
 	}
-	issuerName := []byte("issuer.invalid")
-	originInfo := []byte("origin.invalid")
+	issuerName := p.issuerMetadata.IssuerName
+	originInfo := p.issuerMetadata.OriginInfoPolicies[0].OriginInfo
 	challengeDigest, err := admission.RFC9577TokenChallengeDigest(proof.ProofType, issuerName, originInfo, proof.RedemptionContextHash)
 	if err != nil {
 		return protocol.AdmissionProof{}, protocol.ReplayProof{}, err
 	}
-	issuerMetadataHash, err := randomLiveFirstHopBytesResult(48)
+	issuerMetadataHash, err := trust.IssuerMetadataHash(p.issuerMetadata)
 	if err != nil {
 		return protocol.AdmissionProof{}, protocol.ReplayProof{}, err
 	}

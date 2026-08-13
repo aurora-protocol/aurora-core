@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/handshake"
+	"github.com/aurora-protocol/aurora-core/issuerd"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/server"
@@ -20,7 +21,7 @@ func TestProvisionedSessionBuildsIssuerWorkAndClosesDeferredHandshake(t *testing
 	deferred := &provisionedSessionTestHandshake{}
 	session, work, err := newProvisionedSession(
 		context.Background(),
-		NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"},
+		provisionedSessionTestProvisioning(t, time.Unix(1_700_000_000, 0).UTC(), nil),
 		ProvisionedSessionOptions{
 			now:    func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
 			random: bytes.NewReader(bytes.Repeat([]byte{0x73}, 32)),
@@ -54,7 +55,7 @@ func TestProvisionedSessionExpiresAbandonedIssuerWork(t *testing.T) {
 	deferred := &provisionedSessionTestHandshake{}
 	session, work, err := newProvisionedSession(
 		context.Background(),
-		NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"},
+		provisionedSessionTestProvisioning(t, time.Unix(1_700_000_000, 0).UTC(), nil),
 		ProvisionedSessionOptions{
 			IssuerTimeout: time.Nanosecond,
 			now:           func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
@@ -97,7 +98,7 @@ func TestProvisionedSessionRejectsMalformedIssuerResponseAndCloses(t *testing.T)
 	deferred := &provisionedSessionTestHandshake{}
 	session, _, err := newProvisionedSession(
 		context.Background(),
-		NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"},
+		provisionedSessionTestProvisioning(t, time.Unix(1_700_000_000, 0).UTC(), nil),
 		ProvisionedSessionOptions{
 			now:    func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
 			random: bytes.NewReader(bytes.Repeat([]byte{0x74}, 32)),
@@ -117,11 +118,64 @@ func TestProvisionedSessionRejectsMalformedIssuerResponseAndCloses(t *testing.T)
 	}
 }
 
+func TestProvisionedSessionRejectsIssuerResponseOutsideVerifiedMetadata(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	trustedIssuer := newProvisionedSessionTestIssuer(t, now)
+	untrustedIssuer := newProvisionedSessionTestIssuer(t, now)
+	application, err := session.NewApplication(session.Config{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 9,
+		Write: session.DirectionConfig{
+			Direction: 0,
+			Secret:    bytes.Repeat([]byte{0x11}, 48),
+			Key:       bytes.Repeat([]byte{0x12}, 32),
+			IV:        bytes.Repeat([]byte{0x13}, 12),
+		},
+		Read: session.DirectionConfig{
+			Direction: 1,
+			Secret:    bytes.Repeat([]byte{0x21}, 48),
+			Key:       bytes.Repeat([]byte{0x22}, 32),
+			IV:        bytes.Repeat([]byte{0x23}, 12),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferred := &provisionedSessionTestHandshake{established: &handshake.EstablishedSession{
+		Application:  application,
+		ReadCarrier:  io.NopCloser(bytes.NewReader(nil)),
+		WriteCarrier: provisionedSessionDiscardWriteCloser{Writer: io.Discard},
+	}}
+	session, _, err := newProvisionedSession(
+		context.Background(),
+		provisionedSessionTestProvisioning(t, now, trustedIssuer),
+		ProvisionedSessionOptions{
+			now:    func() time.Time { return now },
+			random: bytes.NewReader(bytes.Repeat([]byte{0x76}, 64)),
+			start: func(context.Context, NativeProvisioning, time.Time) (provisionedSessionHandshake, handshake.ClientProofRequest, error) {
+				return deferred, provisionedSessionTestRequest(), nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Complete(context.Background(), provisionedSessionIssuerResponse(t, untrustedIssuer, provisionedSessionTestRequest(), now)); err == nil {
+		t.Fatal("provisioned session accepted a response outside its verified issuer metadata")
+	}
+	if deferred.Completed() {
+		t.Fatal("untrusted issuer response reached the relay handshake")
+	}
+	if !deferred.Closed() {
+		t.Fatal("untrusted issuer response left the relay handshake open")
+	}
+}
+
 func TestProvisionedSessionRejectsCompletionAfterClose(t *testing.T) {
 	deferred := &provisionedSessionTestHandshake{}
 	session, _, err := newProvisionedSession(
 		context.Background(),
-		NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"},
+		provisionedSessionTestProvisioning(t, time.Unix(1_700_000_000, 0).UTC(), nil),
 		ProvisionedSessionOptions{
 			now:    func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
 			random: bytes.NewReader(bytes.Repeat([]byte{0x75}, 32)),
@@ -142,6 +196,8 @@ func TestProvisionedSessionRejectsCompletionAfterClose(t *testing.T) {
 }
 
 func TestProvisionedSessionTransfersEstablishedSessionOnce(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	issuer := newProvisionedSessionTestIssuer(t, now)
 	application, err := session.NewApplication(session.Config{
 		Suite:           registry.SuiteHybrid768AESGCM,
 		RouteInstanceID: 9,
@@ -169,9 +225,9 @@ func TestProvisionedSessionTransfersEstablishedSessionOnce(t *testing.T) {
 	deferred := &provisionedSessionTestHandshake{established: established}
 	session, _, err := newProvisionedSession(
 		context.Background(),
-		NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"},
+		provisionedSessionTestProvisioning(t, now, issuer),
 		ProvisionedSessionOptions{
-			now:    func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+			now:    func() time.Time { return now },
 			random: bytes.NewReader(bytes.Repeat([]byte{0x76}, 64)),
 			start: func(context.Context, NativeProvisioning, time.Time) (provisionedSessionHandshake, handshake.ClientProofRequest, error) {
 				return deferred, provisionedSessionTestRequest(), nil
@@ -181,14 +237,14 @@ func TestProvisionedSessionTransfersEstablishedSessionOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := session.Complete(context.Background(), provisionedSessionIssuerResponse(t))
+	got, err := session.Complete(context.Background(), provisionedSessionIssuerResponse(t, issuer, provisionedSessionTestRequest(), now))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != established || session.Established() != established || !deferred.Completed() {
 		t.Fatal("provisioned session did not transfer the established carrier")
 	}
-	if _, err := session.Complete(context.Background(), provisionedSessionIssuerResponse(t)); err == nil {
+	if _, err := session.Complete(context.Background(), provisionedSessionIssuerResponse(t, issuer, provisionedSessionTestRequest(), now)); err == nil {
 		t.Fatal("provisioned session accepted a second completion")
 	}
 	if err := session.Close(); err != nil {
@@ -244,20 +300,43 @@ func (h *provisionedSessionTestHandshake) Completed() bool {
 	return h.completed
 }
 
-func provisionedSessionIssuerResponse(t testing.TB) []byte {
+func provisionedSessionTestProvisioning(t testing.TB, now time.Time, issuer *issuerd.Service) NativeProvisioning {
 	t.Helper()
-	encoded, err := protocol.Encode(protocol.AdmissionProof{
-		ProofVersion:          registry.Version20,
-		ProofType:             registry.ProofLabStaticToken,
-		IssuerID:              bytes.Repeat([]byte{0x51}, 16),
-		TokenKeyID:            bytes.Repeat([]byte{0x52}, 32),
-		RelayBucketID:         bytes.Repeat([]byte{0x53}, 16),
-		TokenScopeID:          bytes.Repeat([]byte{0x54}, 16),
-		ExpiryUnix:            1_700_000_300,
+	if issuer == nil {
+		issuer = newProvisionedSessionTestIssuer(t, now)
+	}
+	metadata, err := protocol.Encode(issuer.PublishIssuerMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NativeProvisioning{
+		IssuerURL:           "https://issuer.example",
+		IssuerCarrierPath:   "/assets/issue/42",
+		IssuerMetadata:      metadata,
+		IssuerAuthorityKeys: issuer.AuthorityKeys(),
+	}
+}
+
+func newProvisionedSessionTestIssuer(t testing.TB, now time.Time) *issuerd.Service {
+	t.Helper()
+	issuer, err := issuerd.NewHarnessService(uint64(now.Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return issuer
+}
+
+func provisionedSessionIssuerResponse(t testing.TB, issuer *issuerd.Service, request handshake.ClientProofRequest, now time.Time) []byte {
+	t.Helper()
+	proof, err := issuer.IssueBlindRSA2048(issuerd.IssueBlindRSA2048Request{
 		TokenNonce:            bytes.Repeat([]byte{0x55}, 32),
-		RedemptionContextHash: bytes.Repeat([]byte{0x56}, 48),
-		TokenAuthenticator:    []byte("test-token"),
+		RedemptionContextHash: request.AdmissionContextHash,
+		ExpiryUnix:            uint64(now.Add(5 * time.Minute).Unix()),
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := protocol.Encode(proof)
 	if err != nil {
 		t.Fatal(err)
 	}

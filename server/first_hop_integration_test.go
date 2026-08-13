@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto"
@@ -11,6 +12,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/asn1"
 	"errors"
 	"fmt"
@@ -335,6 +337,191 @@ func TestLiveFirstHopEncryptedTCPAndUDPEgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	queueLiveFirstHopBlock(t, ctx, established.Application, protocol.FrameBlock{Frames: []protocol.AuroraFrame{udpClose}})
+}
+
+func TestLiveFirstHopTCPProxyRuntimeEgress(t *testing.T) {
+	echoListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = echoListener.Close() })
+	echoResult := make(chan error, 1)
+	go func() {
+		connection, acceptErr := echoListener.Accept()
+		if acceptErr != nil {
+			echoResult <- acceptErr
+			return
+		}
+		defer connection.Close()
+		payload := make([]byte, len("encrypted proxy payload"))
+		if _, readErr := io.ReadFull(connection, payload); readErr != nil {
+			echoResult <- readErr
+			return
+		}
+		_, writeErr := connection.Write(payload)
+		echoResult <- writeErr
+	}()
+
+	fixture := newLiveFirstHopFixture(t, time.Now())
+	relayDriver := fixture.newRelayDriver(t)
+	sessionFactory, err := NewFirstHopProxySessionFactory(FirstHopProxySessionOptions{
+		ExitPolicy: relay.ExitPolicy{AllowPrivate: true},
+		Dialer:     &net.Dialer{},
+		Resolver:   net.DefaultResolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness := startLiveFirstHopHarnessWithSessionFactory(t, fixture, relayDriver, nil, sessionFactory)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	established, err := fixture.newClientDriver(t).Connect(ctx, harness.opener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := auroraclient.NewTCPProxyRuntime(established.Application, auroraclient.TCPProxyRuntimeOptions{MaxFlows: 1, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- runtime.Serve(ctx, proxyListener) }()
+	pumpResult := make(chan error, 1)
+	go func() {
+		pumpResult <- transport.RunPacketDuplex(
+			ctx,
+			established.ReadCarrier,
+			established.WriteCarrier,
+			established.Application,
+			runtime.HandleFrameBlock,
+			1<<20,
+		)
+	}()
+	t.Cleanup(func() {
+		_ = runtime.Close()
+		_ = established.Close()
+		for name, result := range map[string]chan error{"proxy listener": serveResult, "carrier": pumpResult} {
+			select {
+			case resultErr := <-result:
+				if resultErr != nil && !errors.Is(resultErr, context.Canceled) && !errors.Is(resultErr, session.ErrClosed) && !errors.Is(resultErr, net.ErrClosed) && !errors.Is(resultErr, io.ErrClosedPipe) && !errors.Is(resultErr, io.EOF) {
+					t.Errorf("%s stopped unexpectedly: %v", name, resultErr)
+				}
+			case <-time.After(time.Second):
+				t.Errorf("%s did not stop", name)
+			}
+		}
+	})
+
+	connection, err := net.DialTimeout("tcp4", proxyListener.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	target := echoListener.Addr().(*net.TCPAddr)
+	if _, err := fmt.Fprintf(connection, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target.String(), target.String()); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(connection)
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response != "HTTP/1.1 200 Connection Established\r\n" {
+		t.Fatalf("CONNECT response = %q", response)
+	}
+	if empty, err := reader.ReadString('\n'); err != nil || empty != "\r\n" {
+		t.Fatalf("CONNECT response terminator = %q, %v", empty, err)
+	}
+	payload := []byte("encrypted proxy payload")
+	if _, err := connection.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	responsePayload := make([]byte, len(payload))
+	if _, err := io.ReadFull(reader, responsePayload); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(responsePayload, payload) {
+		t.Fatalf("proxy response = %q, want %q", responsePayload, payload)
+	}
+	if err := <-echoResult; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLiveFirstHopProvisionedSessionEgress(t *testing.T) {
+	now := time.Now().UTC()
+	tlsMaterial := newLiveFirstHopTLSMaterial(t)
+	certificate, err := x509.ParseCertificate(tlsMaterial.certificate.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := newLiveFirstHopFixtureWithOriginSPKI(t, now, auroracrypto.PreHash(certificate.RawSubjectPublicKeyInfo))
+	harness := startLiveFirstHopHarnessWithSessionFactoryAndTLS(t, fixture, fixture.newRelayDriver(t), nil, nil, tlsMaterial)
+	issuer := startLiveFirstHopIssuer(t, fixture)
+	provisioning := fixture.nativeProvisioningForHarness(t, harness, issuer.URL)
+	encodedProvisioning, err := auroraclient.EncodeNativeProvisioning(provisioning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provisioning, err = auroraclient.ParseNativeProvisioning(encodedProvisioning, now)
+	zeroLiveFirstHopBytes(encodedProvisioning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	provisioned, work, err := auroraclient.BeginProvisionedSession(ctx, provisioning, auroraclient.ProvisionedSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provisioned.Close()
+	issuerResponse := liveFirstHopIssueResponse(t, issuer, work)
+	work.Zero()
+	defer zeroLiveFirstHopBytes(issuerResponse)
+	established, err := provisioned.Complete(ctx, issuerResponse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer established.Close()
+
+	pumpContext, cancelPump := context.WithCancel(ctx)
+	defer cancelPump()
+	pumpResult := make(chan error, 1)
+	go func() {
+		pumpResult <- transport.RunPacketDuplex(
+			pumpContext,
+			established.ReadCarrier,
+			established.WriteCarrier,
+			established.Application,
+			func(context.Context, protocol.FrameBlock) error { return nil },
+			1<<20,
+		)
+	}()
+	payload := randomLiveFirstHopBytes(t, 96)
+	if err := established.Application.QueueFrames(ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding, Payload: payload}}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case received := <-harness.serverFrames:
+		if !bytes.Equal(received, payload) {
+			t.Fatalf("relay received provisioned payload %x, want %x", received, payload)
+		}
+	case <-ctx.Done():
+		t.Fatalf("provisioned payload did not reach relay: %v", ctx.Err())
+	}
+	cancelPump()
+	_ = established.Close()
+	select {
+	case err := <-pumpResult:
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, session.ErrClosed) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, io.EOF) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("provisioned carrier pump did not stop")
+	}
 }
 
 func TestLiveFirstHopEgressPolicyDenialPreventsDial(t *testing.T) {
@@ -1647,6 +1834,7 @@ type liveFirstHopHarness struct {
 	authority         string
 	path              string
 	clientTLS         *tls.Config
+	certificateRaw    []byte
 	bindingMetadata   handshake.HTTP2BindingMetadata
 	serverFrames      chan []byte
 	relayApplications chan *session.Application
@@ -1655,12 +1843,24 @@ type liveFirstHopHarness struct {
 	close             func() error
 }
 
+type liveFirstHopTLSMaterial struct {
+	certificate tls.Certificate
+	clientTLS   *tls.Config
+}
+
 func startLiveFirstHopHarness(t testing.TB, fixture liveFirstHopFixture, relayDriver *handshake.RelayDriver, coverOrigin http.Handler) liveFirstHopHarness {
 	return startLiveFirstHopHarnessWithSessionFactory(t, fixture, relayDriver, coverOrigin, nil)
 }
 
 func startLiveFirstHopHarnessWithSessionFactory(t testing.TB, fixture liveFirstHopFixture, relayDriver *handshake.RelayDriver, coverOrigin http.Handler, sessionFactory FirstHopSessionFactory) liveFirstHopHarness {
+	return startLiveFirstHopHarnessWithSessionFactoryAndTLS(t, fixture, relayDriver, coverOrigin, sessionFactory, liveFirstHopTLSMaterial{})
+}
+
+func startLiveFirstHopHarnessWithSessionFactoryAndTLS(t testing.TB, fixture liveFirstHopFixture, relayDriver *handshake.RelayDriver, coverOrigin http.Handler, sessionFactory FirstHopSessionFactory, tlsMaterial liveFirstHopTLSMaterial) liveFirstHopHarness {
 	t.Helper()
+	if len(tlsMaterial.certificate.Certificate) == 0 || tlsMaterial.clientTLS == nil {
+		tlsMaterial = newLiveFirstHopTLSMaterial(t)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1714,11 +1914,8 @@ func startLiveFirstHopHarnessWithSessionFactory(t testing.TB, fixture liveFirstH
 		}
 		return capsule2, endpoint, policy, finishErr
 	}
-	certificateServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	certificate := certificateServer.TLS.Certificates[0]
-	clientTLS := certificateServer.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
-	certificateServer.Close()
-	httpServer, err := NewFirstHopHTTPServer(authority, handler, &tls.Config{Certificates: []tls.Certificate{certificate}})
+	clientTLS := tlsMaterial.clientTLS.Clone()
+	httpServer, err := NewFirstHopHTTPServer(authority, handler, &tls.Config{Certificates: []tls.Certificate{tlsMaterial.certificate}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1784,12 +1981,164 @@ func startLiveFirstHopHarnessWithSessionFactory(t testing.TB, fixture liveFirstH
 		authority:         authority,
 		path:              path,
 		clientTLS:         clientTLS.Clone(),
+		certificateRaw:    append([]byte(nil), tlsMaterial.certificate.Certificate[0]...),
 		bindingMetadata:   bindingMetadata,
 		serverFrames:      serverFrames,
 		relayApplications: relayApplications,
 		connections:       connections,
 		shutdown:          httpServer.Shutdown,
 		close:             closeHarness,
+	}
+}
+
+func newLiveFirstHopTLSMaterial(t testing.TB) liveFirstHopTLSMaterial {
+	t.Helper()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	return liveFirstHopTLSMaterial{
+		certificate: server.TLS.Certificates[0],
+		clientTLS:   server.Client().Transport.(*http.Transport).TLSClientConfig.Clone(),
+	}
+}
+
+func startLiveFirstHopIssuer(t testing.TB, fixture liveFirstHopFixture) *httptest.Server {
+	t.Helper()
+	issuer := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/assets/issue/42" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(request.Body, 1<<20+1))
+		if err != nil || len(body) == 0 || len(body) > 1<<20 {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		carrierType, payload, err := DecodeCarrier(body)
+		if err != nil || carrierType != CarrierBlindRSAIssueReq {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_, redemptionContext, expiry, err := DecodeCarrierIssueRequest(payload)
+		if err != nil {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		proofProvider := &liveFirstHopProofProvider{
+			issuerID:      fixture.accessHint.HintIssuerID,
+			relayBucketID: fixture.accessHint.RelayBucketID,
+			privateKey:    fixture.tokenPrivate,
+			publicKeyDER:  fixture.tokenPublicDER,
+		}
+		proof, _, err := proofProvider.BuildProofs(request.Context(), handshake.ClientProofRequest{
+			AdmissionContextHash:    redemptionContext,
+			HandshakeBindingContext: bytes.Repeat([]byte{0x51}, 48),
+			RouteInstanceID:         1,
+			ReplayEpochID:           1,
+			ReplayEpochValidUntil:   expiry + 1,
+			ReplayWindowID:          bytes.Repeat([]byte{0x52}, 16),
+		})
+		if err != nil {
+			writer.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		encoded, err := protocol.Encode(proof)
+		if err != nil {
+			writer.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = writer.Write(EncodeCarrier(CarrierBlindRSAIssueResp, encoded))
+	}))
+	t.Cleanup(issuer.Close)
+	return issuer
+}
+
+func liveFirstHopIssueResponse(t testing.TB, issuer *httptest.Server, work auroraclient.IssuerWork) []byte {
+	t.Helper()
+	if issuer == nil || work.IssuerURL != issuer.URL || work.IssuerCarrierPath != "/assets/issue/42" {
+		t.Fatal("live first-hop issuer work is not pinned to the test issuer")
+	}
+	request, err := http.NewRequest(http.MethodPost, issuer.URL+work.IssuerCarrierPath, bytes.NewReader(work.RequestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/octet-stream")
+	response, err := issuer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "application/octet-stream" {
+		t.Fatalf("live first-hop issuer response = status=%d content_type=%q", response.StatusCode, response.Header.Get("Content-Type"))
+	}
+	encoded, err := io.ReadAll(io.LimitReader(response.Body, 1<<20+1))
+	if err != nil || len(encoded) == 0 || len(encoded) > 1<<20 {
+		t.Fatalf("read live first-hop issuer response: len=%d err=%v", len(encoded), err)
+	}
+	return encoded
+}
+
+func (f liveFirstHopFixture) nativeProvisioningForHarness(t testing.TB, harness liveFirstHopHarness, issuerURL string) auroraclient.NativeProvisioning {
+	t.Helper()
+	descriptor, err := protocol.Encode(f.deployment.Descriptor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	template, err := protocol.Encode(f.deployment.Template())
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateAuthority, err := protocol.Encode(f.templateAuthority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accessHint, err := admission.EncodeAccessHintCredential(f.accessHint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyOffer, err := protocol.Encode(liveFirstHopPolicyOffer(f.deployment))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transportHints, err := protocol.Encode(liveFirstHopTransportHints(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestHeaders, err := auroraclient.EncodeNativeHeaders(http.Header{"Accept": {"application/octet-stream"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseHeaders, err := auroraclient.EncodeNativeHeaders(http.Header{"Content-Type": {"application/octet-stream"}, "X-Cover-Mode": {"ordinary"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustRoots, err := auroraclient.EncodeNativeTrustRoots([][]byte{harness.certificateRaw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return auroraclient.NativeProvisioning{
+		RelayURL:              "https://" + harness.authority + harness.path,
+		IssuerURL:             issuerURL,
+		IssuerCarrierPath:     "/assets/issue/42",
+		Descriptor:            descriptor,
+		TrustedDescriptorHash: f.deployment.DescriptorHash(),
+		Template:              template,
+		TemplateAuthorityKey:  templateAuthority,
+		RequestClassID:        f.deployment.RequestClass().ClassID,
+		Suite:                 f.deployment.Suite(),
+		AccessHint:            accessHint,
+		PolicyOffer:           policyOffer,
+		TransportHints:        transportHints,
+		RelayExpectedStatus:   http.StatusCreated,
+		RelayRequestHeaders:   requestHeaders,
+		RelayResponseHeaders:  responseHeaders,
+		RelayTrustRoots:       trustRoots,
+	}
+}
+
+func zeroLiveFirstHopBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
 	}
 }
 
@@ -2030,16 +2379,24 @@ func mutateLiveFirstHopPrelude1Signature(index int, record []byte) ([]byte, erro
 }
 
 type liveFirstHopFixture struct {
-	deployment     trust.VerifiedRelayDeployment
-	accessHint     admission.AccessHintCredential
-	epochClassical *ecdsa.PrivateKey
-	epochPQ        *mldsa65.PrivateKey
-	tokenPrivate   *rsa.PrivateKey
-	tokenPublicDER []byte
+	deployment        trust.VerifiedRelayDeployment
+	accessHint        admission.AccessHintCredential
+	templateAuthority protocol.PublicKeyRecord
+	epochClassical    *ecdsa.PrivateKey
+	epochPQ           *mldsa65.PrivateKey
+	tokenPrivate      *rsa.PrivateKey
+	tokenPublicDER    []byte
 }
 
 func newLiveFirstHopFixture(t testing.TB, now time.Time) liveFirstHopFixture {
+	return newLiveFirstHopFixtureWithOriginSPKI(t, now, randomLiveFirstHopBytes(t, 48))
+}
+
+func newLiveFirstHopFixtureWithOriginSPKI(t testing.TB, now time.Time, originSPKIHash []byte) liveFirstHopFixture {
 	t.Helper()
+	if len(originSPKIHash) != 48 {
+		t.Fatal("live first-hop origin SPKI hash length is invalid")
+	}
 	longtermClassical := generateLiveFirstHopECDSA(t)
 	epochClassical := generateLiveFirstHopECDSA(t)
 	templateAuthority := generateLiveFirstHopECDSA(t)
@@ -2066,7 +2423,7 @@ func newLiveFirstHopFixture(t testing.TB, now time.Time) liveFirstHopFixture {
 		TemplateFamilyID: randomLiveFirstHopBytes(t, 16),
 		ValidFromUnix:    nowUnix - 60,
 		ValidUntilUnix:   nowUnix + 3600,
-		OriginSPKIHash:   randomLiveFirstHopBytes(t, 48),
+		OriginSPKIHash:   append([]byte(nil), originSPKIHash...),
 		PublicNameHash:   randomLiveFirstHopBytes(t, 48),
 		RequestClasses: []protocol.RequestClass{{
 			ClassID:             7,
@@ -2165,11 +2522,12 @@ func newLiveFirstHopFixture(t testing.TB, now time.Time) liveFirstHopFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	templateAuthorityRecord := liveFirstHopECDSAPublicRecord(t, templateAuthority)
 	deployment, err := trust.VerifyRelayDeployment(trust.RelayDeploymentVerification{
 		Descriptor:               descriptor,
 		TrustedDescriptorHash:    descriptorHash,
 		Template:                 template,
-		TemplateAuthorityKey:     liveFirstHopECDSAPublicRecord(t, templateAuthority),
+		TemplateAuthorityKey:     templateAuthorityRecord,
 		RequestClassID:           7,
 		Suite:                    registry.SuiteHybrid768P256AESGCM,
 		Method:                   registry.MethodWebH2Stream,
@@ -2191,10 +2549,11 @@ func newLiveFirstHopFixture(t testing.TB, now time.Time) liveFirstHopFixture {
 			ExpiryUnix:    nowUnix + 1800,
 			MaxUses:       1,
 		},
-		epochClassical: epochClassical,
-		epochPQ:        epochPQPrivate,
-		tokenPrivate:   tokenPrivate,
-		tokenPublicDER: tokenPublicDER,
+		templateAuthority: templateAuthorityRecord,
+		epochClassical:    epochClassical,
+		epochPQ:           epochPQPrivate,
+		tokenPrivate:      tokenPrivate,
+		tokenPublicDER:    tokenPublicDER,
 	}
 }
 

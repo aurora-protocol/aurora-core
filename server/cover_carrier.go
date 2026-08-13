@@ -2,12 +2,12 @@ package server
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 
+	"github.com/aurora-protocol/aurora-core/carrier"
 	"github.com/aurora-protocol/aurora-core/issuerd"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/relay"
@@ -25,32 +25,32 @@ import (
 // packet batch. A response is only produced for a holder of the matching
 // carrier payload (e.g. a valid encrypted packet batch or a parseable issuance
 // message).
-type CarrierType uint8
+type CarrierType = carrier.Type
 
 const (
 	// CarrierPacketBatch carries an encoded PacketBatch (the P6/P8 packet slot).
-	CarrierPacketBatch CarrierType = 0x01
+	CarrierPacketBatch = carrier.PacketBatch
 	// CarrierIssuerMetadataReq requests published IssuerMetadata. Empty payload.
-	CarrierIssuerMetadataReq CarrierType = 0x02
+	CarrierIssuerMetadataReq = carrier.IssuerMetadataRequest
 	// CarrierIssuerMetadataResp carries encoded IssuerMetadata plus its hash.
-	CarrierIssuerMetadataResp CarrierType = 0x03
+	CarrierIssuerMetadataResp = carrier.IssuerMetadataResponse
 	// CarrierBlindRSAIssueReq requests a Blind RSA admission token.
-	CarrierBlindRSAIssueReq CarrierType = 0x04
+	CarrierBlindRSAIssueReq = carrier.BlindRSAIssueRequest
 	// CarrierBlindRSAIssueResp carries the encoded AdmissionProof.
-	CarrierBlindRSAIssueResp CarrierType = 0x05
+	CarrierBlindRSAIssueResp = carrier.BlindRSAIssueResponse
 	// CarrierTokenSpendReq spends a previously issued AdmissionProof.
-	CarrierTokenSpendReq CarrierType = 0x06
+	CarrierTokenSpendReq = carrier.TokenSpendRequest
 	// CarrierTokenSpendResp carries the resulting token_spent_key.
-	CarrierTokenSpendResp CarrierType = 0x07
+	CarrierTokenSpendResp = carrier.TokenSpendResponse
 	// CarrierTokenSpendConflict reports a replayed (already-spent) token. It is
 	// only reachable by a holder of a valid AdmissionProof, so it is not an
 	// adversary-observable distinguisher.
-	CarrierTokenSpendConflict CarrierType = 0x08
+	CarrierTokenSpendConflict = carrier.TokenSpendConflict
 )
 
 const (
-	carrierTokenNonceLen        = 32
-	carrierRedemptionContextLen = 48
+	carrierTokenNonceLen        = carrier.TokenNonceLength
+	carrierRedemptionContextLen = carrier.RedemptionContextLength
 	carrierIssueRequestLen      = carrierTokenNonceLen + carrierRedemptionContextLen + 8
 	carrierSpentKeyLen          = 48
 	carrierMetadataHashLen      = 48
@@ -113,65 +113,27 @@ func (c serviceIssuerCarrier) SpendToken(admissionProof []byte) ([]byte, error) 
 }
 
 func EncodeCarrier(t CarrierType, payload []byte) []byte {
-	out := make([]byte, 1+len(payload))
-	out[0] = byte(t)
-	copy(out[1:], payload)
-	return out
+	return carrier.Encode(t, payload)
 }
 
 func DecodeCarrier(body []byte) (CarrierType, []byte, error) {
-	if len(body) < 1 {
-		return 0, nil, fmt.Errorf("server: empty carrier body")
-	}
-	return CarrierType(body[0]), body[1:], nil
+	return carrier.Decode(body)
 }
 
 func EncodeCarrierIssueRequest(tokenNonce, redemptionContextHash []byte, expiryUnix uint64) ([]byte, error) {
-	if len(tokenNonce) != carrierTokenNonceLen {
-		return nil, fmt.Errorf("server: token nonce length %d, want %d", len(tokenNonce), carrierTokenNonceLen)
-	}
-	if len(redemptionContextHash) != carrierRedemptionContextLen {
-		return nil, fmt.Errorf("server: redemption context length %d, want %d", len(redemptionContextHash), carrierRedemptionContextLen)
-	}
-	out := make([]byte, carrierIssueRequestLen)
-	copy(out[:carrierTokenNonceLen], tokenNonce)
-	copy(out[carrierTokenNonceLen:carrierTokenNonceLen+carrierRedemptionContextLen], redemptionContextHash)
-	binary.BigEndian.PutUint64(out[carrierTokenNonceLen+carrierRedemptionContextLen:], expiryUnix)
-	return out, nil
+	return carrier.EncodeIssueRequest(tokenNonce, redemptionContextHash, expiryUnix)
 }
 
 func DecodeCarrierIssueRequest(payload []byte) (tokenNonce, redemptionContextHash []byte, expiryUnix uint64, err error) {
-	if len(payload) != carrierIssueRequestLen {
-		return nil, nil, 0, fmt.Errorf("server: issue request length %d, want %d", len(payload), carrierIssueRequestLen)
-	}
-	tokenNonce = append([]byte(nil), payload[:carrierTokenNonceLen]...)
-	redemptionContextHash = append([]byte(nil), payload[carrierTokenNonceLen:carrierTokenNonceLen+carrierRedemptionContextLen]...)
-	expiryUnix = binary.BigEndian.Uint64(payload[carrierTokenNonceLen+carrierRedemptionContextLen:])
-	return tokenNonce, redemptionContextHash, expiryUnix, nil
+	return carrier.DecodeIssueRequest(payload)
 }
 
 func EncodeCarrierMetadataResponse(encoded, hash []byte) ([]byte, error) {
-	if len(hash) != carrierMetadataHashLen {
-		return nil, fmt.Errorf("server: issuer metadata hash length %d, want %d", len(hash), carrierMetadataHashLen)
-	}
-	out := make([]byte, 4+len(encoded)+carrierMetadataHashLen)
-	binary.BigEndian.PutUint32(out[:4], uint32(len(encoded)))
-	copy(out[4:4+len(encoded)], encoded)
-	copy(out[4+len(encoded):], hash)
-	return out, nil
+	return carrier.EncodeMetadataResponse(encoded, hash)
 }
 
 func DecodeCarrierMetadataResponse(payload []byte) (encoded, hash []byte, err error) {
-	if len(payload) < 4 {
-		return nil, nil, fmt.Errorf("server: metadata response missing length")
-	}
-	n := int(binary.BigEndian.Uint32(payload[:4]))
-	if len(payload) != 4+n+carrierMetadataHashLen {
-		return nil, nil, fmt.Errorf("server: metadata response length mismatch")
-	}
-	encoded = append([]byte(nil), payload[4:4+n]...)
-	hash = append([]byte(nil), payload[4+n:]...)
-	return encoded, hash, nil
+	return carrier.DecodeMetadataResponse(payload)
 }
 
 // serveCoverCarrier reads the carrier body and dispatches by message type. Any

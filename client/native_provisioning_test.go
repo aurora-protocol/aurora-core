@@ -37,7 +37,7 @@ func TestParseNativeProvisioningRejectsMalformedAndTrailingBytes(t *testing.T) {
 	}
 	if parsed.RelayURL != input.RelayURL || parsed.IssuerURL != input.IssuerURL || parsed.IssuerCarrierPath != input.IssuerCarrierPath ||
 		parsed.RequestClassID != input.RequestClassID || parsed.Suite != input.Suite || parsed.RelayExpectedStatus != input.RelayExpectedStatus ||
-		!bytes.Equal(parsed.IssuerMetadata, input.IssuerMetadata) || len(parsed.IssuerAuthorityKeys) != len(input.IssuerAuthorityKeys) ||
+		!bytes.Equal(parsed.IssuerMetadata, input.IssuerMetadata) || !bytes.Equal(parsed.SignedSeed, input.SignedSeed) || len(parsed.SignedSeedRoots) != len(input.SignedSeedRoots) ||
 		!bytes.Equal(parsed.Descriptor, input.Descriptor) || !bytes.Equal(parsed.Template, input.Template) ||
 		!bytes.Equal(parsed.AccessHint, input.AccessHint) || !bytes.Equal(parsed.PolicyOffer, input.PolicyOffer) ||
 		!bytes.Equal(parsed.TransportHints, input.TransportHints) || !bytes.Equal(parsed.RelayRequestHeaders, input.RelayRequestHeaders) ||
@@ -118,9 +118,70 @@ func TestNativeProvisioningRequiresSignedIssuerMetadata(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	input := validNativeProvisioning(t, now)
 	input.IssuerMetadata = nil
-	input.IssuerAuthorityKeys = nil
+	input.SignedSeed = nil
+	input.SignedSeedRoots = nil
 	if _, err := EncodeNativeProvisioning(input); err == nil {
 		t.Fatal("native provisioning accepted an issuer without signed metadata")
+	}
+}
+
+func TestNativeProvisioningRejectsUnboundSignedSeed(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	input := validNativeProvisioning(t, now)
+	seed, err := decodeNativeSignedSeed(input.SignedSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := decodeNativeIssuerMetadata(input.IssuerMetadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongMetadataHash := append([]byte(nil), seed.IssuerMetadataHash...)
+	wrongMetadataHash[0] ^= 0xff
+	input.SignedSeed, input.SignedSeedRoots = nativeProvisioningSignedSeed(t, now, metadata, seed.BootstrapAuthorityKeys, seed.TokenIssuerHint, wrongMetadataHash)
+	encoded, err := EncodeNativeProvisioning(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseNativeProvisioning(encoded, now); err == nil {
+		t.Fatal("native provisioning accepted a seed not bound to issuer metadata")
+	}
+}
+
+func TestNativeProvisioningRejectsSignedSeedIssuerMismatch(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	input := validNativeProvisioning(t, now)
+	seed, err := decodeNativeSignedSeed(input.SignedSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := decodeNativeIssuerMetadata(input.IssuerMetadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongIssuerID := append([]byte(nil), seed.TokenIssuerHint...)
+	wrongIssuerID[0] ^= 0xff
+	input.SignedSeed, input.SignedSeedRoots = nativeProvisioningSignedSeed(t, now, metadata, seed.BootstrapAuthorityKeys, wrongIssuerID, nil)
+	encoded, err := EncodeNativeProvisioning(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseNativeProvisioning(encoded, now); err == nil {
+		t.Fatal("native provisioning accepted a seed with a different issuer hint")
+	}
+}
+
+func TestNativeProvisioningRejectsTamperedSignedSeedRoot(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	input := validNativeProvisioning(t, now)
+	input.SignedSeedRoots = cloneNativeAuthorityKeys(input.SignedSeedRoots)
+	input.SignedSeedRoots[0].PublicKey.PublicKey[0] ^= 0xff
+	encoded, err := EncodeNativeProvisioning(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseNativeProvisioning(encoded, now); err == nil {
+		t.Fatal("native provisioning accepted a tampered signed seed root")
 	}
 }
 
@@ -514,6 +575,7 @@ func validNativeProvisioningWithOriginSPKI(t testing.TB, now time.Time, originSP
 	if err != nil {
 		t.Fatal(err)
 	}
+	signedSeed, signedSeedRoots := nativeProvisioningSignedSeed(t, now, issuerMetadata, issuer.AuthorityKeys(), issuerMetadata.IssuerID, nil)
 	policyBytes, err := protocol.Encode(protocol.PolicyOffer{
 		OfferedVersions:         []uint64{registry.Version20},
 		OfferedSuites:           []uint64{registry.SuiteHybrid768P256AESGCM},
@@ -548,7 +610,8 @@ func validNativeProvisioningWithOriginSPKI(t testing.TB, now time.Time, originSP
 		IssuerURL:             "https://issuer.example",
 		IssuerCarrierPath:     "/assets/issue/42",
 		IssuerMetadata:        issuerMetadataBytes,
-		IssuerAuthorityKeys:   issuer.AuthorityKeys(),
+		SignedSeed:            signedSeed,
+		SignedSeedRoots:       signedSeedRoots,
 		Descriptor:            descriptorBytes,
 		TrustedDescriptorHash: descriptorHash,
 		Template:              templateBytes,
@@ -563,6 +626,73 @@ func validNativeProvisioningWithOriginSPKI(t testing.TB, now time.Time, originSP
 		RelayResponseHeaders:  responseHeaders,
 		RelayTrustRoots:       trustRoots,
 	}
+}
+
+func nativeProvisioningSignedSeed(t testing.TB, now time.Time, metadata protocol.IssuerMetadata, bootstrapKeys []protocol.AuthorityKeyRecord, issuerID, metadataHashOverride []byte) ([]byte, []protocol.AuthorityKeyRecord) {
+	t.Helper()
+	privateKey := nativeProvisioningECDSAKey(t)
+	publicKey, err := privateKey.PublicKey.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootPublicKey := protocol.PublicKeyRecord{
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+		PublicKey:       publicKey,
+	}
+	encodedRootPublicKey, err := protocol.Encode(rootPublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := protocol.AuthorityKeyRecord{
+		AuthorityID:    nativeProvisioningBytes(0x26, 16),
+		AuthorityKeyID: trust.AuthorityKeyID(encodedRootPublicKey),
+		AuthorityRole:  1,
+		PublicKey:      rootPublicKey,
+		ValidFromUnix:  uint64(now.Unix()) - 60,
+		ValidUntilUnix: uint64(now.Add(time.Hour).Unix()),
+		KeyStatus:      registry.AuthorityActive,
+		UsageFlags:     registry.UsageMaySignSignedSeedRecord,
+	}
+	metadataHash, err := trust.IssuerMetadataHash(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadataHashOverride != nil {
+		metadataHash = append([]byte(nil), metadataHashOverride...)
+	}
+	seed := protocol.SignedSeedRecord{
+		SeedVersion:                registry.Version20,
+		SeedID:                     nativeProvisioningBytes(0x27, 16),
+		ValidFromUnix:              uint64(now.Unix()) - 60,
+		ValidUntilUnix:             uint64(now.Add(time.Hour).Unix()),
+		DirectoryConsensusHint:     []byte("directory"),
+		BridgeBucketHint:           []byte("bridge"),
+		TokenIssuerHint:            append([]byte(nil), issuerID...),
+		IssuerMetadataHash:         metadataHash,
+		BootstrapAuthorityKeys:     cloneNativeAuthorityKeys(bootstrapKeys),
+		BootstrapCoverTemplateHash: nativeProvisioningBytes(0x28, 48),
+		NextSeedCommitment:         nativeProvisioningBytes(0x29, 48),
+		SoftwareUpdateEpoch:        1,
+		SeedSignature: protocol.ObjectSignature{
+			SignerKeyID:     append([]byte(nil), root.AuthorityKeyID...),
+			SignatureScheme: root.PublicKey.SignatureScheme,
+			KeyEncoding:     root.PublicKey.KeyEncoding,
+		},
+	}
+	input, err := trust.SignedSeedRecordSignatureInput(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed.SeedSignature.Signature, err = ecdsa.SignASN1(rand.Reader, privateKey, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedSeed, err := protocol.Encode(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encodedSeed, []protocol.AuthorityKeyRecord{root}
 }
 
 func configureNativeProvisioningRelay(t testing.TB, input *NativeProvisioning, relayURL string, trustRoot []byte) {

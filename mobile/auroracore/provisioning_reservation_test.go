@@ -138,6 +138,24 @@ func TestValidateNativeProvisioningSourceTraversesCABI(t *testing.T) {
 	}
 }
 
+func TestValidateNativeProvisioningSourceRejectsTamperedSignedSeed(t *testing.T) {
+	caller := newNativeIntegrationCaller(t)
+	fixture := newNativeSessionFixture(t, time.Now())
+	defer fixture.Close(t)
+	provisioning := fixture.Provisioning(t)
+	provisioning.SignedSeed[0] ^= 0xff
+	encoded, err := client.EncodeNativeProvisioning(provisioning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeBytes(encoded)
+
+	status, payload := nativeIntegrationCall(t, caller, opValidateNativeProvisioningSource, encoded, uint64(time.Now().Unix()))
+	if status != statusError || len(payload) != 0 {
+		t.Fatalf("C ABI tampered seed validation = status %d payload %x", status, payload)
+	}
+}
+
 type nativeProvisioningReservationTestResult struct {
 	provisioning  []byte
 	spentHintKey  []byte

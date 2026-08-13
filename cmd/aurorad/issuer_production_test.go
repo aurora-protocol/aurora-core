@@ -261,9 +261,18 @@ func newProductionIssuerCommandFixture(t *testing.T) issuerProductionConfig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	metadata.MetadataSigningKeyID = issuerCommandBytes(0x93, 16)
 	metadata.SignatureScheme = registry.SigECDSAP256SHA384DER
 	metadata.KeyEncoding = registry.KeyP256SEC1Uncompressed
+	authorityPublicRecord := protocol.PublicKeyRecord{
+		SignatureScheme: metadata.SignatureScheme,
+		KeyEncoding:     metadata.KeyEncoding,
+		PublicKey:       authorityPublicKey,
+	}
+	encodedAuthorityPublicRecord, err := protocol.Encode(authorityPublicRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata.MetadataSigningKeyID = auroratrust.AuthorityKeyID(encodedAuthorityPublicRecord)
 	input, err := auroratrust.IssuerMetadataSignatureInput(metadata)
 	if err != nil {
 		t.Fatal(err)
@@ -275,11 +284,7 @@ func newProductionIssuerCommandFixture(t *testing.T) issuerProductionConfig {
 	authority := protocol.AuthorityKeyRecord{
 		AuthorityID:    issuerCommandBytes(0x94, 16),
 		AuthorityKeyID: append([]byte(nil), metadata.MetadataSigningKeyID...),
-		PublicKey: protocol.PublicKeyRecord{
-			SignatureScheme: metadata.SignatureScheme,
-			KeyEncoding:     metadata.KeyEncoding,
-			PublicKey:       authorityPublicKey,
-		},
+		PublicKey:      authorityPublicRecord,
 		ValidFromUnix:  metadata.ValidFromUnix,
 		ValidUntilUnix: metadata.ValidUntilUnix,
 		KeyStatus:      registry.AuthorityActive,

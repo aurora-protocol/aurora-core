@@ -417,7 +417,8 @@ func provisionedProofsForIssuerResponse(request handshake.ClientProofRequest, is
 
 func cloneProvisioningForSession(in NativeProvisioning) NativeProvisioning {
 	in.IssuerMetadata = append([]byte(nil), in.IssuerMetadata...)
-	in.IssuerAuthorityKeys = cloneNativeIssuerAuthorityKeys(in.IssuerAuthorityKeys)
+	in.SignedSeed = append([]byte(nil), in.SignedSeed...)
+	in.SignedSeedRoots = cloneNativeAuthorityKeys(in.SignedSeedRoots)
 	in.Descriptor = append([]byte(nil), in.Descriptor...)
 	in.TrustedDescriptorHash = append([]byte(nil), in.TrustedDescriptorHash...)
 	in.Template = append([]byte(nil), in.Template...)
@@ -437,6 +438,7 @@ func zeroProvisioningForSession(value *NativeProvisioning) {
 	}
 	for _, field := range [][]byte{
 		value.IssuerMetadata,
+		value.SignedSeed,
 		value.Descriptor,
 		value.TrustedDescriptorHash,
 		value.Template,
@@ -450,15 +452,15 @@ func zeroProvisioningForSession(value *NativeProvisioning) {
 	} {
 		zeroProvisionedBytes(field)
 	}
-	for index := range value.IssuerAuthorityKeys {
-		zeroProvisionedBytes(value.IssuerAuthorityKeys[index].AuthorityID)
-		zeroProvisionedBytes(value.IssuerAuthorityKeys[index].AuthorityKeyID)
-		zeroProvisionedBytes(value.IssuerAuthorityKeys[index].PublicKey.PublicKey)
+	for index := range value.SignedSeedRoots {
+		zeroProvisionedBytes(value.SignedSeedRoots[index].AuthorityID)
+		zeroProvisionedBytes(value.SignedSeedRoots[index].AuthorityKeyID)
+		zeroProvisionedBytes(value.SignedSeedRoots[index].PublicKey.PublicKey)
 	}
 	*value = NativeProvisioning{}
 }
 
-func cloneNativeIssuerAuthorityKeys(in []protocol.AuthorityKeyRecord) []protocol.AuthorityKeyRecord {
+func cloneNativeAuthorityKeys(in []protocol.AuthorityKeyRecord) []protocol.AuthorityKeyRecord {
 	out := make([]protocol.AuthorityKeyRecord, len(in))
 	for index, key := range in {
 		out[index] = key

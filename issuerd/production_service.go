@@ -46,6 +46,9 @@ func NewProductionBlindRSAService(options ProductionBlindRSAServiceOptions) (*Se
 	if err != nil {
 		return nil, err
 	}
+	if _, err := auroratrust.NewSignedSeedTrustStore(authorityKeys); err != nil {
+		return nil, fmt.Errorf("issuerd: validate production authority keys: %w", err)
+	}
 	if err := auroratrust.VerifyIssuerMetadataSignature(metadata, authorityKeys, nowUnix); err != nil {
 		return nil, fmt.Errorf("issuerd: verify production issuer metadata: %w", err)
 	}

@@ -2444,12 +2444,14 @@ func (f liveFirstHopFixture) nativeProvisioningForHarness(t testing.TB, harness 
 	if err != nil {
 		t.Fatal(err)
 	}
+	signedSeed, signedSeedRoots := liveFirstHopSignedSeed(t, time.Now().UTC(), f.issuerMetadata, f.issuerAuthorityKeys, f.accessHint.HintIssuerID)
 	return auroraclient.NativeProvisioning{
 		RelayURL:              "https://" + harness.authority + harness.path,
 		IssuerURL:             issuerURL,
 		IssuerCarrierPath:     "/assets/issue/42",
 		IssuerMetadata:        issuerMetadata,
-		IssuerAuthorityKeys:   cloneLiveFirstHopAuthorityKeys(f.issuerAuthorityKeys),
+		SignedSeed:            signedSeed,
+		SignedSeedRoots:       signedSeedRoots,
 		Descriptor:            descriptor,
 		TrustedDescriptorHash: f.deployment.DescriptorHash(),
 		Template:              template,
@@ -2483,12 +2485,69 @@ func cloneLiveFirstHopAuthorityKeys(in []protocol.AuthorityKeyRecord) []protocol
 	return out
 }
 
+func liveFirstHopSignedSeed(t testing.TB, now time.Time, metadata protocol.IssuerMetadata, bootstrapKeys []protocol.AuthorityKeyRecord, issuerID []byte) ([]byte, []protocol.AuthorityKeyRecord) {
+	t.Helper()
+	rootPrivateKey := generateLiveFirstHopECDSA(t)
+	rootPublicKey := liveFirstHopECDSAPublicRecord(t, rootPrivateKey)
+	encodedRootPublicKey, err := protocol.Encode(rootPublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := protocol.AuthorityKeyRecord{
+		AuthorityID:    randomLiveFirstHopBytes(t, 16),
+		AuthorityKeyID: trust.AuthorityKeyID(encodedRootPublicKey),
+		AuthorityRole:  1,
+		PublicKey:      rootPublicKey,
+		ValidFromUnix:  uint64(now.Add(-time.Minute).Unix()),
+		ValidUntilUnix: uint64(now.Add(time.Hour).Unix()),
+		KeyStatus:      registry.AuthorityActive,
+		UsageFlags:     registry.UsageMaySignSignedSeedRecord,
+	}
+	metadataHash, err := trust.IssuerMetadataHash(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := protocol.SignedSeedRecord{
+		SeedVersion:                registry.Version20,
+		SeedID:                     randomLiveFirstHopBytes(t, 16),
+		ValidFromUnix:              uint64(now.Add(-time.Minute).Unix()),
+		ValidUntilUnix:             uint64(now.Add(time.Hour).Unix()),
+		DirectoryConsensusHint:     []byte("directory"),
+		BridgeBucketHint:           []byte("bridge"),
+		TokenIssuerHint:            append([]byte(nil), issuerID...),
+		IssuerMetadataHash:         metadataHash,
+		BootstrapAuthorityKeys:     cloneLiveFirstHopAuthorityKeys(bootstrapKeys),
+		BootstrapCoverTemplateHash: randomLiveFirstHopBytes(t, 48),
+		NextSeedCommitment:         randomLiveFirstHopBytes(t, 48),
+		SoftwareUpdateEpoch:        1,
+		SeedSignature: protocol.ObjectSignature{
+			SignerKeyID:     append([]byte(nil), root.AuthorityKeyID...),
+			SignatureScheme: root.PublicKey.SignatureScheme,
+			KeyEncoding:     root.PublicKey.KeyEncoding,
+		},
+	}
+	input, err := trust.SignedSeedRecordSignatureInput(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed.SeedSignature.Signature, err = ecdsa.SignASN1(rand.Reader, rootPrivateKey, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedSeed, err := protocol.Encode(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encodedSeed, []protocol.AuthorityKeyRecord{root}
+}
+
 func zeroLiveFirstHopNativeProvisioning(provisioning *auroraclient.NativeProvisioning) {
 	if provisioning == nil {
 		return
 	}
 	for _, field := range [][]byte{
 		provisioning.IssuerMetadata,
+		provisioning.SignedSeed,
 		provisioning.Descriptor,
 		provisioning.TrustedDescriptorHash,
 		provisioning.Template,
@@ -2502,10 +2561,10 @@ func zeroLiveFirstHopNativeProvisioning(provisioning *auroraclient.NativeProvisi
 	} {
 		zeroLiveFirstHopBytes(field)
 	}
-	for index := range provisioning.IssuerAuthorityKeys {
-		zeroLiveFirstHopBytes(provisioning.IssuerAuthorityKeys[index].AuthorityID)
-		zeroLiveFirstHopBytes(provisioning.IssuerAuthorityKeys[index].AuthorityKeyID)
-		zeroLiveFirstHopBytes(provisioning.IssuerAuthorityKeys[index].PublicKey.PublicKey)
+	for index := range provisioning.SignedSeedRoots {
+		zeroLiveFirstHopBytes(provisioning.SignedSeedRoots[index].AuthorityID)
+		zeroLiveFirstHopBytes(provisioning.SignedSeedRoots[index].AuthorityKeyID)
+		zeroLiveFirstHopBytes(provisioning.SignedSeedRoots[index].PublicKey.PublicKey)
 	}
 	*provisioning = auroraclient.NativeProvisioning{}
 }
@@ -2791,7 +2850,12 @@ func newLiveFirstHopFixtureWithOriginSPKI(t testing.TB, now time.Time, originSPK
 	relayBucketID := randomLiveFirstHopBytes(t, 16)
 	tokenScopeID := randomLiveFirstHopBytes(t, 16)
 	issuerAuthority := generateLiveFirstHopECDSA(t)
-	issuerAuthorityKeyID := randomLiveFirstHopBytes(t, 16)
+	issuerAuthorityPublic := liveFirstHopECDSAPublicRecord(t, issuerAuthority)
+	encodedIssuerAuthorityPublic, err := protocol.Encode(issuerAuthorityPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerAuthorityKeyID := trust.AuthorityKeyID(encodedIssuerAuthorityPublic)
 	tokenKeyID := sha256.Sum256(tokenPublicDER)
 	issuerMetadata := protocol.IssuerMetadata{
 		MetadataVersion:     registry.Version20,
@@ -2841,7 +2905,7 @@ func newLiveFirstHopFixtureWithOriginSPKI(t testing.TB, now time.Time, originSPK
 		AuthorityID:    randomLiveFirstHopBytes(t, 16),
 		AuthorityKeyID: issuerAuthorityKeyID,
 		AuthorityRole:  1,
-		PublicKey:      liveFirstHopECDSAPublicRecord(t, issuerAuthority),
+		PublicKey:      issuerAuthorityPublic,
 		ValidFromUnix:  nowUnix - 60,
 		ValidUntilUnix: nowUnix + 3600,
 		KeyStatus:      registry.AuthorityActive,

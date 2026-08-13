@@ -20,24 +20,26 @@ import (
 )
 
 const (
-	defaultPacketAdapterFlows        = 256
-	maximumPacketAdapterFlows        = 4096
-	defaultPacketAdapterPacketBytes  = 65535
-	minimumPacketAdapterPacketBytes  = 128
-	maximumPacketAdapterPacketBytes  = 65535
-	defaultPacketAdapterLocalPackets = 256
-	maximumPacketAdapterLocalPackets = 4096
-	packetAdapterTCP                 = 6
-	packetAdapterUDP                 = 17
-	packetAdapterDNSPort             = 53
-	packetAdapterIPv6HopByHop        = 0
-	packetAdapterIPv6Destination     = 60
-	maximumPacketAdapterIPv6Options  = 2
-	tcpFlagFIN                       = 0x01
-	tcpFlagSYN                       = 0x02
-	tcpFlagRST                       = 0x04
-	tcpFlagPSH                       = 0x08
-	tcpFlagACK                       = 0x10
+	defaultPacketAdapterFlows           = 256
+	maximumPacketAdapterFlows           = 4096
+	defaultPacketAdapterPacketBytes     = 65535
+	minimumPacketAdapterPacketBytes     = 128
+	maximumPacketAdapterPacketBytes     = 65535
+	defaultPacketAdapterLocalPackets    = 256
+	maximumPacketAdapterLocalPackets    = 4096
+	defaultPacketAdapterDNSLifetime     = 15 * time.Second
+	maximumPacketAdapterDNSMessageBytes = 4096
+	packetAdapterTCP                    = 6
+	packetAdapterUDP                    = 17
+	packetAdapterDNSPort                = 53
+	packetAdapterIPv6HopByHop           = 0
+	packetAdapterIPv6Destination        = 60
+	maximumPacketAdapterIPv6Options     = 2
+	tcpFlagFIN                          = 0x01
+	tcpFlagSYN                          = 0x02
+	tcpFlagRST                          = 0x04
+	tcpFlagPSH                          = 0x08
+	tcpFlagACK                          = 0x10
 )
 
 // LocalDNSAnswers resolves a captured local DNS query without exposing it to a public resolver.
@@ -69,6 +71,7 @@ type PacketAdapter struct {
 	nextPacketID  uint16
 	flowsByTuple  map[packetAdapterTuple]*packetAdapterFlow
 	flowsByID     map[uint64]*packetAdapterFlow
+	dnsRequests   map[uint64]packetAdapterDNSRequest
 	localPackets  [][]byte
 }
 
@@ -89,6 +92,16 @@ type packetAdapterFlow struct {
 	relayNextSequence  uint32
 	localClosed        bool
 	peerClosed         bool
+}
+
+type packetAdapterDNSRequest struct {
+	version       uint8
+	client        netip.Addr
+	target        netip.Addr
+	clientPort    uint16
+	targetPort    uint16
+	transactionID uint16
+	expiresAt     time.Time
 }
 
 type packetAdapterIPPacket struct {
@@ -149,6 +162,7 @@ func NewPacketAdapter(application *session.Application, options PacketAdapterOpt
 		nextFlowID:    nextFlowID,
 		flowsByTuple:  make(map[packetAdapterTuple]*packetAdapterFlow),
 		flowsByID:     make(map[uint64]*packetAdapterFlow),
+		dnsRequests:   make(map[uint64]packetAdapterDNSRequest),
 	}, nil
 }
 
@@ -170,8 +184,11 @@ func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Ti
 	if err != nil {
 		return err
 	}
-	if packet.protocol == packetAdapterUDP && packet.udp.destinationPort == packetAdapterDNSPort && a.dnsAnswers != nil {
-		return a.ingressDNS(ctx, packet, now)
+	if packet.protocol == packetAdapterUDP && packet.udp.destinationPort == packetAdapterDNSPort {
+		if a.dnsAnswers != nil {
+			return a.ingressDNS(ctx, packet, now)
+		}
+		return a.ingressRelayedDNS(ctx, packet, now)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -237,6 +254,7 @@ func (a *PacketAdapter) HandleFrameBlocks(ctx context.Context, blocks []protocol
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.expireDNSRequestsLocked(now)
 	var local [][]byte
 	for _, block := range blocks {
 		for _, frame := range block.Frames {
@@ -270,7 +288,7 @@ func (a *PacketAdapter) FlowCount() int {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return len(a.flowsByID)
+	return a.flowCountLocked()
 }
 
 func (a *PacketAdapter) ingressTCPLocked(ctx context.Context, packet packetAdapterIPPacket, now time.Time) error {
@@ -293,7 +311,7 @@ func (a *PacketAdapter) ingressTCPLocked(ctx context.Context, packet packetAdapt
 			}
 			return a.enqueueLocalPacketLocked(response)
 		}
-		if len(a.flowsByID) >= a.maximumFlows {
+		if a.flowCountLocked() >= a.maximumFlows {
 			return fmt.Errorf("client: packet adapter flow limit reached")
 		}
 		if len(a.localPackets) >= a.maximumLocal {
@@ -406,7 +424,7 @@ func (a *PacketAdapter) ingressUDPLocked(ctx context.Context, packet packetAdapt
 		}
 	}
 	if mapping == nil {
-		if len(a.flowsByID) >= a.maximumFlows {
+		if a.flowCountLocked() >= a.maximumFlows {
 			return fmt.Errorf("client: packet adapter flow limit reached")
 		}
 		flowID, err := a.allocateFlowIDLocked()
@@ -480,10 +498,46 @@ func (a *PacketAdapter) ingressDNS(ctx context.Context, packet packetAdapterIPPa
 	return a.enqueueLocalPacketLocked(response)
 }
 
+func (a *PacketAdapter) ingressRelayedDNS(ctx context.Context, packet packetAdapterIPPacket, now time.Time) error {
+	transactionID, err := packetAdapterDNSQueryTransactionID(packet.udp.payload)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.expireDNSRequestsLocked(now)
+	if a.flowCountLocked() >= a.maximumFlows {
+		return fmt.Errorf("client: packet adapter flow limit reached")
+	}
+	flowID, err := a.allocateFlowIDLocked()
+	if err != nil {
+		return err
+	}
+	frame, err := protocol.NewDNSMessageFrame(flowID, packet.udp.payload)
+	if err != nil {
+		return err
+	}
+	if err := a.application.QueueFrames(ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}); err != nil {
+		return err
+	}
+	a.dnsRequests[flowID] = packetAdapterDNSRequest{
+		version:       packet.version,
+		client:        packet.source,
+		target:        packet.target,
+		clientPort:    packet.udp.sourcePort,
+		targetPort:    packet.udp.destinationPort,
+		transactionID: transactionID,
+		expiresAt:     now.Add(defaultPacketAdapterDNSLifetime),
+	}
+	return nil
+}
+
 func (a *PacketAdapter) handleRelayFrameLocked(frame protocol.AuroraFrame, now time.Time) ([][]byte, error) {
 	switch frame.FrameType {
 	case registry.FramePadding:
 		return nil, nil
+	case registry.FrameDNSMessage:
+		return a.handleRelayDNSLocked(frame, now)
 	case registry.FrameUDPTargetConfirm:
 		if err := a.proxy.ReceiveUDPTargetConfirmFrameAt(frame, uint64(now.Unix())); err != nil {
 			return nil, err
@@ -496,6 +550,30 @@ func (a *PacketAdapter) handleRelayFrameLocked(frame protocol.AuroraFrame, now t
 	default:
 		return nil, fmt.Errorf("client: packet adapter received unsupported relay frame 0x%x", frame.FrameType)
 	}
+}
+
+func (a *PacketAdapter) handleRelayDNSLocked(frame protocol.AuroraFrame, now time.Time) ([][]byte, error) {
+	request, ok := a.dnsRequests[frame.FlowID]
+	if !ok {
+		return nil, fmt.Errorf("client: packet adapter received DNS response for unknown request")
+	}
+	if !now.Before(request.expiresAt) {
+		delete(a.dnsRequests, frame.FlowID)
+		return nil, fmt.Errorf("client: packet adapter received expired DNS response")
+	}
+	if err := packetAdapterDNSResponseMatches(frame.Payload, request.transactionID); err != nil {
+		return nil, err
+	}
+	packet, err := buildPacketAdapterUDPPacket(request.version, request.target, request.client, request.targetPort, request.clientPort, frame.Payload, a.nextPacketID)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.validateLocalPacketLocked(packet); err != nil {
+		return nil, err
+	}
+	delete(a.dnsRequests, frame.FlowID)
+	a.nextPacketID++
+	return [][]byte{packet}, nil
 }
 
 func (a *PacketAdapter) handleRelayDataLocked(frame protocol.AuroraFrame) ([][]byte, error) {
@@ -635,10 +713,16 @@ func (a *PacketAdapter) allocateFlowIDLocked() (uint64, error) {
 			a.nextFlowID = 1
 		}
 		if flowID != 0 && a.flowsByID[flowID] == nil {
-			return flowID, nil
+			if _, pendingDNS := a.dnsRequests[flowID]; !pendingDNS {
+				return flowID, nil
+			}
 		}
 	}
 	return 0, fmt.Errorf("client: packet adapter flow ID space is exhausted")
+}
+
+func (a *PacketAdapter) flowCountLocked() int {
+	return len(a.flowsByID) + len(a.dnsRequests)
 }
 
 func (a *PacketAdapter) readUint32Locked() (uint32, error) {
@@ -657,6 +741,94 @@ func (a *PacketAdapter) removeFlowLocked(mapping *packetAdapterFlow) {
 	delete(a.flowsByTuple, mapping.tuple)
 	delete(a.flowsByID, mapping.flowID)
 	_ = a.proxy.Close(mapping.flowID)
+}
+
+func (a *PacketAdapter) expireDNSRequestsLocked(now time.Time) {
+	for flowID, request := range a.dnsRequests {
+		if !now.Before(request.expiresAt) {
+			delete(a.dnsRequests, flowID)
+		}
+	}
+}
+
+func packetAdapterDNSQueryTransactionID(message []byte) (uint16, error) {
+	if len(message) < 12 || len(message) > maximumPacketAdapterDNSMessageBytes || message[2]&0x80 != 0 || message[2]&0x78 != 0 || binary.BigEndian.Uint16(message[4:6]) != 1 {
+		return 0, fmt.Errorf("client: packet adapter DNS query is malformed")
+	}
+	offset := 12
+	nameBytes := 0
+	for {
+		if offset >= len(message) {
+			return 0, fmt.Errorf("client: packet adapter DNS query is malformed")
+		}
+		labelLength := int(message[offset])
+		offset++
+		nameBytes++
+		if labelLength == 0 {
+			break
+		}
+		if labelLength > 63 || nameBytes+labelLength > 255 || offset+labelLength > len(message) {
+			return 0, fmt.Errorf("client: packet adapter DNS query is malformed")
+		}
+		for _, value := range message[offset : offset+labelLength] {
+			if value < 0x21 || value > 0x7e || value == '.' {
+				return 0, fmt.Errorf("client: packet adapter DNS query is malformed")
+			}
+		}
+		offset += labelLength
+		nameBytes += labelLength
+	}
+	if offset+4 > len(message) || binary.BigEndian.Uint16(message[offset+2:offset+4]) != 1 {
+		return 0, fmt.Errorf("client: packet adapter DNS query is malformed")
+	}
+	offset += 4
+	if binary.BigEndian.Uint16(message[6:8]) != 0 || binary.BigEndian.Uint16(message[8:10]) != 0 || binary.BigEndian.Uint16(message[10:12]) > 4 {
+		return 0, fmt.Errorf("client: packet adapter DNS query is malformed")
+	}
+	for additional := 0; additional < int(binary.BigEndian.Uint16(message[10:12])); additional++ {
+		nameBytes = 0
+		for {
+			if offset >= len(message) {
+				return 0, fmt.Errorf("client: packet adapter DNS query is malformed")
+			}
+			labelLength := int(message[offset])
+			offset++
+			nameBytes++
+			if labelLength == 0 {
+				break
+			}
+			if labelLength > 63 || nameBytes+labelLength > 255 || offset+labelLength > len(message) {
+				return 0, fmt.Errorf("client: packet adapter DNS query is malformed")
+			}
+			for _, value := range message[offset : offset+labelLength] {
+				if value < 0x21 || value > 0x7e || value == '.' {
+					return 0, fmt.Errorf("client: packet adapter DNS query is malformed")
+				}
+			}
+			offset += labelLength
+			nameBytes += labelLength
+		}
+		if offset+10 > len(message) {
+			return 0, fmt.Errorf("client: packet adapter DNS query is malformed")
+		}
+		rdataLength := int(binary.BigEndian.Uint16(message[offset+8 : offset+10]))
+		offset += 10
+		if rdataLength > len(message)-offset {
+			return 0, fmt.Errorf("client: packet adapter DNS query is malformed")
+		}
+		offset += rdataLength
+	}
+	if offset != len(message) {
+		return 0, fmt.Errorf("client: packet adapter DNS query is malformed")
+	}
+	return binary.BigEndian.Uint16(message[:2]), nil
+}
+
+func packetAdapterDNSResponseMatches(message []byte, transactionID uint16) error {
+	if len(message) < 12 || len(message) > maximumPacketAdapterDNSMessageBytes || message[2]&0x80 == 0 || message[2]&0x78 != 0 || binary.BigEndian.Uint16(message[:2]) != transactionID || binary.BigEndian.Uint16(message[4:6]) != 1 {
+		return fmt.Errorf("client: packet adapter DNS response is malformed")
+	}
+	return nil
 }
 
 func normalizePacketAdapterOptions(options PacketAdapterOptions) (int, int, int, transport.UDPMode, error) {

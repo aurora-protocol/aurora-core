@@ -60,6 +60,11 @@ type IPResolver interface {
 	LookupNetIP(context.Context, string, string) ([]netip.Addr, error)
 }
 
+// DNSMessageResolver resolves one complete DNS message without exposing resolver transport details to a session.
+type DNSMessageResolver interface {
+	ExchangeDNS(context.Context, []byte) ([]byte, error)
+}
+
 type SocketEgressLimits struct {
 	MaxFlows            int
 	MaxBufferedBytes    int
@@ -73,11 +78,12 @@ type SocketEgressLimits struct {
 }
 
 type SocketEgressOptions struct {
-	Sink     FrameSink
-	Policy   ExitPolicy
-	Dialer   ContextDialer
-	Resolver IPResolver
-	Limits   SocketEgressLimits
+	Sink        FrameSink
+	Policy      ExitPolicy
+	Dialer      ContextDialer
+	Resolver    IPResolver
+	DNSResolver DNSMessageResolver
+	Limits      SocketEgressLimits
 }
 
 // ValidateSocketEgressLimits checks whether limits can be used to construct an egress.
@@ -87,13 +93,14 @@ func ValidateSocketEgressLimits(limits SocketEgressLimits) error {
 }
 
 type SocketEgress struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	sink     FrameSink
-	policy   ExitPolicy
-	dialer   ContextDialer
-	resolver IPResolver
-	limits   SocketEgressLimits
+	ctx         context.Context
+	cancel      context.CancelFunc
+	sink        FrameSink
+	policy      ExitPolicy
+	dialer      ContextDialer
+	resolver    IPResolver
+	dnsResolver DNSMessageResolver
+	limits      SocketEgressLimits
 
 	mu        sync.Mutex
 	closeOnce sync.Once
@@ -142,15 +149,16 @@ func NewSocketEgress(ctx context.Context, options SocketEgressOptions) (*SocketE
 	}
 	lifecycleCtx, cancel := context.WithCancel(ctx)
 	return &SocketEgress{
-		ctx:      lifecycleCtx,
-		cancel:   cancel,
-		sink:     options.Sink,
-		policy:   options.Policy,
-		dialer:   options.Dialer,
-		resolver: options.Resolver,
-		limits:   limits,
-		done:     make(chan struct{}),
-		flows:    make(map[uint64]*socketFlow),
+		ctx:         lifecycleCtx,
+		cancel:      cancel,
+		sink:        options.Sink,
+		policy:      options.Policy,
+		dialer:      options.Dialer,
+		resolver:    options.Resolver,
+		dnsResolver: options.DNSResolver,
+		limits:      limits,
+		done:        make(chan struct{}),
+		flows:       make(map[uint64]*socketFlow),
 	}, nil
 }
 
@@ -165,7 +173,13 @@ func (e *SocketEgress) HandleEvent(ctx context.Context, event ExitFrameEvent) ([
 		return nil, err
 	}
 	defer e.wg.Done()
-	if event.FlowID == 0 || event.Flow.FlowID != event.FlowID {
+	if event.FlowID == 0 {
+		return nil, ErrExitEventInvalid
+	}
+	if event.Kind == ExitEventDNSMessage {
+		return e.handleDNSMessage(ctx, event)
+	}
+	if event.Flow.FlowID != event.FlowID {
 		return nil, ErrExitEventInvalid
 	}
 	switch event.Kind {

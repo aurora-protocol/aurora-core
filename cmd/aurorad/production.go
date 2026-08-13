@@ -70,6 +70,7 @@ type productionConfig struct {
 	egressResolvedTTL         uint
 	egressMaxFlowOpens        uint
 	udpConfirmTTL             uint
+	dnsUpstream               string
 	allowPrivateExit          bool
 	maxTemplateFutureSkew     uint64
 }
@@ -153,6 +154,7 @@ func parseProductionConfig(args []string, stderr io.Writer) (productionConfig, e
 	flags.UintVar(&config.egressMaxFlowOpens, "egress-max-flow-opens", 1024, "egress maximum flow opens per window")
 	flags.Uint64Var(&config.exitRateLimit.MaxBytes, "egress-max-bytes", 64<<20, "egress maximum bytes per window")
 	flags.UintVar(&config.udpConfirmTTL, "udp-confirm-ttl", 300, "UDP association confirmation TTL in seconds")
+	flags.StringVar(&config.dnsUpstream, "dns-upstream", "", "numeric UDP DNS resolver address")
 	flags.BoolVar(&config.allowPrivateExit, "allow-private-exit", false, "allow private destination ranges")
 	flags.Uint64Var(&config.maxTemplateFutureSkew, "max-template-future-skew", 120, "maximum future template validity skew in seconds")
 	if err := flags.Parse(args); err != nil {
@@ -187,6 +189,7 @@ func (c productionConfig) validate() error {
 		{"hint spent cache", c.hintSpentCachePath},
 		{"token spent cache", c.tokenSpentCachePath},
 		{"bootstrap cache", c.bootstrapCachePath},
+		{"DNS upstream", c.dnsUpstream},
 	} {
 		if strings.TrimSpace(field.value) == "" || strings.TrimSpace(field.value) != field.value {
 			return fmt.Errorf("server: %s is required", field.name)
@@ -212,12 +215,19 @@ func (c productionConfig) validate() error {
 	if err := relay.ValidateSocketEgressLimits(c.egressLimits); err != nil {
 		return fmt.Errorf("server: egress limits: %w", err)
 	}
+	if _, err := relay.NewUDPDNSMessageResolver(c.dnsUpstream); err != nil {
+		return fmt.Errorf("server: DNS upstream: %w", err)
+	}
 	return nil
 }
 
 func newProductionService(config productionConfig) (*server.ProductionFirstHopServer, []io.Closer, error) {
 	config.egressLimits.ResolvedTTLSeconds = uint32(config.egressResolvedTTL)
 	config.exitRateLimit.MaxFlowOpens = uint32(config.egressMaxFlowOpens)
+	dnsResolver, err := relay.NewUDPDNSMessageResolver(config.dnsUpstream)
+	if err != nil {
+		return nil, nil, fmt.Errorf("server: DNS upstream: %w", err)
+	}
 	deployment, err := loadProductionDeployment(config)
 	if err != nil {
 		return nil, nil, err
@@ -303,6 +313,7 @@ func newProductionService(config productionConfig) (*server.ProductionFirstHopSe
 			UDPConfirmTTL: uint32(config.udpConfirmTTL),
 			Dialer:        &net.Dialer{},
 			Resolver:      net.DefaultResolver,
+			DNSResolver:   dnsResolver,
 			Limits:        config.egressLimits,
 		},
 		MaxConcurrentSessions: config.maxConcurrentSessions,

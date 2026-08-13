@@ -40,6 +40,7 @@ const (
 
 	maxPacketEncodingOverhead = 8 + 1 + 1 + 1 + 8 + 3 + 16
 	maxPacketCiphertextBytes  = 0xffffff
+	maximumHighPriorityBurst  = 4
 )
 
 type DirectionConfig struct {
@@ -107,6 +108,7 @@ type Application struct {
 	writePhaseBytes     uint64
 
 	queue                []queuedPacket
+	highPriorityBurst    int
 	queuedBytes          int
 	reservedPackets      int
 	reservedBytes        int
@@ -206,7 +208,7 @@ func (a *Application) QueueFrames(ctx context.Context, block protocol.FrameBlock
 			return fmt.Errorf("%w: frame type 0x%x", ErrSessionControl, frame.FrameType)
 		}
 	}
-	err := a.queueBlock(ctx, block, false)
+	err := a.queueBlock(ctx, block, false, isHighPriorityFrameBlock(block))
 	if errors.Is(err, errRekeyRequired) {
 		if err := a.InitiateKeyUpdate(ctx, 0); err != nil && !errors.Is(err, ErrBackpressure) {
 			return err
@@ -269,9 +271,10 @@ func (a *Application) TryNextPacket() ([]byte, error) {
 	return a.takeNextPacketLocked()
 }
 
-// takeNextPacketLocked transfers ownership of the first queued packet. a.mu must be held.
+// takeNextPacketLocked transfers ownership of the selected queued packet. a.mu must be held.
 func (a *Application) takeNextPacketLocked() ([]byte, error) {
-	queued := &a.queue[0]
+	index := a.nextQueuedPacketIndexLocked()
+	queued := a.queue[index]
 	if queued.update != nil {
 		now := a.clock.Now()
 		if err := a.writeState.CommitPreparedUpdate(queued.update.prepared, now); err != nil {
@@ -283,16 +286,52 @@ func (a *Application) takeNextPacketLocked() ([]byte, error) {
 	}
 	encodedBytes := len(queued.encoded)
 	encoded := queued.encoded
+	wasHighPriority := queued.highPriority
+	wasControl := queued.control
 	queued.encoded = nil
 	a.queuedBytes -= encodedBytes
 	queued.Destroy()
-	if len(a.queue) == 1 {
-		a.queue = a.queue[:0]
-	} else {
-		a.queue = a.queue[1:]
+	last := len(a.queue) - 1
+	copy(a.queue[index:], a.queue[index+1:])
+	a.queue[last] = queuedPacket{}
+	a.queue = a.queue[:last]
+	if wasHighPriority {
+		a.highPriorityBurst++
+	} else if !wasControl {
+		a.highPriorityBurst = 0
 	}
 	a.signalLocked()
 	return encoded, nil
+}
+
+func (a *Application) nextQueuedPacketIndexLocked() int {
+	if len(a.queue) == 0 || a.queue[0].control {
+		return 0
+	}
+	highPriority := -1
+	normal := -1
+	for index := range a.queue {
+		queued := a.queue[index]
+		if queued.control {
+			continue
+		}
+		if queued.highPriority {
+			if highPriority == -1 {
+				highPriority = index
+			}
+			continue
+		}
+		if normal == -1 {
+			normal = index
+		}
+	}
+	if highPriority != -1 && (a.highPriorityBurst < maximumHighPriorityBurst || normal == -1) {
+		return highPriority
+	}
+	if normal != -1 {
+		return normal
+	}
+	return 0
 }
 
 func (a *Application) HandlePacket(ctx context.Context, now time.Time, encoded []byte) ([]protocol.FrameBlock, error) {
@@ -410,7 +449,7 @@ func (a *Application) failLocked(err error) error {
 	return a.terminal
 }
 
-func (a *Application) queueBlock(ctx context.Context, block protocol.FrameBlock, control bool) error {
+func (a *Application) queueBlock(ctx context.Context, block protocol.FrameBlock, control, highPriority bool) error {
 	if ctx == nil {
 		return fmt.Errorf("session: nil context")
 	}
@@ -473,7 +512,7 @@ func (a *Application) queueBlock(ctx context.Context, block protocol.FrameBlock,
 	}
 	a.releaseReservationLocked(reservation)
 	reservationHeld = false
-	if err := a.enqueueEncodedLocked(&encoded, control); err != nil {
+	if err := a.enqueueEncodedLocked(&encoded, control, highPriority); err != nil {
 		a.write.NextPacket = nextPacket
 		return err
 	}
@@ -483,11 +522,11 @@ func (a *Application) queueBlock(ctx context.Context, block protocol.FrameBlock,
 	return nil
 }
 
-func (a *Application) enqueueEncodedLocked(encoded *[]byte, control bool) error {
+func (a *Application) enqueueEncodedLocked(encoded *[]byte, control, highPriority bool) error {
 	if encoded == nil || !a.hasCapacityLocked(len(*encoded), control) {
 		return ErrBackpressure
 	}
-	a.queue = append(a.queue, queuedPacket{encoded: *encoded})
+	a.queue = append(a.queue, queuedPacket{encoded: *encoded, control: control, highPriority: highPriority})
 	a.queuedBytes += len(*encoded)
 	*encoded = nil
 	a.recordQueuePeakLocked()
@@ -507,11 +546,23 @@ func (a *Application) enqueueControlBeforeWriteUpdateLocked(encoded *[]byte) err
 	}
 	a.queue = append(a.queue, queuedPacket{})
 	copy(a.queue[index+1:], a.queue[index:])
-	a.queue[index] = queuedPacket{encoded: *encoded}
+	a.queue[index] = queuedPacket{encoded: *encoded, control: true}
 	a.queuedBytes += len(*encoded)
 	*encoded = nil
 	a.recordQueuePeakLocked()
 	return nil
+}
+
+func isHighPriorityFrameBlock(block protocol.FrameBlock) bool {
+	if len(block.Frames) == 0 {
+		return false
+	}
+	for _, frame := range block.Frames {
+		if frame.FrameType != registry.FrameDNSMessage {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *Application) reserveLocked(bytes int, control bool) bool {

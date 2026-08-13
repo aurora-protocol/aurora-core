@@ -68,6 +68,7 @@ type FirstHopProxySessionOptions struct {
 	UDPConfirmTTL uint32
 	Dialer        relay.ContextDialer
 	Resolver      relay.IPResolver
+	DNSResolver   relay.DNSMessageResolver
 	Limits        relay.SocketEgressLimits
 }
 
@@ -87,11 +88,12 @@ func NewFirstHopProxySessionFactory(options FirstHopProxySessionOptions) (FirstH
 			return nil, nil, ErrFirstHopUnsupportedPersonality
 		}
 		egress, err := relay.NewSocketEgress(ctx, relay.SocketEgressOptions{
-			Sink:     application,
-			Policy:   options.ExitPolicy,
-			Dialer:   options.Dialer,
-			Resolver: options.Resolver,
-			Limits:   options.Limits,
+			Sink:        application,
+			Policy:      options.ExitPolicy,
+			Dialer:      options.Dialer,
+			Resolver:    options.Resolver,
+			DNSResolver: options.DNSResolver,
+			Limits:      options.Limits,
 		})
 		if err != nil {
 			return nil, nil, err

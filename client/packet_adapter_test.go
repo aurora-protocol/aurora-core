@@ -152,7 +152,7 @@ func TestPacketAdapterOpensUDPAndForwardsDatagrams(t *testing.T) {
 	}
 }
 
-func TestPacketAdapterForwardsDNSWithoutLocalResolver(t *testing.T) {
+func TestPacketAdapterForwardsDNSFrameWithoutLocalResolver(t *testing.T) {
 	clientApplication, relayApplication := packetAdapterApplications(t)
 	defer clientApplication.Close()
 	defer relayApplication.Close()
@@ -165,7 +165,8 @@ func TestPacketAdapterForwardsDNSWithoutLocalResolver(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Unix(1_700_000_000, 0)
-	packet := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{10, 0, 0, 1}, 53000, 53, packetAdapterDNSQuery(t, "example.com"))
+	query := packetAdapterDNSQuery(t, "example.com")
+	packet := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{10, 0, 0, 1}, 53000, 53, query)
 	if err := adapter.Ingress(context.Background(), packet, now); err != nil {
 		t.Fatal(err)
 	}
@@ -180,8 +181,36 @@ func TestPacketAdapterForwardsDNSWithoutLocalResolver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(blocks) != 1 || len(blocks[0].Frames) != 2 || blocks[0].Frames[0].FrameType != registry.FrameFlowOpen || blocks[0].Frames[1].FrameType != registry.FrameStreamData {
-		t.Fatalf("DNS without local resolver did not open a relayed UDP flow: %+v", blocks)
+	if len(blocks) != 1 || len(blocks[0].Frames) != 1 || blocks[0].Frames[0].FrameType != registry.FrameDNSMessage || !bytes.Equal(blocks[0].Frames[0].Payload, query) {
+		t.Fatalf("DNS without local resolver did not emit one encrypted DNS frame: %+v", blocks)
+	}
+}
+
+func TestPacketAdapterCountsPendingDNSAgainstFlowLimit(t *testing.T) {
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{
+		MaxFlows:       1,
+		MaxPacketBytes: 1500,
+		Random:         bytes.NewReader(bytes.Repeat([]byte{0x54}, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	dns := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{100, 64, 0, 1}, 53000, 53, packetAdapterDNSQuery(t, "example.com"))
+	if err := adapter.Ingress(context.Background(), dns, now); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.FlowCount() != 1 {
+		t.Fatalf("pending DNS flow count = %d, want one", adapter.FlowCount())
+	}
+	syn := packetAdapterTCPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, 100, 0, tcpFlagSYN, nil)
+	if err := adapter.Ingress(context.Background(), syn, now); err == nil {
+		t.Fatal("TCP flow was admitted after pending DNS reached the flow limit")
+	}
+	if adapter.FlowCount() != 1 || len(adapter.DrainLocalPackets()) != 0 {
+		t.Fatal("rejected TCP flow changed adapter state")
 	}
 }
 
@@ -512,6 +541,224 @@ func TestPacketAdapterCapturesDNSWithoutPublicResolverLeak(t *testing.T) {
 	}
 }
 
+func TestPacketAdapterExchangesCapturedDNSWithoutLocalResolver(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{
+		MaxFlows:       8,
+		MaxPacketBytes: 1500,
+		Random:         bytes.NewReader(bytes.Repeat([]byte{0x64}, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	query := packetAdapterDNSQuery(t, "example.com")
+	dns := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{100, 64, 0, 1}, 53000, 53, query)
+	if err := adapter.Ingress(context.Background(), dns, now); err != nil {
+		t.Fatal(err)
+	}
+	if packets := adapter.DrainLocalPackets(); len(packets) != 0 {
+		t.Fatalf("captured DNS query returned %d local packets before the relay response", len(packets))
+	}
+	encrypted, err := adapter.NextEncryptedPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := relayApplication.HandlePacket(context.Background(), now, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || len(blocks[0].Frames) != 1 || blocks[0].Frames[0].FrameType != registry.FrameDNSMessage || !bytes.Equal(blocks[0].Frames[0].Payload, query) {
+		t.Fatalf("captured DNS query did not become one encrypted DNS frame: %+v", blocks)
+	}
+	response := packetAdapterDNSResponse(t, query)
+	frame, err := protocol.NewDNSMessageFrame(blocks[0].Frames[0].FlowID, response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := relayApplication.QueueFrames(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}); err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err = relayApplication.NextPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	packets, err := adapter.HandleEncryptedPacket(context.Background(), encrypted, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packets) != 1 {
+		t.Fatalf("encrypted DNS response returned %d local packets, want one", len(packets))
+	}
+	local := packetAdapterParseUDPv4(t, packets[0])
+	if local.sourcePort != 53 || local.destinationPort != 53000 || !bytes.Equal(local.payload, response) {
+		t.Fatalf("unexpected local DNS response: %+v", local)
+	}
+}
+
+func TestPacketAdapterRejectsOversizedRelayedDNSQuery(t *testing.T) {
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{
+		MaxFlows:       8,
+		MaxPacketBytes: defaultPacketAdapterPacketBytes,
+		Random:         bytes.NewReader(bytes.Repeat([]byte{0x65}, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := packetAdapterDNSQuery(t, "example.com")
+	query = append(query, make([]byte, 4097-len(query))...)
+	packet := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{100, 64, 0, 1}, 53000, 53, query)
+	if err := adapter.Ingress(context.Background(), packet, time.Unix(1_700_000_000, 0)); err == nil {
+		t.Fatal("oversized relayed DNS query was accepted")
+	}
+	if adapter.FlowCount() != 0 || len(adapter.DrainLocalPackets()) != 0 {
+		t.Fatal("oversized relayed DNS query allocated packet adapter state")
+	}
+}
+
+func TestPacketAdapterRejectsMalformedRelayedDNSQuery(t *testing.T) {
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{
+		MaxFlows:       8,
+		MaxPacketBytes: 1500,
+		Random:         bytes.NewReader(bytes.Repeat([]byte{0x68}, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := []byte{0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	packet := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{100, 64, 0, 1}, 53000, 53, query)
+	if err := adapter.Ingress(context.Background(), packet, time.Unix(1_700_000_000, 0)); err == nil {
+		t.Fatal("malformed relayed DNS query was accepted")
+	}
+	if adapter.FlowCount() != 0 || len(adapter.DrainLocalPackets()) != 0 {
+		t.Fatal("malformed relayed DNS query allocated packet adapter state")
+	}
+}
+
+func TestPacketAdapterRejectsOverlongRelayedDNSAdditionalRecordName(t *testing.T) {
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{
+		MaxFlows:       8,
+		MaxPacketBytes: 1500,
+		Random:         bytes.NewReader(bytes.Repeat([]byte{0x69}, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := packetAdapterDNSQuery(t, "example.com")
+	binary.BigEndian.PutUint16(query[10:12], 1)
+	for label := 0; label < 4; label++ {
+		query = append(query, 63)
+		query = append(query, bytes.Repeat([]byte{'a'}, 63)...)
+	}
+	query = append(query, 0, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 0)
+	packet := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{100, 64, 0, 1}, 53000, 53, query)
+	if err := adapter.Ingress(context.Background(), packet, time.Unix(1_700_000_000, 0)); err == nil {
+		t.Fatal("overlong relayed DNS additional-record name was accepted")
+	}
+	if adapter.FlowCount() != 0 || len(adapter.DrainLocalPackets()) != 0 {
+		t.Fatal("overlong relayed DNS additional-record name allocated packet adapter state")
+	}
+}
+
+func TestPacketAdapterRejectsMismatchedDNSResponseWithoutDroppingRequest(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{
+		MaxFlows:       8,
+		MaxPacketBytes: 1500,
+		Random:         bytes.NewReader(bytes.Repeat([]byte{0x66}, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	query := packetAdapterDNSQuery(t, "example.com")
+	request := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{100, 64, 0, 1}, 53000, 53, query)
+	if err := adapter.Ingress(context.Background(), request, now); err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := adapter.NextEncryptedPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := relayApplication.HandlePacket(context.Background(), now, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flowID := blocks[0].Frames[0].FlowID
+	wrong := packetAdapterDNSResponse(t, query)
+	wrong[1]++
+	wrongFrame, err := protocol.NewDNSMessageFrame(flowID, wrong)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.HandleFrameBlocks(context.Background(), []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{wrongFrame}}}, now); err == nil {
+		t.Fatal("mismatched DNS response was accepted")
+	}
+	if adapter.FlowCount() != 1 {
+		t.Fatalf("mismatched DNS response discarded the pending request: %d", adapter.FlowCount())
+	}
+	response := packetAdapterDNSResponse(t, query)
+	responseFrame, err := protocol.NewDNSMessageFrame(flowID, response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packets, err := adapter.HandleFrameBlocks(context.Background(), []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{responseFrame}}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packets) != 1 || adapter.FlowCount() != 0 {
+		t.Fatalf("valid DNS response did not complete request: packets=%d flows=%d", len(packets), adapter.FlowCount())
+	}
+}
+
+func TestPacketAdapterExpiresPendingDNSRequest(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{
+		MaxFlows:       8,
+		MaxPacketBytes: 1500,
+		Random:         bytes.NewReader(bytes.Repeat([]byte{0x67}, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	query := packetAdapterDNSQuery(t, "example.com")
+	request := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{100, 64, 0, 1}, 53000, 53, query)
+	if err := adapter.Ingress(context.Background(), request, now); err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := adapter.NextEncryptedPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := relayApplication.HandlePacket(context.Background(), now, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := protocol.NewDNSMessageFrame(blocks[0].Frames[0].FlowID, packetAdapterDNSResponse(t, query))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.HandleFrameBlocks(context.Background(), []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{response}}}, now.Add(defaultPacketAdapterDNSLifetime)); err == nil {
+		t.Fatal("expired DNS response was accepted")
+	}
+	if adapter.FlowCount() != 0 {
+		t.Fatalf("expired DNS request remained allocated: %d", adapter.FlowCount())
+	}
+}
+
 func TestPacketAdapterRoutesTCPFromCapturedFakeIPToMappedTarget(t *testing.T) {
 	clientApplication, relayApplication := packetAdapterApplications(t)
 	defer clientApplication.Close()
@@ -834,6 +1081,17 @@ func packetAdapterDNSQuery(t testing.TB, domain string) []byte {
 	}
 	query = append(query, 0, 0, 1, 0, 1)
 	return query
+}
+
+func packetAdapterDNSResponse(t testing.TB, query []byte) []byte {
+	t.Helper()
+	if len(query) < 12 {
+		t.Fatal("DNS query is shorter than the header")
+	}
+	response := append([]byte(nil), query...)
+	response[2] |= 0x80
+	response[3] &= 0xf0
+	return response
 }
 
 func packetAdapterCaptureFakeIP(t testing.TB, adapter *PacketAdapter, relayApplication *session.Application, now time.Time) [4]byte {

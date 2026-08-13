@@ -136,6 +136,24 @@ func TestRunPacketDuplexRejectsMalformedRecordAndClosesResources(t *testing.T) {
 	if !errors.Is(err, ErrEmptyRecord) {
 		t.Fatalf("RunPacketDuplex malformed record error = %v, want ErrEmptyRecord", err)
 	}
+	if errors.Is(err, ErrCarrierRead) || errors.Is(err, ErrCarrierWrite) {
+		t.Fatalf("RunPacketDuplex malformed record error was classified as a carrier failure: %v", err)
+	}
+	requireDuplexClosedOnce(t, reader.closeCalls.Load(), writer.closeCalls.Load(), endpoint.closeCalls.Load())
+}
+
+func TestRunPacketDuplexClassifiesCarrierReadEOF(t *testing.T) {
+	reader := &countingReadCloser{Reader: bytes.NewReader(nil)}
+	writer := &discardWriteCloser{}
+	endpoint := newDuplexTestEndpoint()
+
+	err := RunPacketDuplex(context.Background(), reader, writer, endpoint, discardFrameBlock, 64)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("RunPacketDuplex carrier read error = %v, want io.EOF", err)
+	}
+	if !errors.Is(err, ErrCarrierRead) {
+		t.Fatalf("RunPacketDuplex carrier read error = %v, want ErrCarrierRead", err)
+	}
 	requireDuplexClosedOnce(t, reader.closeCalls.Load(), writer.closeCalls.Load(), endpoint.closeCalls.Load())
 }
 
@@ -167,6 +185,9 @@ func TestRunPacketDuplexReturnsHandlerErrorAndDestroysBlocks(t *testing.T) {
 	err = RunPacketDuplex(context.Background(), reader, writer, endpoint, handler, 64)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("RunPacketDuplex handler error = %v, want %v", err, wantErr)
+	}
+	if errors.Is(err, ErrCarrierRead) || errors.Is(err, ErrCarrierWrite) {
+		t.Fatalf("RunPacketDuplex handler error was classified as a carrier failure: %v", err)
 	}
 	for _, value := range retained {
 		if value != 0 {
@@ -222,6 +243,9 @@ func TestRunPacketDuplexPreservesCarrierWriteError(t *testing.T) {
 	err := RunPacketDuplex(context.Background(), reader, writer, endpoint, discardFrameBlock, 64)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("RunPacketDuplex carrier write error = %v, want %v", err, wantErr)
+	}
+	if !errors.Is(err, ErrCarrierWrite) {
+		t.Fatalf("RunPacketDuplex carrier write error = %v, want ErrCarrierWrite", err)
 	}
 	requireDuplexClosedOnce(t, reader.closeCalls.Load(), writer.closeCalls.Load(), endpoint.closeCalls.Load())
 }

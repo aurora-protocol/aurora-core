@@ -21,6 +21,7 @@ const (
 	nativeIntegrationMaximumABIFrame = 16 << 20
 	nativeIntegrationCallTimeout     = 4 * time.Second
 	nativeIntegrationCloseTimeout    = 4 * time.Second
+	nativeIntegrationOversizedCall   = 1<<31 - 1
 )
 
 type nativeIntegrationCaller interface {
@@ -113,6 +114,39 @@ func TestNativeIntegrationCABICallerDeadlineReleasesHarness(t *testing.T) {
 		t.Fatal("blocked C ABI caller retained its cleanup lock")
 	}
 	_ = command.Wait()
+}
+
+func TestNativeCallInputLengthIsBoundedBeforeCopy(t *testing.T) {
+	for _, input := range []struct {
+		name   string
+		length int
+		valid  bool
+	}{
+		{name: "empty", length: 0, valid: true},
+		{name: "largest valid", length: maximumNativeCallInputBytes, valid: true},
+		{name: "too large", length: maximumNativeCallInputBytes + 1},
+		{name: "negative", length: -1},
+	} {
+		t.Run(input.name, func(t *testing.T) {
+			if got := nativeCallInputLengthValid(input.length); got != input.valid {
+				t.Fatalf("native input length %d valid=%t, want %t", input.length, got, input.valid)
+			}
+		})
+	}
+}
+
+func TestNativeIntegrationCABIRejectsOversizedLengthBeforeRead(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skipf("native archive process test is unsupported on %s", runtime.GOOS)
+	}
+	caller := newNativeIntegrationCABICaller(t)
+	status, payload, err := caller.call(nativeIntegrationOversizedCall, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != statusError || len(payload) != 0 {
+		t.Fatalf("oversized native input = status %d payload %x", status, payload)
+	}
 }
 
 func newNativeIntegrationCaller(t testing.TB) nativeIntegrationCaller {

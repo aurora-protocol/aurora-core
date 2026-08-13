@@ -402,6 +402,235 @@ func TestPacketAdapterReassemblesOutOfOrderIPv4TCPFragments(t *testing.T) {
 	}
 }
 
+func TestPacketAdapterReassemblesOutOfOrderIPv6TCPFragments(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	source := netip.MustParseAddr("2001:db8::2")
+	target := netip.MustParseAddr("2606:4700:4700::1111")
+	syn, err := buildPacketAdapterTCPPacket(6, source, target, 50000, 443, 100, 0, tcpFlagSYN, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, final := packetAdapterIPv6Fragments(t, syn, 1, 8)
+
+	if err := adapter.Ingress(context.Background(), final, now); err != nil {
+		t.Fatalf("ingress final IPv6 fragment: %v", err)
+	}
+	if adapter.FlowCount() != 0 || len(adapter.DrainLocalPackets()) != 0 {
+		t.Fatal("incomplete IPv6 fragment set allocated a flow or local response")
+	}
+	if err := adapter.Ingress(context.Background(), first, now); err != nil {
+		t.Fatalf("ingress initial IPv6 fragment: %v", err)
+	}
+	localPackets := adapter.DrainLocalPackets()
+	if len(localPackets) != 1 {
+		t.Fatalf("reassembled IPv6 TCP SYN returned %d local packets", len(localPackets))
+	}
+	local, err := parsePacketAdapterIPPacket(localPackets[0], 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if local.version != 6 || local.tcp.flags != tcpFlagSYN|tcpFlagACK || local.source != target || local.target != source {
+		t.Fatalf("unexpected IPv6 fragment synthetic SYN-ACK: %+v", local)
+	}
+	encrypted, err := adapter.NextEncryptedPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := relayApplication.HandlePacket(context.Background(), now, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || len(blocks[0].Frames) != 1 || blocks[0].Frames[0].FrameType != registry.FrameFlowOpen {
+		t.Fatalf("reassembled IPv6 TCP SYN did not emit one FLOW_OPEN: %+v", blocks)
+	}
+}
+
+func TestPacketAdapterReassemblesIPv6FragmentsWithDestinationHeader(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	syn, err := buildPacketAdapterTCPPacket(6, netip.MustParseAddr("2001:db8::2"), netip.MustParseAddr("2606:4700:4700::1111"), 50000, 443, 100, 0, tcpFlagSYN, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, final := packetAdapterIPv6Fragments(t, packetAdapterIPv6WithOptionsHeader(t, syn, packetAdapterIPv6Destination), 1, 8)
+
+	if err := adapter.Ingress(context.Background(), first, now); err != nil {
+		t.Fatalf("ingress initial IPv6 fragment: %v", err)
+	}
+	if err := adapter.Ingress(context.Background(), final, now); err != nil {
+		t.Fatalf("ingress final IPv6 fragment: %v", err)
+	}
+	localPackets := adapter.DrainLocalPackets()
+	if len(localPackets) != 1 {
+		t.Fatalf("reassembled IPv6 TCP SYN returned %d local packets", len(localPackets))
+	}
+	local, err := parsePacketAdapterIPPacket(localPackets[0], 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if local.version != 6 || local.tcp.flags != tcpFlagSYN|tcpFlagACK {
+		t.Fatalf("unexpected IPv6 fragment synthetic SYN-ACK: %+v", local)
+	}
+	encrypted, err := adapter.NextEncryptedPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := relayApplication.HandlePacket(context.Background(), now, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || len(blocks[0].Frames) != 1 || blocks[0].Frames[0].FrameType != registry.FrameFlowOpen {
+		t.Fatalf("reassembled IPv6 TCP SYN did not emit one FLOW_OPEN: %+v", blocks)
+	}
+}
+
+func TestPacketAdapterRejectsIPv6FragmentWithInvalidNextHeader(t *testing.T) {
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := buildPacketAdapterTCPPacket(6, netip.MustParseAddr("2001:db8::2"), netip.MustParseAddr("2606:4700:4700::1111"), 50000, 443, 100, 0, tcpFlagSYN, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := packetAdapterIPv6Fragments(t, packet, 1, 8)
+	first[40] = packetAdapterIPv6HopByHop
+
+	if err := adapter.Ingress(context.Background(), first, time.Unix(1_700_000_000, 0)); err == nil {
+		t.Fatal("IPv6 fragment with an invalid next header was accepted")
+	}
+	if len(adapter.ipv6Fragments) != 0 || adapter.FlowCount() != 0 || len(adapter.DrainLocalPackets()) != 0 {
+		t.Fatal("invalid IPv6 fragment retained adapter state")
+	}
+}
+
+func TestPacketAdapterExpiresIPv6FragmentsAndClearsBuffers(t *testing.T) {
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := buildPacketAdapterTCPPacket(6, netip.MustParseAddr("2001:db8::2"), netip.MustParseAddr("2606:4700:4700::1111"), 50000, 443, 100, 0, tcpFlagSYN, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := packetAdapterIPv6Fragments(t, packet, 1, 8)
+	now := time.Unix(1_700_000_000, 0)
+	if err := adapter.Ingress(context.Background(), first, now); err != nil {
+		t.Fatalf("ingress initial IPv6 fragment: %v", err)
+	}
+	if len(adapter.ipv6Fragments) != 1 {
+		t.Fatalf("IPv6 fragment set count = %d, want 1", len(adapter.ipv6Fragments))
+	}
+	var retained *packetAdapterIPv6FragmentSet
+	for _, retained = range adapter.ipv6Fragments {
+	}
+	header := retained.header
+	payload := retained.segments[0].payload
+
+	if err := adapter.Ingress(context.Background(), packet, now.Add(defaultPacketAdapterIPv6FragmentLifetime)); err != nil {
+		t.Fatalf("ingress after IPv6 fragment expiry: %v", err)
+	}
+	if len(adapter.ipv6Fragments) != 0 {
+		t.Fatal("expired IPv6 fragment set was retained")
+	}
+	if !bytes.Equal(header, make([]byte, len(header))) || !bytes.Equal(payload, make([]byte, len(payload))) {
+		t.Fatal("expired IPv6 fragment buffers were not cleared")
+	}
+}
+
+func TestPacketAdapterRejectsOverlappingIPv6Fragments(t *testing.T) {
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := buildPacketAdapterUDPPacket(6, netip.MustParseAddr("2001:db8::2"), netip.MustParseAddr("2606:4700:4700::1111"), 50000, 443, bytes.Repeat([]byte{0x5a}, 24), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := packetAdapterIPv6FragmentAt(t, packet, 1, 0, 16, true)
+	overlap := packetAdapterIPv6FragmentAt(t, packet, 1, 8, 24, false)
+	now := time.Unix(1_700_000_000, 0)
+	if err := adapter.Ingress(context.Background(), first, now); err != nil {
+		t.Fatalf("ingress initial IPv6 fragment: %v", err)
+	}
+	if err := adapter.Ingress(context.Background(), overlap, now); err == nil {
+		t.Fatal("overlapping IPv6 fragments were accepted")
+	}
+	if len(adapter.ipv6Fragments) != 0 || adapter.FlowCount() != 0 || len(adapter.DrainLocalPackets()) != 0 {
+		t.Fatal("overlapping IPv6 fragments retained adapter state")
+	}
+}
+
+func TestPacketAdapterRejectsIPv6FragmentHeaderMismatch(t *testing.T) {
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := buildPacketAdapterUDPPacket(6, netip.MustParseAddr("2001:db8::2"), netip.MustParseAddr("2606:4700:4700::1111"), 50000, 443, bytes.Repeat([]byte{0x5a}, 24), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := packetAdapterIPv6FragmentAt(t, packet, 1, 8, 24, false)
+	first := packetAdapterIPv6FragmentAt(t, packet, 1, 0, 8, true)
+	first[1] ^= 0x01
+	now := time.Unix(1_700_000_000, 0)
+	if err := adapter.Ingress(context.Background(), final, now); err != nil {
+		t.Fatalf("ingress final IPv6 fragment: %v", err)
+	}
+	if err := adapter.Ingress(context.Background(), first, now); err == nil {
+		t.Fatal("IPv6 fragments with inconsistent headers were accepted")
+	}
+	if len(adapter.ipv6Fragments) != 0 || adapter.FlowCount() != 0 || len(adapter.DrainLocalPackets()) != 0 {
+		t.Fatal("inconsistent IPv6 headers retained adapter state")
+	}
+}
+
+func TestPacketAdapterBoundsIPv6FragmentSetsByFlowLimit(t *testing.T) {
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{MaxFlows: 1, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := buildPacketAdapterUDPPacket(6, netip.MustParseAddr("2001:db8::2"), netip.MustParseAddr("2606:4700:4700::1111"), 50000, 443, bytes.Repeat([]byte{0x5a}, 24), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := packetAdapterIPv6FragmentAt(t, packet, 1, 0, 16, true)
+	second := packetAdapterIPv6FragmentAt(t, packet, 2, 0, 16, true)
+	now := time.Unix(1_700_000_000, 0)
+	if err := adapter.Ingress(context.Background(), first, now); err != nil {
+		t.Fatalf("ingress first IPv6 fragment set: %v", err)
+	}
+	if err := adapter.Ingress(context.Background(), second, now); err == nil {
+		t.Fatal("IPv6 fragment set exceeded the configured flow limit")
+	}
+	if len(adapter.ipv6Fragments) != 1 || adapter.FlowCount() != 0 || len(adapter.DrainLocalPackets()) != 0 {
+		t.Fatal("IPv6 fragment set limit retained unexpected state")
+	}
+}
+
 func TestPacketAdapterRejectsIPv4FragmentBeyondFinalLength(t *testing.T) {
 	application, _ := packetAdapterApplications(t)
 	defer application.Close()
@@ -1259,6 +1488,32 @@ func packetAdapterIPv6WithFragmentHeaderFields(t testing.TB, encoded []byte, off
 	return packet
 }
 
+func packetAdapterIPv6Fragments(t testing.TB, encoded []byte, id uint32, split int) ([]byte, []byte) {
+	t.Helper()
+	if len(encoded) < 40 || encoded[0]>>4 != 6 || split <= 0 || split%8 != 0 || split >= len(encoded)-40 {
+		t.Fatal("packet adapter IPv6 fragment split is invalid")
+	}
+	return packetAdapterIPv6FragmentAt(t, encoded, id, 0, split, true), packetAdapterIPv6FragmentAt(t, encoded, id, split, len(encoded)-40-split, false)
+}
+
+func packetAdapterIPv6FragmentAt(t testing.TB, encoded []byte, id uint32, offset, length int, more bool) []byte {
+	t.Helper()
+	if len(encoded) < 40 || encoded[0]>>4 != 6 || offset < 0 || offset%8 != 0 || length <= 0 || offset+length > len(encoded)-40 || (more && length%8 != 0) {
+		t.Fatal("packet adapter IPv6 fragment range is invalid")
+	}
+	packet := make([]byte, 0, 48+length)
+	packet = append(packet, encoded[:40]...)
+	packet[6] = packetAdapterIPv6Fragment
+	flags := uint16(offset)
+	if more {
+		flags |= 1
+	}
+	packet = append(packet, encoded[6], 0, byte(flags>>8), byte(flags), byte(id>>24), byte(id>>16), byte(id>>8), byte(id))
+	packet = append(packet, encoded[40+offset:40+offset+length]...)
+	binary.BigEndian.PutUint16(packet[4:6], uint16(len(packet)-40))
+	return packet
+}
+
 func packetAdapterIPv4Fragments(t testing.TB, encoded []byte, split int) ([]byte, []byte) {
 	t.Helper()
 	if len(encoded) < 20 || encoded[0]>>4 != 4 {
@@ -1411,6 +1666,7 @@ func FuzzPacketAdapterIngress(f *testing.F) {
 	}
 	atomicIPv6FragmentSeed := packetAdapterIPv6WithFragmentHeader(f, ipv6Seed)
 	fragmentedIPv6Seed := packetAdapterIPv6WithFragmentHeaderFields(f, ipv6Seed, 1, true)
+	ipv6FirstFragmentSeed, ipv6FinalFragmentSeed := packetAdapterIPv6Fragments(f, ipv6Seed, 1, 8)
 	ipv6Seed = packetAdapterIPv6WithOptionsHeader(f, ipv6Seed, 60)
 	malformedIPv6Seed := append([]byte(nil), ipv6Seed...)
 	malformedIPv6Seed[41] = 1
@@ -1418,6 +1674,8 @@ func FuzzPacketAdapterIngress(f *testing.F) {
 	f.Add(ipv4FragmentSeed)
 	f.Add(atomicIPv6FragmentSeed)
 	f.Add(fragmentedIPv6Seed)
+	f.Add(ipv6FirstFragmentSeed)
+	f.Add(ipv6FinalFragmentSeed)
 	f.Add(ipv6Seed)
 	f.Add(malformedIPv6Seed)
 	f.Add([]byte{0x45, 0x00, 0x00, 0x14})

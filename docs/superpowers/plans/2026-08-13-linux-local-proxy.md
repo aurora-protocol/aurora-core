@@ -34,7 +34,7 @@
 - Produces `func (s *ProvisionedSession) Complete(ctx context.Context, issuerResponse []byte) (*handshake.EstablishedSession, error)` and `func (s *ProvisionedSession) Close() error`.
 - `ProvisionedSessionOptions` supplies only clock, random source, handshake timeout, issuer lifetime, and issuer timeout for deterministic tests.
 
-- [ ] **Step 1: Write the failing lifecycle tests**
+- [x] **Step 1: Write the failing lifecycle tests**
 
 ```go
 func TestProvisionedSessionIssuesOnlyAfterVerifiedPrelude(t *testing.T) {
@@ -51,13 +51,13 @@ func TestProvisionedSessionRejectsSecondCompletion(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the lifecycle tests and verify they fail**
+- [x] **Step 2: Run the lifecycle tests and verify they fail**
 
 Run: `GOCACHE=/private/tmp/aurora-gocache go test ./client -run 'TestProvisionedSession' -count=1`
 
 Expected: compile failure naming `BeginProvisionedSession` or `ProvisionedSession`.
 
-- [ ] **Step 3: Implement the bounded deferred lifecycle**
+- [x] **Step 3: Implement the bounded deferred lifecycle**
 
 ```go
 type ProvisionedSession struct {
@@ -78,13 +78,13 @@ func (s *ProvisionedSession) Complete(ctx context.Context, issuerResponse []byte
 
 Clone and zero temporary proof material, enforce existing size limits, cancel abandoned work after the configured issuer timeout, and close the established session on failure. Keep the existing native handle registry unchanged; this task introduces the portable lifecycle needed by the Linux process.
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 Run: `GOCACHE=/private/tmp/aurora-gocache go test ./client -run TestProvisionedSession -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add client/provisioned_session.go client/provisioned_session_test.go
@@ -104,7 +104,7 @@ git commit -m "feat: share provisioned client session lifecycle"
 - Produces `func (r *TCPProxyRuntime) HandleFrameBlock(ctx context.Context, block protocol.FrameBlock) error` for `transport.RunPacketDuplex`.
 - Produces `func (r *TCPProxyRuntime) Close() error`.
 
-- [ ] **Step 1: Write failing HTTP CONNECT forwarding tests**
+- [x] **Step 1: Write failing HTTP CONNECT forwarding tests**
 
 ```go
 func TestTCPProxyRuntimeForwardsHTTPConnectBytes(t *testing.T) {
@@ -119,13 +119,13 @@ func TestTCPProxyRuntimeForwardsHTTPConnectBytes(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the forwarding test and verify it fails**
+- [x] **Step 2: Run the forwarding test and verify it fails**
 
 Run: `GOCACHE=/private/tmp/aurora-gocache go test ./client -run TestTCPProxyRuntimeForwardsHTTPConnectBytes -count=1`
 
 Expected: compile failure naming `NewTCPProxyRuntime`.
 
-- [ ] **Step 3: Implement HTTP CONNECT and SOCKS5 TCP serving**
+- [x] **Step 3: Implement HTTP CONNECT and SOCKS5 TCP serving**
 
 ```go
 func (r *TCPProxyRuntime) HandleFrameBlock(ctx context.Context, block protocol.FrameBlock) error {
@@ -145,7 +145,7 @@ func (r *TCPProxyRuntime) HandleFrameBlock(ctx context.Context, block protocol.F
 
 Use `LocalProxy.OpenTCPFrame`, `LocalProxy.SendTCP`, and `session.Application.QueueFrames` for all outbound messages. Allocate nonzero monotonic flow IDs, synchronize each connection write path, close and remove a flow exactly once, and do not queue any frame before a local handshake succeeds.
 
-- [ ] **Step 4: Add and run failure-path tests**
+- [x] **Step 4: Add and run failure-path tests**
 
 ```go
 func TestTCPProxyRuntimeRejectsMalformedSOCKS(t *testing.T) {
@@ -178,7 +178,7 @@ Run: `GOCACHE=/private/tmp/aurora-gocache go test ./client -run TestTCPProxyRunt
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add client/tcp_proxy_runtime.go client/tcp_proxy_runtime_test.go
@@ -198,7 +198,7 @@ git commit -m "feat: serve local TCP proxy flows"
 - Produces `aurorac proxy --provisioning PATH --http-listen HOST:PORT --socks-listen HOST:PORT`.
 - The command uses `BeginProvisionedSession`, an HTTPS issuer transport with no redirect or cache, `TCPProxyRuntime`, and `transport.RunPacketDuplex`.
 
-- [ ] **Step 1: Write failing command validation tests**
+- [x] **Step 1: Write failing command validation tests**
 
 ```go
 func TestProxyCommandRejectsNonLinuxAndPublicDefaultBind(t *testing.T) {
@@ -216,13 +216,13 @@ func TestProvisioningFileRejectsGroupReadableMode(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run command tests and verify they fail**
+- [x] **Step 2: Run command tests and verify they fail**
 
 Run: `GOCACHE=/private/tmp/aurora-gocache go test ./cmd/aurorac -count=1`
 
 Expected: package directory failure.
 
-- [ ] **Step 3: Implement Linux composition and graceful shutdown**
+- [x] **Step 3: Implement Linux composition and graceful shutdown**
 
 ```go
 func runProxy(ctx context.Context, config proxyConfig) error {
@@ -237,7 +237,7 @@ func runProxy(ctx context.Context, config proxyConfig) error {
 
 Require loopback addresses unless `--allow-public-listeners` is set. Require a regular owner-only provisioning file, reject symlinks, and report only listener addresses and generic lifecycle state. Cancel all listeners and the carrier on the first terminal error or OS shutdown signal.
 
-- [ ] **Step 4: Run command tests and build Linux binary**
+- [x] **Step 4: Run command tests and build Linux binary**
 
 Run: `GOCACHE=/private/tmp/aurora-gocache go test ./cmd/aurorac -count=1`
 
@@ -245,51 +245,43 @@ Run: `GOCACHE=/private/tmp/aurora-gocache GOOS=linux GOARCH=amd64 go build ./cmd
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add cmd/aurorac README.md
 git commit -m "feat: add Linux local proxy client"
 ```
 
-### Task 4: End-To-End Verification And Delivery
+### Task 4: Strict Provisioning Integration And Delivery
 
 **Files:**
 - Modify: `server/first_hop_integration_test.go`
-- Modify: `cmd/auroractl/main.go`
-- Modify: `cmd/auroractl/main_test.go`
 
 **Interfaces:**
-- Produces an `auroractl client-proxy-check` gate that runs a provisioned client runtime against the strict first-hop fixture and a local TCP echo service.
+- Adds strict relay integration coverage that serializes and reparses native provisioning, pins the relay certificate, completes deferred issuer authentication, and sends an encrypted post-authentication payload. The existing strict local TCP proxy test covers local HTTP CONNECT forwarding through the same relay data plane.
 
-- [ ] **Step 1: Write the failing real-carrier integration test**
+- [x] **Step 1: Write the failing real-carrier integration test**
 
 ```go
-func TestProvisionedTCPProxyInteroperatesWithFirstHopRelay(t *testing.T) {
-    relay, provisioning := newStrictFirstHopFixture(t)
-    proxy := startProvisionedTCPProxy(t, provisioning)
-    conn := connectHTTPProxy(t, proxy, relay.EchoTarget())
-    requireRoundTrip(t, conn, []byte("client payload"))
+func TestLiveFirstHopProvisionedSessionEgress(t *testing.T) {
+    provisioning := provisionedFixtureWithPinnedRelayCertificate(t)
+    session, work := client.BeginProvisionedSession(context.Background(), provisioning, client.ProvisionedSessionOptions{})
+    established := completeWithTLSIssuer(t, session, work)
+    requireEncryptedPayloadAtRelay(t, established, []byte("client payload"))
 }
 ```
 
-- [ ] **Step 2: Run it and verify it fails until all pieces are wired**
+- [x] **Step 2: Run it and verify it fails until all pieces are wired**
 
-Run: `GOCACHE=/private/tmp/aurora-gocache go test ./server ./cmd/auroractl -run 'TestProvisionedTCPProxy|TestClientProxyCheck' -count=1`
+Run: `GOCACHE=/private/tmp/aurora-gocache go test ./server -run TestLiveFirstHopProvisionedSessionEgress -count=1`
 
-Expected: initial failure due to the missing check command or runtime wiring.
+Expected: initial compile failure until the strict fixture produces pinned provisioning and a matching issuer response.
 
-- [ ] **Step 3: Add the gate and integration wiring**
+- [x] **Step 3: Add the integration wiring**
 
-```go
-case "client-proxy-check":
-    report, err := server.RunProvisionedClientProxyConformance()
-    return writeClientProxyReport(stdout, report, err)
-```
+Build the strict test fixture with explicitly generated TLS material, derive the template origin pin from that certificate, and issue the admission proof through an HTTPS-only loopback issuer. Keep every endpoint loopback-only and erase temporary provisioning and issuer response bytes after use.
 
-The gate must fail closed on connection, handshake, forwarding, cleanup, or secret-redaction failures. It must use only loopback fixture endpoints.
-
-- [ ] **Step 4: Run full verification**
+- [x] **Step 4: Run full verification**
 
 Run: `GOCACHE=/private/tmp/aurora-gocache go test -p 1 ./... -count=1`
 
@@ -299,19 +291,17 @@ Run: `GOCACHE=/private/tmp/aurora-gocache go vet ./...`
 
 Run: `GOCACHE=/private/tmp/aurora-gocache GOOS=linux GOARCH=amd64 go build ./cmd/aurorac ./cmd/aurorad`
 
-Run: `GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl client-proxy-check`
-
 Expected: all commands pass.
 
 - [ ] **Step 5: Commit final verification artifacts**
 
 ```sh
-git add server/first_hop_integration_test.go cmd/auroractl/main.go cmd/auroractl/main_test.go
-git commit -m "test: verify provisioned Linux proxy interop"
+git add server/first_hop_integration_test.go docs/superpowers/plans/2026-08-13-linux-local-proxy.md
+git commit -m "test: verify provisioned client relay interop"
 ```
 
 ## Plan Self-Review
 
 - Spec coverage: the plan covers reusable authenticated session ownership, no-root HTTP CONNECT and SOCKS5 TCP interfaces, Linux command validation, bounded resources, teardown, and real relay interoperability. Privileged TUN setup, UDP association serving, and local DNS listening are separate follow-up increments documented in the design scope.
 - Placeholder scan: no deferred implementation markers or generic test steps remain.
-- Type consistency: `ProvisionedSession` supplies established application and carrier state to `TCPProxyRuntime`; the command owns lifecycle composition; the integration gate exercises that public path.
+- Type consistency: `ProvisionedSession` supplies established application and carrier state to `TCPProxyRuntime`; the command owns lifecycle composition; strict relay integration verifies the provisioned path separately from the local TCP proxy data path.

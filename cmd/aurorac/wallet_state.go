@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"sort"
 	"time"
@@ -11,14 +12,18 @@ import (
 )
 
 const (
-	provisioningWalletStateFormat         uint64 = 1
+	legacyProvisioningWalletStateFormat   uint64 = 1
+	provisioningWalletStateFormat         uint64 = 2
+	provisioningWalletSourceDigestBytes          = sha256.Size
 	provisioningWalletSpentHintKeyBytes          = 48
 	maximumProvisioningWalletStateEntries        = 65536
 	maximumProvisioningWalletStateBytes          = 4 << 20
 )
 
 type provisioningWalletState struct {
-	reservations map[string]uint64
+	hasSourceDigest bool
+	sourceDigest    [provisioningWalletSourceDigestBytes]byte
+	reservations    map[string]uint64
 }
 
 type provisioningWalletSource interface {
@@ -37,14 +42,29 @@ func parseProvisioningWalletState(encoded []byte, now time.Time) (*provisioningW
 		return nil, fmt.Errorf("client: wallet state size is invalid")
 	}
 	reader := wire.NewReader(encoded)
-	if format := reader.ReadVarint(); format != provisioningWalletStateFormat {
+	format := reader.ReadVarint()
+	if reader.Err() != nil {
+		return nil, fmt.Errorf("client: malformed wallet state")
+	}
+	state := newProvisioningWalletState()
+	switch format {
+	case legacyProvisioningWalletStateFormat:
+	case provisioningWalletStateFormat:
+		digest := reader.ReadOpaqueFixed(provisioningWalletSourceDigestBytes)
+		if reader.Err() != nil {
+			zeroProxyBytes(digest)
+			return nil, fmt.Errorf("client: malformed wallet state source digest")
+		}
+		copy(state.sourceDigest[:], digest)
+		state.hasSourceDigest = true
+		zeroProxyBytes(digest)
+	default:
 		return nil, fmt.Errorf("client: unsupported wallet state format")
 	}
 	count := reader.ReadVectorCount("wallet state entry")
 	if reader.Err() != nil || count > maximumProvisioningWalletStateEntries {
 		return nil, fmt.Errorf("client: wallet state entry count is invalid")
 	}
-	state := newProvisioningWalletState()
 	var previous []byte
 	defer func() { zeroProxyBytes(previous) }()
 	for range count {
@@ -85,7 +105,12 @@ func (state *provisioningWalletState) Encode() ([]byte, error) {
 	}
 	sort.Strings(keys)
 	encoder := wire.NewEncoder()
-	encoder.WriteVarint(provisioningWalletStateFormat)
+	if state.hasSourceDigest {
+		encoder.WriteVarint(provisioningWalletStateFormat)
+		encoder.WriteOpaqueFixed(state.sourceDigest[:], provisioningWalletSourceDigestBytes)
+	} else {
+		encoder.WriteVarint(legacyProvisioningWalletStateFormat)
+	}
 	encoder.WriteVarint(uint64(len(keys)))
 	for _, key := range keys {
 		encoder.WriteOpaqueFixed([]byte(key), provisioningWalletSpentHintKeyBytes)
@@ -147,6 +172,21 @@ func (state *provisioningWalletState) prune(now time.Time) {
 			delete(state.reservations, key)
 		}
 	}
+}
+
+func (state *provisioningWalletState) bindSourceDigest(sourceDigest [provisioningWalletSourceDigestBytes]byte) {
+	if state == nil {
+		return
+	}
+	if state.hasSourceDigest && state.sourceDigest != sourceDigest {
+		state.reservations = make(map[string]uint64)
+	}
+	state.sourceDigest = sourceDigest
+	state.hasSourceDigest = true
+}
+
+func provisioningWalletSourceDigest(encoded []byte) [provisioningWalletSourceDigestBytes]byte {
+	return sha256.Sum256(encoded)
 }
 
 // Transact locks, reloads, updates, and durably writes the local wallet state.

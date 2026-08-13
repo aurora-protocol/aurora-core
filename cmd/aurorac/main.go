@@ -288,6 +288,7 @@ func runProxyWithProvisioningWallet(ctx context.Context, config proxyConfig, std
 	if err != nil {
 		return err
 	}
+	sourceDigest := provisioningWalletSourceDigest(encoded)
 	wallet, err := client.ParseNativeProvisioningWallet(encoded, time.Now().UTC())
 	zeroProxyBytes(encoded)
 	if err != nil {
@@ -299,7 +300,7 @@ func runProxyWithProvisioningWallet(ctx context.Context, config proxyConfig, std
 		return err
 	}
 	return runWithProvisioningWallet(ctx, carrierRecoveryPolicy{}, func(now time.Time) (client.NativeProvisioningReservation, error) {
-		return store.Reserve(wallet, now)
+		return store.Reserve(wallet, sourceDigest, now)
 	}, func(attemptContext context.Context, reservation client.NativeProvisioningReservation) error {
 		return runProxyWithProvisioning(attemptContext, config, reservation.Provisioning, stdout)
 	})
@@ -377,6 +378,7 @@ func runTUNWithProvisioningWallet(ctx context.Context, config tunConfig, stdout 
 	if err != nil {
 		return err
 	}
+	sourceDigest := provisioningWalletSourceDigest(encoded)
 	wallet, err := client.ParseNativeProvisioningWallet(encoded, time.Now().UTC())
 	zeroProxyBytes(encoded)
 	if err != nil {
@@ -388,7 +390,7 @@ func runTUNWithProvisioningWallet(ctx context.Context, config tunConfig, stdout 
 		return err
 	}
 	return runWithProvisioningWallet(ctx, carrierRecoveryPolicy{}, func(now time.Time) (client.NativeProvisioningReservation, error) {
-		return store.Reserve(wallet, now)
+		return store.Reserve(wallet, sourceDigest, now)
 	}, func(attemptContext context.Context, reservation client.NativeProvisioningReservation) error {
 		return runTUNWithProvisioning(attemptContext, config, reservation.Provisioning, stdout)
 	})
@@ -766,6 +768,7 @@ func reserveSingleNativeProvisioning(provisioningPath, statePath string, now tim
 	if err != nil {
 		return client.NativeProvisioningReservation{}, err
 	}
+	sourceDigest := provisioningWalletSourceDigest(encoded)
 	provisioning, err := client.ParseNativeProvisioning(encoded, now)
 	zeroProxyBytes(encoded)
 	if err != nil {
@@ -786,7 +789,7 @@ func reserveSingleNativeProvisioning(provisioningPath, statePath string, now tim
 	if err != nil {
 		return client.NativeProvisioningReservation{}, err
 	}
-	return store.Reserve(wallet, now)
+	return store.Reserve(wallet, sourceDigest, now)
 }
 
 func readRestrictedOwnerFile(path string, maximumBytes int, label string) ([]byte, error) {

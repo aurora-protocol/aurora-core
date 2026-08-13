@@ -146,18 +146,93 @@ func TestProvisioningWalletStateStorePersistsReservationBeforeNextUse(t *testing
 		t.Fatal(err)
 	}
 	source := &recordingProvisioningWalletSource{now: now}
-	first, err := store.Reserve(source, now)
+	sourceDigest := provisioningWalletSourceDigest([]byte("recording source"))
+	first, err := store.Reserve(source, sourceDigest, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	first.Zero()
-	second, err := store.Reserve(source, now)
+	second, err := store.Reserve(source, sourceDigest, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	second.Zero()
 	if source.calls != 2 || !source.sawPreviousReservation {
 		t.Fatalf("wallet source calls=%d sawPrevious=%t, want two calls with durable first reservation", source.calls, source.sawPreviousReservation)
+	}
+}
+
+func TestProvisioningWalletStateStoreIgnoresReservationsFromReplacedSource(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := newProvisioningWalletStateStore(filepath.Join(directory, "wallet-state.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := bytes.Repeat([]byte{0x71}, provisioningWalletSpentHintKeyBytes)
+	first := &fixedProvisioningWalletSource{now: now, key: key}
+	if reservation, err := store.Reserve(first, provisioningWalletSourceDigest([]byte("first source")), now); err != nil {
+		t.Fatal(err)
+	} else {
+		reservation.Zero()
+	}
+
+	replacement := &fixedProvisioningWalletSource{now: now, key: key}
+	if reservation, err := store.Reserve(replacement, provisioningWalletSourceDigest([]byte("replacement source")), now); err != nil {
+		t.Fatalf("replacement source reservation: %v", err)
+	} else {
+		reservation.Zero()
+	}
+	if replacement.sawReserved {
+		t.Fatal("replacement source inherited a reservation from the prior source")
+	}
+}
+
+func TestProvisioningWalletStateStoreMigratesUnboundStateConservatively(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "wallet-state.bin")
+	legacyKey := bytes.Repeat([]byte{0x72}, provisioningWalletSpentHintKeyBytes)
+	legacy := newProvisioningWalletState()
+	if err := legacy.Add(legacyKey, uint64(now.Add(time.Hour).Unix())); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := legacy.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroProxyBytes(encoded)
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := newProvisioningWalletStateStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceDigest := provisioningWalletSourceDigest([]byte("replacement source"))
+	source := &fixedProvisioningWalletSource{now: now, key: bytes.Repeat([]byte{0x73}, provisioningWalletSpentHintKeyBytes)}
+	if reservation, err := store.Reserve(source, sourceDigest, now); err != nil {
+		t.Fatal(err)
+	} else {
+		reservation.Zero()
+	}
+
+	state, err := readProvisioningWalletState(path, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.hasSourceDigest || state.sourceDigest != sourceDigest {
+		t.Fatal("legacy wallet state was not bound to its source after a successful reservation")
+	}
+	if !state.Contains(legacyKey) {
+		t.Fatal("legacy wallet state discarded a prior reservation during migration")
 	}
 }
 
@@ -204,6 +279,12 @@ type recordingProvisioningWalletSource struct {
 	sawPreviousReservation bool
 }
 
+type fixedProvisioningWalletSource struct {
+	now         time.Time
+	key         []byte
+	sawReserved bool
+}
+
 func FuzzParseProvisioningWalletState(f *testing.F) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	state := newProvisioningWalletState()
@@ -230,6 +311,18 @@ func (source *recordingProvisioningWalletSource) Reserve(alreadyReserved func([]
 	return client.NativeProvisioningReservation{
 		SpentHintKey:         key,
 		RelayBucketID:        bytes.Repeat([]byte{0x44}, 16),
+		AccessHintExpiryUnix: uint64(source.now.Add(time.Hour).Unix()),
+	}, nil
+}
+
+func (source *fixedProvisioningWalletSource) Reserve(alreadyReserved func([]byte) bool, _ time.Time) (client.NativeProvisioningReservation, error) {
+	if alreadyReserved != nil && alreadyReserved(source.key) {
+		source.sawReserved = true
+		return client.NativeProvisioningReservation{}, client.ErrNoUsableNativeProvisioning
+	}
+	return client.NativeProvisioningReservation{
+		SpentHintKey:         append([]byte(nil), source.key...),
+		RelayBucketID:        bytes.Repeat([]byte{0x45}, 16),
 		AccessHintExpiryUnix: uint64(source.now.Add(time.Hour).Unix()),
 	}, nil
 }

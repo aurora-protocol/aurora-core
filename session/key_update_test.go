@@ -323,7 +323,7 @@ func TestApplicationKeyUpdateBackpressureAndExhaustionDoNotMutate(t *testing.T) 
 		client, _ := newKeyUpdateApplicationPair(t)
 		defer client.Close()
 		for i := 0; i < client.limits.MaxQueuedPackets; i++ {
-			if err := client.queueBlock(context.Background(), paddingBlock(), true); err != nil {
+			if err := client.queueBlock(context.Background(), paddingBlock(), true, false); err != nil {
 				t.Fatalf("fill control queue %d: %v", i, err)
 			}
 		}
@@ -767,7 +767,7 @@ func TestApplicationKeyUpdateACKBackpressureLeavesReplayRetryable(t *testing.T) 
 	client, relay := newKeyUpdateApplicationPair(t)
 	defer client.Close()
 	for i := 0; i < relay.limits.MaxQueuedPackets; i++ {
-		if err := relay.queueBlock(context.Background(), paddingBlock(), true); err != nil {
+		if err := relay.queueBlock(context.Background(), paddingBlock(), true, false); err != nil {
 			t.Fatalf("fill relay queue %d: %v", i, err)
 		}
 	}

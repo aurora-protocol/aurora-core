@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"sync"
@@ -58,6 +59,26 @@ type Fixture struct {
 	replayCaches []*admission.FileReplayCache
 	connections  atomic.Int32
 	closeOnce    sync.Once
+}
+
+type firstHopFixtureResolver struct{}
+
+func (firstHopFixtureResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	if host == "dns.fixture.test" && network == "ip4" {
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	return net.DefaultResolver.LookupNetIP(ctx, network, host)
+}
+
+type firstHopFixtureDNSResolver struct{}
+
+func (firstHopFixtureDNSResolver) ExchangeDNS(_ context.Context, query []byte) ([]byte, error) {
+	if len(query) < 12 {
+		return nil, errors.New("fixture DNS query is invalid")
+	}
+	response := append([]byte(nil), query...)
+	response[2] |= 0x80
+	return response, nil
 }
 
 func newNativeSessionFixture(t testing.TB, now time.Time) *Fixture {
@@ -154,7 +175,7 @@ func newNativeSessionFixture(t testing.TB, now time.Time) *Fixture {
 		CarrierStatus:         http.StatusCreated,
 		CarrierHeader:         http.Header{"Content-Type": {"application/octet-stream"}, "X-Carrier-Mode": {"ordinary"}},
 		CoverOrigin:           coverOrigin,
-		ProxySession:          server.FirstHopProxySessionOptions{ExitPolicy: relay.ExitPolicy{AllowPrivate: true}, Dialer: &net.Dialer{}, Resolver: net.DefaultResolver, Limits: firstHopEgressLimits()},
+		ProxySession:          server.FirstHopProxySessionOptions{ExitPolicy: relay.ExitPolicy{AllowPrivate: true}, Dialer: &net.Dialer{}, Resolver: firstHopFixtureResolver{}, DNSResolver: firstHopFixtureDNSResolver{}, Limits: firstHopEgressLimits()},
 		MaxConcurrentSessions: 4,
 	})
 	if err != nil {

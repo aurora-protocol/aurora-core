@@ -47,6 +47,59 @@ func TestNativeSessionFFIExchangesTCPAndUDPThroughProductionFirstHop(t *testing.
 	}
 }
 
+func TestNativeSessionFFIExchangesDNSThroughProductionFirstHop(t *testing.T) {
+	caller := newNativeIntegrationCaller(t)
+	fixture := newNativeSessionFixture(t, time.Now())
+	defer fixture.Close(t)
+
+	work := nativeIntegrationBegin(t, caller, fixture.Provisioning(t))
+	defer nativeIntegrationClose(t, caller, work.handle)
+	if status, payload := nativeIntegrationCall(t, caller, opCompleteNativeSessionRaw, fixture.Issue(t, work.requestBody), work.handle); status != statusOK || len(payload) != 0 {
+		t.Fatalf("native completion = status %d payload %x", status, payload)
+	}
+
+	query := nativeDNSQuery("dns.fixture.test")
+	request := nativeUDPv4([4]byte{10, 0, 0, 2}, [4]byte{100, 64, 0, 1}, 53000, 53, query)
+	if packets := nativeIntegrationIngress(t, caller, work.handle, request); len(packets) != 0 {
+		t.Fatalf("DNS ingress returned %d local packets before relay resolution", len(packets))
+	}
+	response := nativeIntegrationNextLocalPacket(t, caller, work.handle)
+	if len(response) < 28 || binary.BigEndian.Uint16(response[20:22]) != 53 || binary.BigEndian.Uint16(response[22:24]) != 53000 {
+		t.Fatalf("native DNS response has invalid UDP tuple: %x", response)
+	}
+	dns := response[28:]
+	if len(dns) < len(query)+16 || !bytes.Equal(dns[:2], query[:2]) || dns[2]&0x80 == 0 || binary.BigEndian.Uint16(dns[6:8]) != 1 || !bytes.Equal(dns[len(dns)-4:], []byte{127, 0, 0, 1}) {
+		t.Fatalf("native DNS response = %x", dns)
+	}
+}
+
+func TestNativeSessionFFIExchangesSVCBDNSThroughProductionFirstHop(t *testing.T) {
+	caller := newNativeIntegrationCaller(t)
+	fixture := newNativeSessionFixture(t, time.Now())
+	defer fixture.Close(t)
+
+	work := nativeIntegrationBegin(t, caller, fixture.Provisioning(t))
+	defer nativeIntegrationClose(t, caller, work.handle)
+	if status, payload := nativeIntegrationCall(t, caller, opCompleteNativeSessionRaw, fixture.Issue(t, work.requestBody), work.handle); status != statusOK || len(payload) != 0 {
+		t.Fatalf("native completion = status %d payload %x", status, payload)
+	}
+
+	query := nativeDNSQuery("dns.fixture.test")
+	binary.BigEndian.PutUint16(query[len(query)-4:len(query)-2], 64)
+	request := nativeUDPv4([4]byte{10, 0, 0, 2}, [4]byte{100, 64, 0, 1}, 53000, 53, query)
+	if packets := nativeIntegrationIngress(t, caller, work.handle, request); len(packets) != 0 {
+		t.Fatalf("SVCB DNS ingress returned %d local packets before relay resolution", len(packets))
+	}
+	response := nativeIntegrationNextLocalPacket(t, caller, work.handle)
+	if len(response) < 28 || binary.BigEndian.Uint16(response[20:22]) != 53 || binary.BigEndian.Uint16(response[22:24]) != 53000 {
+		t.Fatalf("native SVCB DNS response has invalid UDP tuple: %x", response)
+	}
+	dns := response[28:]
+	if !bytes.Equal(dns, appendDNSResponseFlag(query)) {
+		t.Fatalf("native SVCB DNS response = %x", dns)
+	}
+}
+
 func TestNativeSessionFFIRejectsDuplicateCompletionAndClosesHandle(t *testing.T) {
 	caller := newNativeIntegrationCaller(t)
 	fixture := newNativeSessionFixture(t, time.Now())
@@ -272,4 +325,26 @@ func nativeUDPv4(source, target [4]byte, sourcePort, targetPort uint16, payload 
 	}
 	binary.BigEndian.PutUint16(packet[26:28], checksum)
 	return packet
+}
+
+func nativeDNSQuery(domain string) []byte {
+	query := []byte{0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	for start := 0; start < len(domain); {
+		end := start
+		for end < len(domain) && domain[end] != '.' {
+			end++
+		}
+		query = append(query, byte(end-start))
+		query = append(query, domain[start:end]...)
+		start = end + 1
+	}
+	return append(query, 0, 0, 1, 0, 1)
+}
+
+func appendDNSResponseFlag(query []byte) []byte {
+	response := append([]byte(nil), query...)
+	if len(response) >= 3 {
+		response[2] |= 0x80
+	}
+	return response
 }

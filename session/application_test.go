@@ -164,6 +164,51 @@ func TestApplicationTryNextPacketDoesNotBlock(t *testing.T) {
 	}
 }
 
+func TestApplicationPrioritizesDNSFramesWithBoundedBurst(t *testing.T) {
+	client, relay := newApplicationPair(t)
+	defer client.Close()
+	defer relay.Close()
+	normal := testFrameBlock(t, 1, []byte("queued data"))
+	if err := client.QueueFrames(context.Background(), normal); err != nil {
+		t.Fatal(err)
+	}
+	for flowID := uint64(2); flowID <= maximumHighPriorityBurst+2; flowID++ {
+		dns, err := protocol.NewDNSMessageFrame(flowID, []byte{0x12, 0x34, 0x01, 0x00})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := client.QueueFrames(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{dns}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := uint64(0); index <= maximumHighPriorityBurst; index++ {
+		encoded, err := client.NextPacket(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantNumber := index + 1
+		if index == maximumHighPriorityBurst {
+			wantNumber = 0
+		}
+		if number := packetNumberForTest(t, encoded); number != wantNumber {
+			t.Fatalf("packet %d number = %d, want %d", index, number, wantNumber)
+		}
+		blocks, err := relay.HandlePacket(context.Background(), time.Now(), encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index < maximumHighPriorityBurst {
+			if len(blocks) != 1 || len(blocks[0].Frames) != 1 || blocks[0].Frames[0].FrameType != registry.FrameDNSMessage {
+				t.Fatalf("prioritized packet blocks = %#v", blocks)
+			}
+			continue
+		}
+		if !reflect.DeepEqual(blocks, []protocol.FrameBlock{normal}) {
+			t.Fatalf("fairly scheduled packet blocks = %#v, want %#v", blocks, []protocol.FrameBlock{normal})
+		}
+	}
+}
+
 func TestApplicationRoundTripOwnsFrameInput(t *testing.T) {
 	client, relay := newApplicationPair(t)
 	defer client.Close()

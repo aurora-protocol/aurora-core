@@ -15,8 +15,10 @@ import (
 const keyUpdateNonceBytes = 16
 
 type queuedPacket struct {
-	encoded []byte
-	update  *queuedWriteUpdate
+	encoded      []byte
+	update       *queuedWriteUpdate
+	control      bool
+	highPriority bool
 }
 
 func (p *queuedPacket) Destroy() {
@@ -159,6 +161,7 @@ func (a *Application) enqueueWriteUpdateLocked(encoded *[]byte, prepared *packet
 	a.queue = append(a.queue, queuedPacket{
 		encoded: *encoded,
 		update:  update,
+		control: true,
 	})
 	a.queuedBytes += len(*encoded)
 	*encoded = nil

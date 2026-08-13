@@ -450,6 +450,7 @@ func newProductionCommandFixture(t *testing.T) productionConfig {
 		egressMaxFlowOpens:    8,
 		exitRateLimit:         relay.ExitRateLimit{WindowSeconds: 60, MaxBytes: 1 << 20},
 		udpConfirmTTL:         60,
+		dnsUpstream:           "127.0.0.1:53",
 		maxTemplateFutureSkew: 120,
 	}
 }
@@ -494,6 +495,7 @@ func productionCommandArguments(config productionConfig) []string {
 		"--egress-max-flow-opens", strconv.FormatUint(uint64(config.egressMaxFlowOpens), 10),
 		"--egress-max-bytes", strconv.FormatUint(config.exitRateLimit.MaxBytes, 10),
 		"--udp-confirm-ttl", strconv.FormatUint(uint64(config.udpConfirmTTL), 10),
+		"--dns-upstream", config.dnsUpstream,
 		"--max-template-future-skew", strconv.FormatUint(config.maxTemplateFutureSkew, 10),
 	}
 }

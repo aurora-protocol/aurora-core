@@ -3,6 +3,7 @@ package relay
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -68,6 +69,17 @@ type recordingIPResolver struct {
 	answers []netip.Addr
 	calls   []socketResolveCall
 	err     error
+}
+
+type recordingDNSMessageResolver struct {
+	response []byte
+	calls    [][]byte
+	err      error
+}
+
+func (r *recordingDNSMessageResolver) ExchangeDNS(_ context.Context, query []byte) ([]byte, error) {
+	r.calls = append(r.calls, append([]byte(nil), query...))
+	return append([]byte(nil), r.response...), r.err
 }
 
 func (r *recordingIPResolver) LookupNetIP(_ context.Context, network, host string) ([]netip.Addr, error) {
@@ -193,6 +205,227 @@ func TestSocketEgressUsesAuthoritativeIPWithoutResolution(t *testing.T) {
 	}
 	if len(dialer.calls) != 1 || dialer.calls[0] != (socketDialCall{network: "udp4", address: "93.184.216.34:443"}) {
 		t.Fatalf("dial calls = %#v", dialer.calls)
+	}
+}
+
+func TestSocketEgressResolvesDNSMessageWithoutOpeningSocket(t *testing.T) {
+	dialer := &recordingContextDialer{}
+	resolver := &recordingIPResolver{answers: []netip.Addr{netip.MustParseAddr("93.184.216.34")}}
+	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink:     &recordingFrameSink{},
+		Dialer:   dialer,
+		Resolver: resolver,
+	})
+	if err != nil {
+		t.Fatalf("NewSocketEgress failed: %v", err)
+	}
+	t.Cleanup(func() { _ = egress.Close() })
+	query := socketEgressDNSQuery(t, "example.com", 1)
+	frames, err := egress.HandleEvent(context.Background(), ExitFrameEvent{
+		Kind:   ExitEventDNSMessage,
+		FlowID: 81,
+		Data:   query,
+	})
+	if err != nil {
+		t.Fatalf("HandleEvent failed: %v", err)
+	}
+	if len(frames) != 1 || frames[0].FrameType != registry.FrameDNSMessage || frames[0].FlowID != 81 {
+		t.Fatalf("DNS response frames = %#v", frames)
+	}
+	response := frames[0].Payload
+	if len(response) < len(query)+16 || !bytes.Equal(response[:2], query[:2]) || response[2]&0x80 == 0 || binary.BigEndian.Uint16(response[6:8]) != 1 {
+		t.Fatalf("unexpected DNS response: %x", response)
+	}
+	if len(resolver.calls) != 1 || resolver.calls[0] != (socketResolveCall{network: "ip4", host: "example.com"}) {
+		t.Fatalf("resolver calls = %#v", resolver.calls)
+	}
+	if len(dialer.calls) != 0 {
+		t.Fatalf("DNS resolution opened sockets: %#v", dialer.calls)
+	}
+}
+
+func TestSocketEgressResolvesIPv6EDNSDNSMessageWithoutOpeningSocket(t *testing.T) {
+	dialer := &recordingContextDialer{}
+	resolver := &recordingIPResolver{answers: []netip.Addr{netip.MustParseAddr("2606:4700:4700::1111")}}
+	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink:     &recordingFrameSink{},
+		Dialer:   dialer,
+		Resolver: resolver,
+	})
+	if err != nil {
+		t.Fatalf("NewSocketEgress failed: %v", err)
+	}
+	t.Cleanup(func() { _ = egress.Close() })
+	query := socketEgressDNSQuery(t, "example.com", socketDNSTypeAAAA)
+	binary.BigEndian.PutUint16(query[10:12], 1)
+	query = append(query, 0, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 0)
+	frames, err := egress.HandleEvent(context.Background(), ExitFrameEvent{
+		Kind:   ExitEventDNSMessage,
+		FlowID: 82,
+		Data:   query,
+	})
+	if err != nil {
+		t.Fatalf("HandleEvent failed: %v", err)
+	}
+	if len(frames) != 1 || frames[0].FrameType != registry.FrameDNSMessage || frames[0].FlowID != 82 {
+		t.Fatalf("DNS response frames = %#v", frames)
+	}
+	response := frames[0].Payload
+	if len(response) < 28 || binary.BigEndian.Uint16(response[6:8]) != 1 || binary.BigEndian.Uint16(response[10:12]) != 0 || !bytes.Equal(response[len(response)-16:], netip.MustParseAddr("2606:4700:4700::1111").AsSlice()) {
+		t.Fatalf("unexpected IPv6 DNS response: %x", response)
+	}
+	if len(resolver.calls) != 1 || resolver.calls[0] != (socketResolveCall{network: "ip6", host: "example.com"}) {
+		t.Fatalf("resolver calls = %#v", resolver.calls)
+	}
+	if len(dialer.calls) != 0 {
+		t.Fatalf("DNS resolution opened sockets: %#v", dialer.calls)
+	}
+}
+
+func TestSocketEgressDNSMessageDoesNotReturnPolicyDeniedAddress(t *testing.T) {
+	dialer := &recordingContextDialer{}
+	resolver := &recordingIPResolver{answers: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}
+	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink:     &recordingFrameSink{},
+		Dialer:   dialer,
+		Resolver: resolver,
+	})
+	if err != nil {
+		t.Fatalf("NewSocketEgress failed: %v", err)
+	}
+	t.Cleanup(func() { _ = egress.Close() })
+	frames, err := egress.HandleEvent(context.Background(), ExitFrameEvent{
+		Kind:   ExitEventDNSMessage,
+		FlowID: 83,
+		Data:   socketEgressDNSQuery(t, "example.com", socketDNSTypeA),
+	})
+	if err != nil {
+		t.Fatalf("HandleEvent failed: %v", err)
+	}
+	if len(frames) != 1 || len(frames[0].Payload) < 12 || frames[0].Payload[3]&0x0f != socketDNSRCodeFail || binary.BigEndian.Uint16(frames[0].Payload[6:8]) != 0 {
+		t.Fatalf("policy denied DNS response = %#v", frames)
+	}
+	if len(dialer.calls) != 0 {
+		t.Fatalf("DNS policy denial opened sockets: %#v", dialer.calls)
+	}
+}
+
+func TestSocketEgressDNSMessageRejectsOversizedResolverAnswerSet(t *testing.T) {
+	answers := make([]netip.Addr, 0, 33)
+	for octet := byte(1); octet <= 33; octet++ {
+		answers = append(answers, netip.AddrFrom4([4]byte{8, 8, 8, octet}))
+	}
+	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink:     &recordingFrameSink{},
+		Dialer:   &recordingContextDialer{},
+		Resolver: &recordingIPResolver{answers: answers},
+	})
+	if err != nil {
+		t.Fatalf("NewSocketEgress failed: %v", err)
+	}
+	t.Cleanup(func() { _ = egress.Close() })
+	frames, err := egress.HandleEvent(context.Background(), ExitFrameEvent{
+		Kind:   ExitEventDNSMessage,
+		FlowID: 84,
+		Data:   socketEgressDNSQuery(t, "example.com", socketDNSTypeA),
+	})
+	if err != nil {
+		t.Fatalf("HandleEvent failed: %v", err)
+	}
+	if len(frames) != 1 || len(frames[0].Payload) < 12 || frames[0].Payload[3]&0x0f != socketDNSRCodeFail || binary.BigEndian.Uint16(frames[0].Payload[6:8]) != 0 {
+		t.Fatalf("oversized DNS answer set response = %#v", frames)
+	}
+}
+
+func TestSocketEgressForwardsSVCBDNSMessageThroughConfiguredResolver(t *testing.T) {
+	query := socketEgressDNSQuery(t, "example.com", 64)
+	response := append([]byte(nil), query...)
+	response[2] |= socketDNSFlagResponse >> 8
+	binary.BigEndian.PutUint16(response[6:8], 1)
+	response = append(response,
+		0xc0, 0x0c,
+		0x00, 0x40,
+		0x00, 0x01,
+		0x00, 0x00, 0x00, 0x3c,
+		0x00, 0x03,
+		0x00, 0x01, 0x00,
+	)
+	dnsResolver := &recordingDNSMessageResolver{response: response}
+	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink:        &recordingFrameSink{},
+		Dialer:      &recordingContextDialer{},
+		Resolver:    &recordingIPResolver{},
+		DNSResolver: dnsResolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = egress.Close() })
+	frames, err := egress.HandleEvent(context.Background(), ExitFrameEvent{Kind: ExitEventDNSMessage, FlowID: 85, Data: query})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 1 || !bytes.Equal(frames[0].Payload, response) {
+		t.Fatalf("forwarded DNS response = %#v, want %x", frames, response)
+	}
+	if len(dnsResolver.calls) != 1 || !bytes.Equal(dnsResolver.calls[0], query) {
+		t.Fatalf("DNS resolver calls = %#v", dnsResolver.calls)
+	}
+}
+
+func TestSocketEgressRejectsPolicyDeniedSVCBAddressHints(t *testing.T) {
+	query := socketEgressDNSQuery(t, "example.com", socketDNSTypeHTTPS)
+	response := append([]byte(nil), query...)
+	response[2] |= socketDNSFlagResponse >> 8
+	binary.BigEndian.PutUint16(response[6:8], 1)
+	response = append(response,
+		0xc0, 0x0c,
+		0x00, socketDNSTypeHTTPS,
+		0x00, socketDNSClassIN,
+		0x00, 0x00, 0x00, 0x3c,
+		0x00, 0x0b,
+		0x00, 0x01, 0x00,
+		0x00, socketDNSSvcIPv4, 0x00, 0x04,
+		127, 0, 0, 1,
+	)
+	dnsResolver := &recordingDNSMessageResolver{response: response}
+	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink:        &recordingFrameSink{},
+		Dialer:      &recordingContextDialer{},
+		Resolver:    &recordingIPResolver{},
+		DNSResolver: dnsResolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = egress.Close() })
+	frames, err := egress.HandleEvent(context.Background(), ExitFrameEvent{Kind: ExitEventDNSMessage, FlowID: 86, Data: query})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 1 || len(frames[0].Payload) < socketDNSHeaderBytes || frames[0].Payload[3]&0x0f != socketDNSRCodeFail || binary.BigEndian.Uint16(frames[0].Payload[6:8]) != 0 {
+		t.Fatalf("policy denied SVCB response = %#v", frames)
+	}
+}
+
+func TestSocketEgressDNSMessageRejectsMalformedQuestionSections(t *testing.T) {
+	resolver := &recordingIPResolver{answers: []netip.Addr{netip.MustParseAddr("93.184.216.34")}}
+	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink:     &recordingFrameSink{},
+		Dialer:   &recordingContextDialer{},
+		Resolver: resolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = egress.Close() })
+	query := socketEgressDNSQuery(t, "example.com", socketDNSTypeA)
+	binary.BigEndian.PutUint16(query[6:8], 1)
+	if _, err := egress.HandleEvent(context.Background(), ExitFrameEvent{Kind: ExitEventDNSMessage, FlowID: 85, Data: query}); !errors.Is(err, ErrExitEventInvalid) {
+		t.Fatalf("answer-bearing DNS query error = %v, want ErrExitEventInvalid", err)
+	}
+	if len(resolver.calls) != 0 {
+		t.Fatalf("resolver calls = %#v, want none", resolver.calls)
 	}
 }
 
@@ -454,6 +687,17 @@ func tcpIPOpenEvent(flowID uint64, addr [4]byte) ExitFrameEvent {
 			TargetPort: 443,
 		},
 	}
+}
+
+func socketEgressDNSQuery(t testing.TB, domain string, queryType uint16) []byte {
+	t.Helper()
+	query := []byte{0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	for _, label := range strings.Split(domain, ".") {
+		query = append(query, byte(len(label)))
+		query = append(query, label...)
+	}
+	query = append(query, 0, byte(queryType>>8), byte(queryType), 0, 1)
+	return query
 }
 
 func TestSocketEgressTCPRoundTripAndEOF(t *testing.T) {

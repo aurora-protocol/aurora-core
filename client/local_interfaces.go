@@ -16,20 +16,27 @@ import (
 )
 
 const (
-	socksVersion5       = 0x05
-	socksNoAuth         = 0x00
-	socksNoAcceptable   = 0xff
-	socksCommandConnect = 0x01
-	socksCommandUDP     = 0x03
-	socksATYPIPv4       = 0x01
-	socksATYPDomain     = 0x03
-	socksATYPIPv6       = 0x04
+	socksVersion5                = 0x05
+	socksNoAuth                  = 0x00
+	socksNoAcceptable            = 0xff
+	socksCommandConnect          = 0x01
+	socksCommandUDP              = 0x03
+	socksReplyGeneralFailure     = 0x01
+	socksReplyCommandUnsupported = 0x07
+	socksReplyAddressUnsupported = 0x08
+	socksATYPIPv4                = 0x01
+	socksATYPDomain              = 0x03
+	socksATYPIPv6                = 0x04
 )
 
 var (
 	httpConnectEstablished = []byte("HTTP/1.1 200 Connection Established\r\n\r\n")
 	socksSuccessResponse   = []byte{socksVersion5, 0x00, 0x00, socksATYPIPv4, 0, 0, 0, 0, 0, 0}
 )
+
+func socks5FailureResponse(reply byte) []byte {
+	return []byte{socksVersion5, reply, 0x00, socksATYPIPv4, 0, 0, 0, 0, 0, 0}
+}
 
 func (p *LocalProxy) OpenHTTPConnectRequest(flowID uint64, raw []byte) ([]byte, error) {
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(raw)))

@@ -13,7 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-protocol/aurora-core/handshake"
+	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/relay"
+	"github.com/aurora-protocol/aurora-core/transport"
 	"github.com/aurora-protocol/aurora-core/trust"
 )
 
@@ -147,6 +150,76 @@ func TestProductionFirstHopServerServesTLSAndShutsDown(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("production server did not stop")
+	}
+}
+
+func TestProductionFirstHopShutdownWaitsForActiveCarrier(t *testing.T) {
+	listener, err := net.Listen("tcp4", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := newProductionFirstHopTestOptions(t)
+	options.ListenAddress = listener.Addr().String()
+	options.Authority = listener.Addr().String()
+	server, err := NewProductionFirstHopServer(options)
+	if err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+	server.handler.begin = func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
+		return &handshake.RelayHandshake{}, firstHopTestPrelude1(), nil
+	}
+	server.handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
+		return nil, nil, protocol.PolicyAccept{}, errors.New("Finish must not run")
+	}
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- server.Serve(listener) }()
+	serveResultConsumed := false
+	t.Cleanup(func() {
+		_ = server.server.Close()
+		if serveResultConsumed {
+			return
+		}
+		select {
+		case <-serveResult:
+			serveResultConsumed = true
+		case <-time.After(time.Second):
+			t.Error("production first-hop server did not stop during cleanup")
+		}
+	})
+
+	clientTLS := &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13, NextProtos: []string{"h2"}} //nolint:gosec // The test uses a local self-signed identity.
+	protocols := new(http.Protocols)
+	protocols.SetHTTP2(true)
+	clientTransport := &http.Transport{TLSClientConfig: clientTLS, Protocols: protocols, ForceAttemptHTTP2: true, MaxConnsPerHost: 1}
+	t.Cleanup(clientTransport.CloseIdleConnections)
+	client := &http.Client{Transport: clientTransport, Timeout: 2 * time.Second}
+	response, writer := openFirstHopStreamingRequest(t, client, "https://"+listener.Addr().String()+server.handler.path)
+	defer response.Body.Close()
+	defer writer.Close()
+	reader, err := transport.NewRecordReader(response.Body, 8192)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Read(); err != nil {
+		t.Fatalf("read Prelude1: %v", err)
+	}
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelShutdown()
+	if err := server.Shutdown(shutdownContext); err != nil {
+		t.Fatalf("production first-hop shutdown: %v", err)
+	}
+	if _, err := reader.Read(); err == nil {
+		t.Fatal("active production carrier remained readable after shutdown")
+	}
+	select {
+	case serveErr := <-serveResult:
+		serveResultConsumed = true
+		if serveErr != nil {
+			t.Fatalf("production Serve: %v", serveErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("production server did not stop after carrier shutdown")
 	}
 }
 

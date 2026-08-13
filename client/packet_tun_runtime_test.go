@@ -119,6 +119,51 @@ func TestPacketTUNRuntimeCloseUnblocksRead(t *testing.T) {
 	}
 }
 
+func TestPacketTUNRuntimeCloseUnblocksWrite(t *testing.T) {
+	runtime, clientApplication, relayApplication, device := packetTUNRuntimeFixture(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	device.writeStarted = make(chan struct{}, 1)
+	device.allowWrite = make(chan struct{})
+
+	result := make(chan error, 1)
+	go func() {
+		result <- runtime.Serve(context.Background())
+	}()
+	device.Inject(packetAdapterTCPv4(t, [4]byte{10, 77, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, 100, 0, tcpFlagSYN, nil))
+	select {
+	case <-device.writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("packet TUN runtime did not begin a device write")
+	}
+
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- runtime.Close()
+	}()
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatalf("close packet TUN runtime: %v", err)
+		}
+	case <-time.After(time.Second):
+		close(device.allowWrite)
+		<-closeResult
+		t.Fatal("packet TUN runtime close did not unblock a device write")
+	}
+	if !device.Closed() {
+		t.Fatal("packet device remained open while a device write was blocked")
+	}
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("packet TUN runtime stopped without a terminal device error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("packet TUN runtime did not stop after closing a blocked device write")
+	}
+}
+
 func TestPacketTUNRuntimeRejectsInvalidConfiguration(t *testing.T) {
 	application, relayApplication := packetAdapterApplications(t)
 	defer application.Close()
@@ -204,11 +249,13 @@ func nextPacketTUNRuntime(t *testing.T, application *session.Application) []byte
 }
 
 type packetTUNRuntimeDevice struct {
-	reads       chan []byte
-	writes      chan []byte
-	closed      chan struct{}
-	closeOnce   sync.Once
-	shortWrites bool
+	reads        chan []byte
+	writes       chan []byte
+	closed       chan struct{}
+	closeOnce    sync.Once
+	shortWrites  bool
+	writeStarted chan struct{}
+	allowWrite   chan struct{}
 }
 
 func newPacketTUNRuntimeDevice() *packetTUNRuntimeDevice {
@@ -243,6 +290,18 @@ func (d *packetTUNRuntimeDevice) Write(packet []byte) (int, error) {
 			return 0, nil
 		}
 		return len(copied) - 1, nil
+	}
+	if d.writeStarted != nil {
+		select {
+		case d.writeStarted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-d.allowWrite:
+			return len(copied), nil
+		case <-d.closed:
+			return 0, io.ErrClosedPipe
+		}
 	}
 	select {
 	case d.writes <- copied:

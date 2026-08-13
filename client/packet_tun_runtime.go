@@ -180,10 +180,8 @@ func (r *PacketTUNRuntime) Close() error {
 		return nil
 	}
 	r.closeOnce.Do(func() {
-		r.writeMu.Lock()
 		close(r.done)
 		r.closeErr = r.device.Close()
-		r.writeMu.Unlock()
 	})
 	return r.closeErr
 }

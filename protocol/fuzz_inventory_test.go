@@ -7,6 +7,7 @@ func TestDecodeFuzzTargetsCoverProtocolStructs(t *testing.T) {
 		"PublicKeyRecord",
 		"AuthorityKeyRecord",
 		"ObjectSignature",
+		"SignedSeedRecord",
 		"TokenVerificationKeyRecord",
 		"SignatureEntry",
 		"DirectoryConsensus",

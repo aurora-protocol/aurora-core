@@ -24,6 +24,7 @@ type DevicePacketExchanger struct {
 	readDone chan struct{}
 
 	closeOnce sync.Once
+	closeErr  error
 	writeMu   sync.Mutex
 }
 
@@ -93,14 +94,11 @@ func (e *DevicePacketExchanger) Close() error {
 	if e == nil {
 		return nil
 	}
-	var err error
 	e.closeOnce.Do(func() {
 		close(e.done)
-		e.writeMu.Lock()
-		defer e.writeMu.Unlock()
-		err = e.device.Close()
+		e.closeErr = e.device.Close()
 	})
-	return err
+	return e.closeErr
 }
 
 func (e *DevicePacketExchanger) readDevice() {

@@ -71,12 +71,13 @@ func transactProvisioningWalletState(store *provisioningWalletStateStore, now ti
 	return nil
 }
 
-func (store *provisioningWalletStateStore) Reserve(wallet provisioningWalletSource, now time.Time) (client.NativeProvisioningReservation, error) {
+func (store *provisioningWalletStateStore) Reserve(wallet provisioningWalletSource, sourceDigest [provisioningWalletSourceDigestBytes]byte, now time.Time) (client.NativeProvisioningReservation, error) {
 	if wallet == nil {
 		return client.NativeProvisioningReservation{}, client.ErrNoUsableNativeProvisioning
 	}
 	var reservation client.NativeProvisioningReservation
 	err := store.Transact(now, func(state *provisioningWalletState) error {
+		state.bindSourceDigest(sourceDigest)
 		var err error
 		reservation, err = wallet.Reserve(state.Contains, now)
 		if err != nil {

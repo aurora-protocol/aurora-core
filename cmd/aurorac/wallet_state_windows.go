@@ -19,6 +19,6 @@ func transactProvisioningWalletState(*provisioningWalletStateStore, time.Time, f
 	return fmt.Errorf("client: persistent wallet state is unavailable on this platform")
 }
 
-func (*provisioningWalletStateStore) Reserve(provisioningWalletSource, time.Time) (client.NativeProvisioningReservation, error) {
+func (*provisioningWalletStateStore) Reserve(provisioningWalletSource, [provisioningWalletSourceDigestBytes]byte, time.Time) (client.NativeProvisioningReservation, error) {
 	return client.NativeProvisioningReservation{}, fmt.Errorf("client: persistent wallet state is unavailable on this platform")
 }

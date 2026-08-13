@@ -202,6 +202,87 @@ func TestProductionFirstHopOptionsExcludeHarnessSurfaces(t *testing.T) {
 	}
 }
 
+func TestProductionReverseProxyCoverOriginUsesBoundedDirectTransport(t *testing.T) {
+	origin, err := NewProductionReverseProxyCoverOrigin(mustParseURL(t, "https://cover.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	production, ok := origin.(productionCoverOrigin)
+	if !ok {
+		t.Fatalf("production cover origin type = %T", origin)
+	}
+	proxy, ok := production.CoverOrigin.(reverseProxyCoverOrigin)
+	if !ok || proxy.proxy == nil {
+		t.Fatalf("production proxy = %#v", production.CoverOrigin)
+	}
+	transport, ok := proxy.proxy.Transport.(*http.Transport)
+	if !ok || transport == nil {
+		t.Fatalf("production proxy transport = %T, want bounded *http.Transport", proxy.proxy.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("production cover transport honors ambient proxy configuration")
+	}
+	if transport.ResponseHeaderTimeout != 4*time.Second || transport.TLSHandshakeTimeout != 5*time.Second {
+		t.Fatalf("production cover transport timeouts = response headers %s, TLS handshake %s", transport.ResponseHeaderTimeout, transport.TLSHandshakeTimeout)
+	}
+	if transport.MaxConnsPerHost != 256 || transport.MaxIdleConns != 256 || transport.MaxIdleConnsPerHost != 64 || transport.MaxResponseHeaderBytes != 64<<10 {
+		t.Fatalf("production cover transport bounds = connections %d, idle %d/%d, response headers %d", transport.MaxConnsPerHost, transport.MaxIdleConns, transport.MaxIdleConnsPerHost, transport.MaxResponseHeaderBytes)
+	}
+}
+
+func TestProductionReverseProxyCoverOriginKeepsInjectedTransport(t *testing.T) {
+	transport := &http.Transport{}
+	origin, err := NewProductionReverseProxyCoverOriginWithTransport(mustParseURL(t, "https://cover.example"), transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := origin.(productionCoverOrigin)
+	proxy := production.CoverOrigin.(reverseProxyCoverOrigin)
+	if proxy.proxy.Transport != transport {
+		t.Fatalf("injected production transport = %T, want %T", proxy.proxy.Transport, transport)
+	}
+}
+
+func TestProductionReverseProxyCoverOriginBoundsUpstreamRequestLifetime(t *testing.T) {
+	var deadlines []time.Time
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		deadline, ok := request.Context().Deadline()
+		if !ok {
+			return nil, errors.New("upstream request has no deadline")
+		}
+		deadlines = append(deadlines, deadline)
+		return &http.Response{
+			StatusCode: http.StatusNoContent,
+			Body:       http.NoBody,
+			Request:    request,
+		}, nil
+	})
+	origin, err := NewProductionReverseProxyCoverOriginWithTransport(mustParseURL(t, "https://cover.example"), transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, serve := range []struct {
+		name string
+		call func(http.ResponseWriter, *http.Request)
+	}{
+		{name: "ordinary", call: origin.ServeHTTP},
+		{name: "sanitized failure", call: origin.ServeFailureHTTP},
+	} {
+		t.Run(serve.name, func(t *testing.T) {
+			started := time.Now()
+			response := httptest.NewRecorder()
+			serve.call(response, httptest.NewRequest(http.MethodGet, "https://gateway.example/assets/app.js", nil))
+			if response.Code != http.StatusNoContent {
+				t.Fatalf("production cover response = %d", response.Code)
+			}
+			deadline := deadlines[len(deadlines)-1]
+			if deadline.IsZero() || deadline.After(started.Add(4*time.Second+100*time.Millisecond)) {
+				t.Fatalf("upstream request deadline = %s, want a four-second production bound", deadline)
+			}
+		})
+	}
+}
+
 func newProductionFirstHopTestOptions(t testing.TB) ProductionFirstHopOptions {
 	t.Helper()
 	fixture := newLiveFirstHopFixture(t, time.Now())

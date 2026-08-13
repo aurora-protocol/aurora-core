@@ -183,6 +183,69 @@ func TestHarnessHandlerExchangesPacketBatchesThroughPrivateCarrierSlot(t *testin
 	}
 }
 
+func TestHarnessHandlerExchangesMaximumPacketBatchThroughCarrier(t *testing.T) {
+	handler, err := NewHarnessHandler(HarnessOptions{NowUnix: 200})
+	if err != nil {
+		t.Fatalf("NewHarnessHandler failed: %v", err)
+	}
+	packet := make([]byte, maxPacketBytes)
+	packet[0] = 0x45
+	batch := PacketBatch{
+		Packets:         make([][]byte, maxPacketBatchPackets),
+		ProtocolNumbers: make([]uint16, maxPacketBatchPackets),
+	}
+	for index := range batch.Packets {
+		batch.Packets[index] = packet
+		batch.ProtocolNumbers[index] = 2
+	}
+	payload, err := EncodePacketBatch(batch)
+	if err != nil {
+		t.Fatalf("EncodePacketBatch failed: %v", err)
+	}
+	requestBody := EncodeCarrier(CarrierPacketBatch, payload)
+	if len(requestBody) != maxCarrierBodyBytes {
+		t.Fatalf("maximum carrier body length = %d, want %d", len(requestBody), maxCarrierBodyBytes)
+	}
+
+	exchanged := serveRequestWithContentType(handler, http.MethodPost, DefaultPacketExchangePath, requestBody, "application/octet-stream")
+	if exchanged.status != http.StatusOK {
+		t.Fatalf("maximum packet exchange status = %d", exchanged.status)
+	}
+	responseType, responsePayload, err := DecodeCarrier(exchanged.body)
+	if err != nil || responseType != CarrierPacketBatch {
+		t.Fatalf("maximum packet exchange carrier response type=%d err=%v", responseType, err)
+	}
+	outbound, err := DecodePacketBatch(responsePayload)
+	if err != nil {
+		t.Fatalf("DecodePacketBatch response failed: %v", err)
+	}
+	if len(outbound.Packets) != maxPacketBatchPackets || len(outbound.ProtocolNumbers) != maxPacketBatchPackets {
+		t.Fatalf("maximum packet exchange response counts = packets %d protocols %d", len(outbound.Packets), len(outbound.ProtocolNumbers))
+	}
+	for index, returned := range outbound.Packets {
+		if len(returned) != maxPacketBytes || returned[0] != 0x45 || outbound.ProtocolNumbers[index] != 2 {
+			t.Fatalf("maximum packet exchange response entry %d is invalid", index)
+		}
+	}
+}
+
+func TestCarrierControlPayloadOverLimitFallsBackToCover(t *testing.T) {
+	const coverBody = "<html>cover</html>"
+	handler, err := NewHarnessHandler(HarnessOptions{
+		NowUnix:   200,
+		CoverBody: []byte(coverBody),
+	})
+	if err != nil {
+		t.Fatalf("NewHarnessHandler failed: %v", err)
+	}
+	requestBody := append([]byte{byte(CarrierIssuerMetadataReq)}, bytes.Repeat([]byte{0x41}, maxCarrierControlPayloadBytes+1)...)
+
+	response := serveRequestWithContentType(handler, http.MethodPost, DefaultPacketExchangePath, requestBody, "application/octet-stream")
+	if response.status != http.StatusOK || string(response.body) != coverBody {
+		t.Fatalf("oversized control payload response = %d %q", response.status, response.body)
+	}
+}
+
 func TestPacketExchangeInvalidProbeFallsBackToCover(t *testing.T) {
 	handler, err := NewHarnessHandler(HarnessOptions{
 		NowUnix:   200,

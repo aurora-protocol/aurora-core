@@ -268,7 +268,7 @@ git commit -m "feat: add Linux tunnel client command"
   local TCP SYN, the paired relay application receives a TUN-bound `FLOW_OPEN`,
   and a relay stream frame becomes a local IP packet through the runtime.
 
-- [ ] **Step 1: Write the failing strict integration test**
+- [x] **Step 1: Write the failing strict integration test**
 
 ```go
 func TestLiveFirstHopPacketTUNRuntimeInterop(t *testing.T) {
@@ -282,14 +282,14 @@ func TestLiveFirstHopPacketTUNRuntimeInterop(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it and verify it fails until the composition is connected**
+- [x] **Step 2: Run it and verify it fails until the composition is connected**
 
 Run: `GOCACHE=/private/tmp/aurora-gocache go test ./server -run TestLiveFirstHopPacketTUNRuntimeInterop -count=1`
 
 Expected: initial failure until the test uses the strict carrier fixture and
 the TUN runtime endpoint.
 
-- [ ] **Step 3: Add integration wiring and run production verification**
+- [x] **Step 3: Add integration wiring and run production verification**
 
 Keep the fixture loopback-only, retain no provisioned bytes after use, and use
 the existing strict relay framing rather than mocked protocol messages.
@@ -306,7 +306,7 @@ Run: `GOCACHE=/private/tmp/aurora-gocache GOOS=darwin GOARCH=arm64 go build ./cm
 
 Expected: all commands pass.
 
-- [ ] **Step 4: Commit verification artifacts**
+- [x] **Step 4: Commit verification artifacts**
 
 ```sh
 git add server/first_hop_integration_test.go docs/superpowers/plans/2026-08-13-linux-tun-client.md

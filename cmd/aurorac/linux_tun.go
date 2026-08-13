@@ -79,6 +79,13 @@ type linuxRouteJSON struct {
 	Metric      int    `json:"metric"`
 }
 
+type linuxRuleJSON struct {
+	Priority int    `json:"priority"`
+	From     string `json:"from"`
+	To       string `json:"to"`
+	Table    string `json:"table"`
+}
+
 func parseTUNConfig(arguments []string, stderr io.Writer) (tunConfig, error) {
 	defaults := platform.DefaultLinuxTUNConfig()
 	config := tunConfig{issuerTimeout: defaultIssuerRequestTimeout}
@@ -173,8 +180,13 @@ func validateLinuxTUNNetworkConfig(config linuxTUNNetworkConfig) error {
 }
 
 func validLinuxInterfaceName(name string) bool {
-	if name == "" || strings.TrimSpace(name) != name || len(name) >= 16 || strings.ContainsAny(name, "/%\x00") {
+	if name == "" || len(name) >= 16 {
 		return false
+	}
+	for _, value := range name {
+		if (value < 'a' || value > 'z') && (value < 'A' || value > 'Z') && (value < '0' || value > '9') && value != '-' && value != '_' && value != '.' {
+			return false
+		}
 	}
 	return true
 }
@@ -295,6 +307,12 @@ func (m *linuxTUNNetworkManager) Configure(ctx context.Context, routes []linuxHo
 	if err := m.validateHostRoutes(routes); err != nil {
 		return nil, err
 	}
+	if err := m.validateMainRoutingPolicy(ctx, "-4"); err != nil {
+		return nil, err
+	}
+	if err := m.validateMainRoutingPolicy(ctx, "-6"); err != nil {
+		return nil, err
+	}
 	ipv4Metric, err := m.tunnelDefaultMetric(ctx, "-4")
 	if err != nil {
 		return nil, err
@@ -313,7 +331,7 @@ func (m *linuxTUNNetworkManager) Configure(ctx context.Context, routes []linuxHo
 	}
 	if err := state.add(ctx,
 		[]string{"link", "set", "dev", m.interfaceName, "mtu", strconv.Itoa(m.mtu), "up"},
-		nil,
+		[]string{"link", "set", "dev", m.interfaceName, "down"},
 	); err != nil {
 		return nil, state.fail(err)
 	}
@@ -363,6 +381,32 @@ func (m *linuxTUNNetworkManager) validateHostRoutes(routes []linuxHostRoute) err
 			return fmt.Errorf("client: relay route is duplicated")
 		}
 		seen[route.Address] = struct{}{}
+	}
+	return nil
+}
+
+func (m *linuxTUNNetworkManager) validateMainRoutingPolicy(ctx context.Context, family string) error {
+	encoded, err := m.runner(ctx, "-j", family, "rule", "show")
+	if err != nil {
+		return fmt.Errorf("client: inspect Linux routing policy: %w", err)
+	}
+	var rules []linuxRuleJSON
+	if err := json.Unmarshal(encoded, &rules); err != nil {
+		return fmt.Errorf("client: Linux routing policy response is invalid")
+	}
+	expected := map[int]string{0: "local", 32766: "main", 32767: "default"}
+	if len(rules) != len(expected) {
+		return fmt.Errorf("client: Linux routing policy is unsafe")
+	}
+	for _, rule := range rules {
+		table, ok := expected[rule.Priority]
+		if !ok || rule.Table != table || rule.From != "all" || rule.To != "all" {
+			return fmt.Errorf("client: Linux routing policy is unsafe")
+		}
+		delete(expected, rule.Priority)
+	}
+	if len(expected) != 0 {
+		return fmt.Errorf("client: Linux routing policy is unsafe")
 	}
 	return nil
 }

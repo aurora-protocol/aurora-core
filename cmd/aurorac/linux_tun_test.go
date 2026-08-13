@@ -11,6 +11,8 @@ import (
 
 func TestLinuxTUNNetworkConfiguresBypassesBeforeDefaults(t *testing.T) {
 	runner := &recordingLinuxIPRunner{responses: map[string]string{
+		"-j\x00-4\x00rule\x00show":             linuxMainRoutingPolicyJSON(),
+		"-j\x00-6\x00rule\x00show":             linuxMainRoutingPolicyJSON(),
 		"-j\x00-4\x00route\x00show\x00default": `[{"dst":"default","gateway":"192.0.2.1","dev":"eth0","metric":100}]`,
 		"-j\x00-6\x00route\x00show\x00default": `[{"dst":"default","gateway":"2001:db8::1","dev":"eth0","metric":1024}]`,
 	}}
@@ -34,6 +36,8 @@ func TestLinuxTUNNetworkConfiguresBypassesBeforeDefaults(t *testing.T) {
 	t.Cleanup(func() { _ = state.Close() })
 
 	requireLinuxIPCommandsInOrder(t, runner.Commands(), []string{
+		"-j -4 rule show",
+		"-j -6 rule show",
 		"-j -4 route show default",
 		"-j -6 route show default",
 		"-4 route add 203.0.113.7/32 via 192.0.2.1 dev eth0 metric 5",
@@ -48,6 +52,8 @@ func TestLinuxTUNNetworkConfiguresBypassesBeforeDefaults(t *testing.T) {
 
 func TestLinuxTUNNetworkCloseRemovesOnlyOwnedRoutesInReverseOrder(t *testing.T) {
 	runner := &recordingLinuxIPRunner{responses: map[string]string{
+		"-j\x00-4\x00rule\x00show":             linuxMainRoutingPolicyJSON(),
+		"-j\x00-6\x00rule\x00show":             linuxMainRoutingPolicyJSON(),
 		"-j\x00-4\x00route\x00show\x00default": `[{"dst":"default","gateway":"192.0.2.1","dev":"eth0","metric":100}]`,
 		"-j\x00-6\x00route\x00show\x00default": `[]`,
 	}}
@@ -64,6 +70,7 @@ func TestLinuxTUNNetworkCloseRemovesOnlyOwnedRoutesInReverseOrder(t *testing.T) 
 	requireLinuxIPCommandsInOrder(t, runner.Commands(), []string{
 		"-6 route del default dev aurora0 metric 1",
 		"-4 route del default dev aurora0 metric 99",
+		"link set dev aurora0 down",
 		"-4 route del 203.0.113.7/32 via 192.0.2.1 dev eth0 metric 5",
 	})
 	for _, command := range runner.Commands() {
@@ -76,6 +83,8 @@ func TestLinuxTUNNetworkCloseRemovesOnlyOwnedRoutesInReverseOrder(t *testing.T) 
 func TestLinuxTUNNetworkRollsBackOnDefaultRouteFailure(t *testing.T) {
 	runner := &recordingLinuxIPRunner{
 		responses: map[string]string{
+			"-j\x00-4\x00rule\x00show":             linuxMainRoutingPolicyJSON(),
+			"-j\x00-6\x00rule\x00show":             linuxMainRoutingPolicyJSON(),
 			"-j\x00-4\x00route\x00show\x00default": `[{"dst":"default","gateway":"192.0.2.1","dev":"eth0","metric":100}]`,
 			"-j\x00-6\x00route\x00show\x00default": `[]`,
 		},
@@ -97,6 +106,8 @@ func TestLinuxTUNNetworkRollsBackOnDefaultRouteFailure(t *testing.T) {
 
 func TestLinuxTUNNetworkRejectsUnsafeDefaultPrecedence(t *testing.T) {
 	runner := &recordingLinuxIPRunner{responses: map[string]string{
+		"-j\x00-4\x00rule\x00show":             linuxMainRoutingPolicyJSON(),
+		"-j\x00-6\x00rule\x00show":             linuxMainRoutingPolicyJSON(),
 		"-j\x00-4\x00route\x00show\x00default": `[{"dst":"default","gateway":"192.0.2.1","dev":"eth0","metric":0}]`,
 		"-j\x00-6\x00route\x00show\x00default": `[]`,
 	}}
@@ -107,6 +118,22 @@ func TestLinuxTUNNetworkRejectsUnsafeDefaultPrecedence(t *testing.T) {
 	for _, command := range runner.Commands() {
 		if !strings.HasPrefix(command, "-j ") {
 			t.Fatalf("network setup mutated routes after unsafe metric: %s", command)
+		}
+	}
+}
+
+func TestLinuxTUNNetworkRejectsCustomRoutingPolicy(t *testing.T) {
+	runner := &recordingLinuxIPRunner{responses: map[string]string{
+		"-j\x00-4\x00rule\x00show": `[{"priority":0,"from":"all","to":"all","table":"local"},{"priority":100,"from":"10.0.0.0/8","table":"100"},{"priority":32766,"from":"all","to":"all","table":"main"},{"priority":32767,"from":"all","to":"all","table":"default"}]`,
+		"-j\x00-6\x00rule\x00show": linuxMainRoutingPolicyJSON(),
+	}}
+	manager := mustLinuxTUNNetworkManager(t, runner)
+	if _, err := manager.Configure(context.Background(), nil); err == nil {
+		t.Fatal("network setup accepted custom policy routing")
+	}
+	for _, command := range runner.Commands() {
+		if !strings.HasPrefix(command, "-j ") {
+			t.Fatalf("network setup mutated routes after unsafe policy: %s", command)
 		}
 	}
 }
@@ -167,6 +194,7 @@ func TestParseTUNConfigRequiresSafeHostPrefixes(t *testing.T) {
 		"IPv6 subnet":       {"--provisioning", "/private/provisioning.bin", "--ipv6-address", "fd77::2/64"},
 		"bad interface":     {"--provisioning", "/private/provisioning.bin", "--tun-iface", "aurora/0"},
 		"dynamic interface": {"--provisioning", "/private/provisioning.bin", "--tun-iface", "aurora%d"},
+		"spaced interface":  {"--provisioning", "/private/provisioning.bin", "--tun-iface", "aurora 0"},
 		"bad MTU":           {"--provisioning", "/private/provisioning.bin", "--tun-mtu", "575"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -230,4 +258,8 @@ func requireLinuxIPCommandsInOrder(t *testing.T, commands, expected []string) {
 	if position != len(expected) {
 		t.Fatalf("commands = %q, missing ordered sequence %q", commands, expected[position:])
 	}
+}
+
+func linuxMainRoutingPolicyJSON() string {
+	return `[{"priority":0,"from":"all","to":"all","table":"local"},{"priority":32766,"from":"all","to":"all","table":"main"},{"priority":32767,"from":"all","to":"all","table":"default"}]`
 }

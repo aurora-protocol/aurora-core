@@ -55,18 +55,19 @@ uses a caller-controlled command path.
    when one is required. Non-main routing tables are refused because a reliable
    cleanup and precedence guarantee cannot be made from the available route
    information.
-3. Existing default routes are inspected before setup. The tunnel default
-   receives a metric strictly lower than every existing default for that IP
-   family. A default with metric zero prevents safe precedence and causes a
-   fail-closed error rather than an ambiguous equal-cost route.
+3. Routing policy and existing defaults are inspected before setup. Only the
+   standard local, main, and default rules are accepted for each address
+   family. The tunnel default receives a metric strictly lower than every
+   existing default for that family. A default with metric zero or custom
+   policy rule causes a fail-closed error rather than an ambiguous route.
 4. Setup order is relay bypasses, link address and MTU, then tunnel defaults.
    Any failure removes only entries successfully added by this process in the
    reverse order. The command uses `route add`, never `replace`, so it
    cannot overwrite an operator-managed route.
-5. Normal shutdown first deletes the exact owned defaults and bypasses, then
-   closes the TUN device and established session. Every cleanup error is
-   retained for the caller; sensitive provisioning and issuer buffers are
-   zeroed.
+5. Normal shutdown first deletes the exact owned defaults and bypasses, removes
+   owned addresses, returns the dedicated link to down state, then closes the
+   TUN device and established session. Every cleanup error is retained for the
+   caller; sensitive provisioning and issuer buffers are zeroed.
 
 ## Data Flow
 
@@ -122,4 +123,3 @@ uses a caller-controlled command path.
   session.
 - The delivery gate runs full Go tests, focused race tests, vet,
   cross-platform builds, fuzz smoke, repository review, and hosted CI.
-

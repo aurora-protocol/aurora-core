@@ -357,6 +357,148 @@ func TestPacketAdapterOpensIPv6TCPFlow(t *testing.T) {
 	}
 }
 
+func TestPacketAdapterReassemblesOutOfOrderIPv4TCPFragments(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	syn := packetAdapterTCPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, 100, 0, tcpFlagSYN, nil)
+	first, final := packetAdapterIPv4Fragments(t, syn, 8)
+
+	if err := adapter.Ingress(context.Background(), final, now); err != nil {
+		t.Fatalf("ingress final IPv4 fragment: %v", err)
+	}
+	if adapter.FlowCount() != 0 || len(adapter.DrainLocalPackets()) != 0 {
+		t.Fatal("incomplete IPv4 fragment set allocated a flow or local response")
+	}
+	if err := adapter.Ingress(context.Background(), first, now); err != nil {
+		t.Fatalf("ingress initial IPv4 fragment: %v", err)
+	}
+	localPackets := adapter.DrainLocalPackets()
+	if len(localPackets) != 1 {
+		t.Fatalf("reassembled IPv4 TCP SYN returned %d local packets", len(localPackets))
+	}
+	local, err := parsePacketAdapterIPPacket(localPackets[0], 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if local.version != 4 || local.tcp.flags != tcpFlagSYN|tcpFlagACK {
+		t.Fatalf("unexpected IPv4 fragment synthetic SYN-ACK: %+v", local)
+	}
+	encrypted, err := adapter.NextEncryptedPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := relayApplication.HandlePacket(context.Background(), now, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || len(blocks[0].Frames) != 1 || blocks[0].Frames[0].FrameType != registry.FrameFlowOpen {
+		t.Fatalf("reassembled IPv4 TCP SYN did not emit one FLOW_OPEN: %+v", blocks)
+	}
+}
+
+func TestPacketAdapterRejectsIPv4FragmentBeyondFinalLength(t *testing.T) {
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	packet := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, bytes.Repeat([]byte{0x5a}, 24))
+	far := packetAdapterIPv4FragmentAt(t, packet, 24, 8, true)
+	final := packetAdapterIPv4FragmentAt(t, packet, 8, 12, false)
+
+	if err := adapter.Ingress(context.Background(), far, now); err != nil {
+		t.Fatalf("ingress far IPv4 fragment: %v", err)
+	}
+	if err := adapter.Ingress(context.Background(), final, now); err == nil {
+		t.Fatal("fragment beyond the declared final length was accepted")
+	}
+	if len(adapter.ipv4Fragments) != 0 || adapter.FlowCount() != 0 || len(adapter.DrainLocalPackets()) != 0 {
+		t.Fatal("invalid IPv4 fragment set retained state")
+	}
+}
+
+func TestPacketAdapterBoundsIPv4FragmentSetsByFlowLimit(t *testing.T) {
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{MaxFlows: 1, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	packet := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, bytes.Repeat([]byte{0x5a}, 24))
+	first := packetAdapterIPv4FragmentAt(t, packet, 24, 8, true)
+	second := append([]byte(nil), first...)
+	binary.BigEndian.PutUint16(second[4:6], 2)
+	binary.BigEndian.PutUint16(second[10:12], 0)
+	binary.BigEndian.PutUint16(second[10:12], packetAdapterChecksum(second[:20]))
+
+	if err := adapter.Ingress(context.Background(), first, now); err != nil {
+		t.Fatalf("ingress first IPv4 fragment set: %v", err)
+	}
+	if err := adapter.Ingress(context.Background(), second, now); err == nil {
+		t.Fatal("IPv4 fragment set exceeded the configured flow limit")
+	}
+	if len(adapter.ipv4Fragments) != 1 || adapter.FlowCount() != 0 || len(adapter.DrainLocalPackets()) != 0 {
+		t.Fatal("fragment set limit retained unexpected state")
+	}
+}
+
+func TestPacketAdapterRejectsIPv4FragmentsExceedingPacketLimit(t *testing.T) {
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 128, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	packet, err := buildPacketAdapterUDPPacket(4, netip.MustParseAddr("10.0.0.2"), netip.MustParseAddr("93.184.216.34"), 50000, 443, bytes.Repeat([]byte{0x5a}, 100), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet = packetAdapterIPv4WithOptions(t, packet)
+	first := packetAdapterIPv4FragmentAt(t, packet, 0, 8, true)
+	final := packetAdapterIPv4FragmentAt(t, packet, 104, 4, false)
+
+	if err := adapter.Ingress(context.Background(), first, now); err != nil {
+		t.Fatalf("ingress initial IPv4 fragment: %v", err)
+	}
+	if err := adapter.Ingress(context.Background(), final, now); err == nil {
+		t.Fatal("oversized IPv4 reassembly was accepted")
+	}
+	if len(adapter.ipv4Fragments) != 0 || adapter.FlowCount() != 0 || len(adapter.DrainLocalPackets()) != 0 {
+		t.Fatal("oversized IPv4 reassembly retained state")
+	}
+}
+
+func TestPacketAdapterRejectsIPv4FragmentWithDontFragment(t *testing.T) {
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, bytes.Repeat([]byte{0x5a}, 24))
+	fragment := packetAdapterIPv4FragmentAt(t, packet, 24, 8, true)
+	fragment[6] |= 0x40
+	binary.BigEndian.PutUint16(fragment[10:12], 0)
+	binary.BigEndian.PutUint16(fragment[10:12], packetAdapterChecksum(fragment[:20]))
+
+	if err := adapter.Ingress(context.Background(), fragment, time.Unix(1_700_000_000, 0)); err == nil {
+		t.Fatal("IPv4 fragment with Don't Fragment was accepted")
+	}
+	if len(adapter.ipv4Fragments) != 0 || adapter.FlowCount() != 0 || len(adapter.DrainLocalPackets()) != 0 {
+		t.Fatal("invalid Don't Fragment packet retained state")
+	}
+}
+
 func TestPacketAdapterOpensIPv6TCPFlowWithOptionsHeaders(t *testing.T) {
 	clientApplication, relayApplication := packetAdapterApplications(t)
 	defer clientApplication.Close()
@@ -1063,6 +1205,57 @@ func packetAdapterIPv6WithFragmentHeader(t testing.TB, encoded []byte) []byte {
 	return packet
 }
 
+func packetAdapterIPv4Fragments(t testing.TB, encoded []byte, split int) ([]byte, []byte) {
+	t.Helper()
+	if len(encoded) < 20 || encoded[0]>>4 != 4 {
+		t.Fatal("packet adapter test packet is not IPv4")
+	}
+	headerLength := int(encoded[0]&0x0f) * 4
+	if headerLength < 20 || headerLength > len(encoded) || split <= 0 || split%8 != 0 || split >= len(encoded)-headerLength {
+		t.Fatal("packet adapter IPv4 fragment split is invalid")
+	}
+	payload := encoded[headerLength:]
+	return packetAdapterIPv4FragmentAt(t, encoded, 0, split, true), packetAdapterIPv4FragmentAt(t, encoded, split, len(payload)-split, false)
+}
+
+func packetAdapterIPv4WithOptions(t testing.TB, encoded []byte) []byte {
+	t.Helper()
+	if len(encoded) < 20 || encoded[0] != 0x45 {
+		t.Fatal("packet adapter test packet has no basic IPv4 header")
+	}
+	packet := make([]byte, 0, len(encoded)+4)
+	packet = append(packet, encoded[:20]...)
+	packet[0] = 0x46
+	packet = append(packet, 0, 0, 0, 0)
+	packet = append(packet, encoded[20:]...)
+	binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
+	binary.BigEndian.PutUint16(packet[10:12], 0)
+	binary.BigEndian.PutUint16(packet[10:12], packetAdapterChecksum(packet[:24]))
+	return packet
+}
+
+func packetAdapterIPv4FragmentAt(t testing.TB, encoded []byte, offset, length int, more bool) []byte {
+	t.Helper()
+	if len(encoded) < 20 || encoded[0]>>4 != 4 {
+		t.Fatal("packet adapter test packet is not IPv4")
+	}
+	headerLength := int(encoded[0]&0x0f) * 4
+	payload := encoded[headerLength:]
+	if headerLength < 20 || headerLength > len(encoded) || offset < 0 || offset%8 != 0 || length <= 0 || offset+length > len(payload) || (more && length%8 != 0) {
+		t.Fatal("packet adapter IPv4 fragment range is invalid")
+	}
+	fragment := append([]byte(nil), encoded[:headerLength]...)
+	binary.BigEndian.PutUint16(fragment[2:4], uint16(headerLength+length))
+	flags := uint16(offset / 8)
+	if more {
+		flags |= 0x2000
+	}
+	binary.BigEndian.PutUint16(fragment[6:8], flags)
+	binary.BigEndian.PutUint16(fragment[10:12], 0)
+	binary.BigEndian.PutUint16(fragment[10:12], packetAdapterChecksum(fragment[:headerLength]))
+	return append(fragment, payload[offset:offset+length]...)
+}
+
 func packetAdapterParseUDPv4(t testing.TB, encoded []byte) packetAdapterUDPPacket {
 	t.Helper()
 	packet, err := parsePacketAdapterIPPacket(encoded, defaultPacketAdapterPacketBytes)
@@ -1157,6 +1350,7 @@ func FuzzPacketAdapterIngress(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
+	ipv4FragmentSeed, _ := packetAdapterIPv4Fragments(f, seed, 8)
 	ipv6Seed, err := buildPacketAdapterTCPPacket(6, netip.MustParseAddr("2001:db8::2"), netip.MustParseAddr("2606:4700:4700::1111"), 50000, 443, 100, 0, tcpFlagSYN, nil, 1)
 	if err != nil {
 		f.Fatal(err)
@@ -1165,6 +1359,7 @@ func FuzzPacketAdapterIngress(f *testing.F) {
 	malformedIPv6Seed := append([]byte(nil), ipv6Seed...)
 	malformedIPv6Seed[41] = 1
 	f.Add(seed)
+	f.Add(ipv4FragmentSeed)
 	f.Add(ipv6Seed)
 	f.Add(malformedIPv6Seed)
 	f.Add([]byte{0x45, 0x00, 0x00, 0x14})

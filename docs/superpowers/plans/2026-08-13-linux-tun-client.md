@@ -36,7 +36,7 @@
 - Produces `func (r *PacketTUNRuntime) HandleFrameBlock(context.Context, protocol.FrameBlock) error`.
 - Produces `func (r *PacketTUNRuntime) Close() error`.
 
-- [ ] **Step 1: Write failing packet-device tests**
+- [x] **Step 1: Write failing packet-device tests**
 
 ```go
 func TestPacketTUNRuntimeWritesSyntheticAndRelayPackets(t *testing.T) {
@@ -58,13 +58,13 @@ func TestPacketTUNRuntimeCloseUnblocksRead(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the new tests and verify they fail**
+- [x] **Step 2: Run the new tests and verify they fail**
 
 Run: `GOCACHE=/private/tmp/aurora-gocache go test ./client -run PacketTUNRuntime -count=1`
 
 Expected: compile failure naming `NewPacketTUNRuntime`.
 
-- [ ] **Step 3: Implement bounded local and relay packet handling**
+- [x] **Step 3: Implement bounded local and relay packet handling**
 
 ```go
 func (r *PacketTUNRuntime) Serve(ctx context.Context) error {
@@ -89,7 +89,7 @@ Validate options before allocation, copy no packet beyond the fixed device
 buffer, reject partial writes, serialize device writes, zero temporary packet
 buffers, and make close idempotent.
 
-- [ ] **Step 4: Run focused tests and race test**
+- [x] **Step 4: Run focused tests and race test**
 
 Run: `GOCACHE=/private/tmp/aurora-gocache go test ./client -run PacketTUNRuntime -count=1`
 
@@ -97,7 +97,7 @@ Run: `GOCACHE=/private/tmp/aurora-gocache go test -race ./client -run PacketTUNR
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add client/packet_tun_runtime.go client/packet_tun_runtime_test.go
@@ -312,4 +312,3 @@ Expected: all commands pass.
 git add server/first_hop_integration_test.go docs/superpowers/plans/2026-08-13-linux-tun-client.md
 git commit -m "test: verify Linux tunnel client interop"
 ```
-

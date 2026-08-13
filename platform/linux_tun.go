@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 const (
@@ -98,6 +99,9 @@ func (a *LinuxTUNAdapter) Config() LinuxTUNConfig {
 }
 
 type LinuxTUNDevice struct {
+	mu            sync.Mutex
+	closeOnce     sync.Once
+	closeErr      error
 	file          *os.File
 	interfaceName string
 	mtu           int
@@ -128,30 +132,48 @@ func (d *LinuxTUNDevice) MTU() int {
 }
 
 func (d *LinuxTUNDevice) Read(packet []byte) (int, error) {
-	if d == nil || d.file == nil {
+	file := d.openFile()
+	if file == nil {
 		return 0, fmt.Errorf("platform: Linux TUN device is closed")
 	}
-	return d.file.Read(packet)
+	return file.Read(packet)
 }
 
 func (d *LinuxTUNDevice) Write(packet []byte) (int, error) {
-	if d == nil || d.file == nil {
+	file := d.openFile()
+	if file == nil {
 		return 0, fmt.Errorf("platform: Linux TUN device is closed")
 	}
-	return d.file.Write(packet)
+	return file.Write(packet)
 }
 
 func (d *LinuxTUNDevice) Close() error {
-	if d == nil || d.file == nil {
+	if d == nil {
 		return nil
 	}
-	err := d.file.Close()
-	d.file = nil
-	return err
+	d.closeOnce.Do(func() {
+		d.mu.Lock()
+		file := d.file
+		d.file = nil
+		d.mu.Unlock()
+		if file != nil {
+			d.closeErr = file.Close()
+		}
+	})
+	return d.closeErr
 }
 
 func newLinuxTUNDevice(file *os.File, interfaceName string, mtu int) *LinuxTUNDevice {
 	return &LinuxTUNDevice{file: file, interfaceName: interfaceName, mtu: mtu}
+}
+
+func (d *LinuxTUNDevice) openFile() *os.File {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.file
 }
 
 func cloneLinuxTUNConfig(config LinuxTUNConfig) LinuxTUNConfig {

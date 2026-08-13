@@ -30,6 +30,9 @@ const (
 	packetAdapterTCP                 = 6
 	packetAdapterUDP                 = 17
 	packetAdapterDNSPort             = 53
+	packetAdapterIPv6HopByHop        = 0
+	packetAdapterIPv6Destination     = 60
+	maximumPacketAdapterIPv6Options  = 2
 	tcpFlagFIN                       = 0x01
 	tcpFlagSYN                       = 0x02
 	tcpFlagRST                       = 0x04
@@ -731,19 +734,82 @@ func parsePacketAdapterIPv6(encoded []byte) (packetAdapterIPPacket, error) {
 	if len(encoded) < 40 || int(binary.BigEndian.Uint16(encoded[4:6])) != len(encoded)-40 || encoded[7] == 0 {
 		return packetAdapterIPPacket{}, fmt.Errorf("client: packet adapter IPv6 packet is malformed")
 	}
+	protocol, segmentOffset, err := parsePacketAdapterIPv6Headers(encoded)
+	if err != nil {
+		return packetAdapterIPPacket{}, err
+	}
 	packet := packetAdapterIPPacket{
 		version:  6,
-		protocol: encoded[6],
+		protocol: protocol,
 		source:   netip.AddrFrom16([16]byte(encoded[8:24])),
 		target:   netip.AddrFrom16([16]byte(encoded[24:40])),
 	}
 	if !packet.source.IsValid() || !packet.target.IsValid() {
 		return packetAdapterIPPacket{}, fmt.Errorf("client: packet adapter IPv6 address is invalid")
 	}
-	if packet.protocol != packetAdapterTCP && packet.protocol != packetAdapterUDP {
-		return packetAdapterIPPacket{}, fmt.Errorf("client: packet adapter IPv6 extension headers are unsupported")
+	return parsePacketAdapterTransport(packet, encoded[segmentOffset:], true)
+}
+
+func parsePacketAdapterIPv6Headers(encoded []byte) (uint8, int, error) {
+	nextHeader := encoded[6]
+	offset := 40
+	seenDestination := false
+	for headerCount := 0; ; headerCount++ {
+		switch nextHeader {
+		case packetAdapterTCP, packetAdapterUDP:
+			return nextHeader, offset, nil
+		case packetAdapterIPv6HopByHop:
+			if headerCount != 0 {
+				return 0, 0, fmt.Errorf("client: packet adapter IPv6 hop-by-hop header position is invalid")
+			}
+		case packetAdapterIPv6Destination:
+			if seenDestination {
+				return 0, 0, fmt.Errorf("client: packet adapter IPv6 destination options are duplicated")
+			}
+			seenDestination = true
+		default:
+			return 0, 0, fmt.Errorf("client: packet adapter IPv6 extension header is unsupported")
+		}
+		if headerCount >= maximumPacketAdapterIPv6Options {
+			return 0, 0, fmt.Errorf("client: packet adapter IPv6 extension header chain is too long")
+		}
+		var err error
+		nextHeader, offset, err = parsePacketAdapterIPv6OptionsHeader(encoded, offset)
+		if err != nil {
+			return 0, 0, err
+		}
 	}
-	return parsePacketAdapterTransport(packet, encoded[40:], true)
+}
+
+func parsePacketAdapterIPv6OptionsHeader(encoded []byte, offset int) (uint8, int, error) {
+	if offset < 40 || offset+2 > len(encoded) {
+		return 0, 0, fmt.Errorf("client: packet adapter IPv6 options header is malformed")
+	}
+	length := (int(encoded[offset+1]) + 1) * 8
+	if length > len(encoded)-offset {
+		return 0, 0, fmt.Errorf("client: packet adapter IPv6 options header is malformed")
+	}
+	if err := parsePacketAdapterIPv6Options(encoded[offset+2 : offset+length]); err != nil {
+		return 0, 0, err
+	}
+	return encoded[offset], offset + length, nil
+}
+
+func parsePacketAdapterIPv6Options(encoded []byte) error {
+	for len(encoded) > 0 {
+		if encoded[0] == 0 {
+			encoded = encoded[1:]
+			continue
+		}
+		if len(encoded) < 2 || int(encoded[1]) > len(encoded)-2 {
+			return fmt.Errorf("client: packet adapter IPv6 option is malformed")
+		}
+		if encoded[0]>>6 != 0 {
+			return fmt.Errorf("client: packet adapter IPv6 option requires unsupported handling")
+		}
+		encoded = encoded[2+int(encoded[1]):]
+	}
+	return nil
 }
 
 func parsePacketAdapterTransport(packet packetAdapterIPPacket, segment []byte, requireUDPChecksum bool) (packetAdapterIPPacket, error) {

@@ -50,3 +50,7 @@ func removeRetentionReplayCacheTemporary(directory *os.File, temporaryName strin
 	}
 	return err
 }
+
+func syncRetentionReplayCacheDirectory(directory *os.File) error {
+	return directory.Sync()
+}

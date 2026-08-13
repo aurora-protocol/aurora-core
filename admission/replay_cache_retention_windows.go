@@ -26,3 +26,7 @@ func removeRetentionReplayCacheTemporary(directory *os.File, temporaryName strin
 	}
 	return err
 }
+
+func syncRetentionReplayCacheDirectory(*os.File) error {
+	return nil
+}

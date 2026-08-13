@@ -45,7 +45,7 @@ func NewRetentionFileReplayCacheAt(directory *os.File, name string, nowUnix uint
 		if expired {
 			return cache.rewrite()
 		}
-		return directory.Sync()
+		return syncRetentionReplayCacheDirectory(directory)
 	}); err != nil {
 		_ = lock.Close()
 		return nil, err
@@ -211,7 +211,7 @@ func (c *RetentionFileReplayCache) rewrite() error {
 	if err := replaceRetentionReplayCacheFile(c.directory, temporaryName, c.name); err != nil {
 		return err
 	}
-	return c.directory.Sync()
+	return syncRetentionReplayCacheDirectory(c.directory)
 }
 
 func (c *RetentionFileReplayCache) append(key string, deadline uint64) error {

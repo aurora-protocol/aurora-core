@@ -14,6 +14,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/asn1"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +31,7 @@ import (
 	auroraclient "github.com/aurora-protocol/aurora-core/client"
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/evidence"
+	"github.com/aurora-protocol/aurora-core/flow"
 	"github.com/aurora-protocol/aurora-core/handshake"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
@@ -449,6 +451,202 @@ func TestLiveFirstHopTCPProxyRuntimeEgress(t *testing.T) {
 	if err := <-echoResult; err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestLiveFirstHopPacketTUNRuntimeInterop(t *testing.T) {
+	fixture := newLiveFirstHopFixture(t, time.Now())
+	harness := startLiveFirstHopHarness(t, fixture, fixture.newRelayDriver(t), nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	established, err := fixture.newClientDriver(t).Connect(ctx, harness.opener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer established.Close()
+	relayApplication := <-harness.relayApplications
+	adapter, err := auroraclient.NewPacketAdapter(established.Application, auroraclient.PacketAdapterOptions{MaxFlows: 1, MaxPacketBytes: 1500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := newLiveFirstHopPacketTUNDevice()
+	runtime, err := auroraclient.NewPacketTUNRuntime(adapter, device, auroraclient.PacketTUNRuntimeOptions{ReadBufferBytes: 1500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tunnelResult := make(chan error, 1)
+	go func() { tunnelResult <- runtime.Serve(ctx) }()
+	pumpResult := make(chan error, 1)
+	go func() {
+		pumpResult <- transport.RunPacketDuplex(ctx, established.ReadCarrier, established.WriteCarrier, established.Application, runtime.HandleFrameBlock, 1<<20)
+	}()
+	t.Cleanup(func() {
+		_ = runtime.Close()
+		_ = established.Close()
+		for name, result := range map[string]chan error{"packet device": tunnelResult, "carrier": pumpResult} {
+			select {
+			case resultErr := <-result:
+				if resultErr != nil && !errors.Is(resultErr, context.Canceled) && !errors.Is(resultErr, session.ErrClosed) && !errors.Is(resultErr, net.ErrClosed) && !errors.Is(resultErr, io.ErrClosedPipe) && !errors.Is(resultErr, io.EOF) {
+					t.Errorf("%s stopped unexpectedly: %v", name, resultErr)
+				}
+			case <-time.After(time.Second):
+				t.Errorf("%s did not stop", name)
+			}
+		}
+	})
+
+	device.Inject(liveFirstHopPacketTUNSYN(t, [4]byte{10, 77, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, 100))
+	synAck := device.NextWrite(t)
+	if len(synAck) < 40 || binary.BigEndian.Uint16(synAck[20:22]) != 443 || binary.BigEndian.Uint16(synAck[22:24]) != 50000 || synAck[33] != 0x12 {
+		t.Fatalf("synthetic tunnel SYN-ACK is invalid: %x", synAck)
+	}
+	var flowOpen protocol.FlowOpen
+	select {
+	case encoded := <-harness.serverFrames:
+		reader := wire.NewReader(encoded)
+		flowOpen = protocol.DecodeFlowOpen(reader)
+		if reader.Err() != nil || !reader.EOF() {
+			t.Fatalf("decode tunnel FLOW_OPEN: %v", reader.Err())
+		}
+	case <-ctx.Done():
+		t.Fatalf("tunnel FLOW_OPEN did not reach relay: %v", ctx.Err())
+	}
+	if flowOpen.FlowKind != flow.FlowKindTCPStream || flowOpen.LocalBindingMode != flow.LocalBindingTUNPacketFlow || flowOpen.TargetPort != 443 {
+		t.Fatalf("relay FLOW_OPEN is not tunnel-bound TCP: %+v", flowOpen)
+	}
+	frame, err := protocol.NewStreamDataFrame(flowOpen.FlowID, []byte("strict tunnel response"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := relayApplication.QueueFrames(ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}); err != nil {
+		t.Fatal(err)
+	}
+	response := device.NextWrite(t)
+	if payload := liveFirstHopPacketTUNPayload(response); !bytes.Equal(payload, []byte("strict tunnel response")) {
+		t.Fatalf("tunnel response payload = %q", payload)
+	}
+}
+
+type liveFirstHopPacketTUNDevice struct {
+	reads     chan []byte
+	writes    chan []byte
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func newLiveFirstHopPacketTUNDevice() *liveFirstHopPacketTUNDevice {
+	return &liveFirstHopPacketTUNDevice{
+		reads:  make(chan []byte, 1),
+		writes: make(chan []byte, 4),
+		closed: make(chan struct{}),
+	}
+}
+
+func (d *liveFirstHopPacketTUNDevice) Read(packet []byte) (int, error) {
+	select {
+	case input := <-d.reads:
+		if len(input) > len(packet) {
+			return 0, io.ErrShortBuffer
+		}
+		return copy(packet, input), nil
+	case <-d.closed:
+		return 0, io.ErrClosedPipe
+	}
+}
+
+func (d *liveFirstHopPacketTUNDevice) Write(packet []byte) (int, error) {
+	select {
+	case <-d.closed:
+		return 0, io.ErrClosedPipe
+	default:
+	}
+	copied := append([]byte(nil), packet...)
+	select {
+	case d.writes <- copied:
+		return len(copied), nil
+	case <-d.closed:
+		return 0, io.ErrClosedPipe
+	}
+}
+
+func (d *liveFirstHopPacketTUNDevice) Close() error {
+	d.closeOnce.Do(func() { close(d.closed) })
+	return nil
+}
+
+func (d *liveFirstHopPacketTUNDevice) Inject(packet []byte) {
+	d.reads <- append([]byte(nil), packet...)
+}
+
+func (d *liveFirstHopPacketTUNDevice) NextWrite(t testing.TB) []byte {
+	t.Helper()
+	select {
+	case packet := <-d.writes:
+		return packet
+	case <-time.After(time.Second):
+		t.Fatal("live packet TUN device did not receive a packet")
+		return nil
+	}
+}
+
+func liveFirstHopPacketTUNSYN(t testing.TB, source, target [4]byte, sourcePort, targetPort uint16, sequence uint32) []byte {
+	t.Helper()
+	packet := make([]byte, 40)
+	packet[0] = 0x45
+	binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
+	packet[8] = 64
+	packet[9] = 6
+	copy(packet[12:16], source[:])
+	copy(packet[16:20], target[:])
+	binary.BigEndian.PutUint16(packet[20:22], sourcePort)
+	binary.BigEndian.PutUint16(packet[22:24], targetPort)
+	binary.BigEndian.PutUint32(packet[24:28], sequence)
+	packet[32] = 0x50
+	packet[33] = 0x02
+	binary.BigEndian.PutUint16(packet[34:36], 65535)
+	binary.BigEndian.PutUint16(packet[10:12], liveFirstHopPacketTUNChecksum(packet[:20]))
+	pseudo := make([]byte, 12)
+	copy(pseudo[:4], source[:])
+	copy(pseudo[4:8], target[:])
+	pseudo[9] = 6
+	binary.BigEndian.PutUint16(pseudo[10:12], 20)
+	binary.BigEndian.PutUint16(packet[36:38], liveFirstHopPacketTUNChecksum(pseudo, packet[20:]))
+	return packet
+}
+
+func liveFirstHopPacketTUNPayload(packet []byte) []byte {
+	if len(packet) < 40 || packet[0]>>4 != 4 {
+		return nil
+	}
+	ipHeaderBytes := int(packet[0]&0x0f) * 4
+	totalBytes := int(binary.BigEndian.Uint16(packet[2:4]))
+	if ipHeaderBytes < 20 || totalBytes < ipHeaderBytes+20 || totalBytes > len(packet) {
+		return nil
+	}
+	return append([]byte(nil), packet[ipHeaderBytes+20:totalBytes]...)
+}
+
+func liveFirstHopPacketTUNChecksum(parts ...[]byte) uint16 {
+	var sum uint32
+	var odd byte
+	haveOdd := false
+	for _, part := range parts {
+		for _, value := range part {
+			if !haveOdd {
+				odd = value
+				haveOdd = true
+				continue
+			}
+			sum += uint32(odd)<<8 | uint32(value)
+			haveOdd = false
+		}
+	}
+	if haveOdd {
+		sum += uint32(odd) << 8
+	}
+	for sum>>16 != 0 {
+		sum = sum&0xffff + sum>>16
+	}
+	return ^uint16(sum)
 }
 
 func TestLiveFirstHopProvisionedSessionEgress(t *testing.T) {

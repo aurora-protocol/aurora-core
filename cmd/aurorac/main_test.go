@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,13 +20,13 @@ import (
 	"github.com/aurora-protocol/aurora-core/session"
 )
 
-func TestRunRequiresProxyCommand(t *testing.T) {
+func TestRunRequiresClientCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run(nil, &stdout, &stderr); code != 2 {
 		t.Fatalf("run(nil) code = %d, want 2", code)
 	}
-	if !strings.Contains(stderr.String(), "aurorac proxy") {
-		t.Fatalf("usage = %q, want proxy command", stderr.String())
+	if !strings.Contains(stderr.String(), "aurorac <proxy|tun>") {
+		t.Fatalf("usage = %q, want client command", stderr.String())
 	}
 }
 
@@ -50,6 +51,18 @@ func TestProxyRejectsPublicListenersBeforeProvisioning(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "loopback") {
 		t.Fatalf("public listener error = %s", stderr.String())
+	}
+}
+
+func TestTUNRejectsNonLinuxHostBeforeProvisioning(t *testing.T) {
+	restore := setProxyGOOSForTest("darwin")
+	defer restore()
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"tun", "--provisioning", "/private/provisioning.bin"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("non-Linux tunnel code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "requires a Linux host") {
+		t.Fatalf("non-Linux tunnel error = %s", stderr.String())
 	}
 }
 
@@ -219,8 +232,109 @@ func TestRunProxyComponentsStopsOnCancellation(t *testing.T) {
 	}
 }
 
+func TestRunTUNComponentsCleansRoutesBeforeClosingDevice(t *testing.T) {
+	application, err := session.NewApplication(session.Config{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		Write:           session.DirectionConfig{Direction: 0, Secret: bytes.Repeat([]byte{0x11}, 48), Key: bytes.Repeat([]byte{0x12}, 32), IV: bytes.Repeat([]byte{0x13}, 12)},
+		Read:            session.DirectionConfig{Direction: 1, Secret: bytes.Repeat([]byte{0x21}, 48), Key: bytes.Repeat([]byte{0x22}, 32), IV: bytes.Repeat([]byte{0x23}, 12)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := newTUNComponentDevice()
+	adapter, err := client.NewPacketAdapter(application, client.PacketAdapterOptions{MaxFlows: 1, MaxPacketBytes: 1500})
+	if err != nil {
+		_ = application.Close()
+		t.Fatal(err)
+	}
+	runtime, err := client.NewPacketTUNRuntime(adapter, device, client.PacketTUNRuntimeOptions{ReadBufferBytes: 1500})
+	if err != nil {
+		_ = application.Close()
+		t.Fatal(err)
+	}
+	carrier, peer := net.Pipe()
+	t.Cleanup(func() { _ = peer.Close() })
+	established := &handshake.EstablishedSession{Application: application, ReadCarrier: carrier, WriteCarrier: carrier}
+	ctx, cancel := context.WithCancel(context.Background())
+	cleanupObserved := make(chan bool, 1)
+	result := make(chan error, 1)
+	go func() {
+		result <- runTUNComponents(ctx, established, runtime, func() error {
+			cleanupObserved <- device.Closed()
+			return nil
+		})
+	}()
+	select {
+	case <-device.Started():
+	case <-time.After(time.Second):
+		t.Fatal("tunnel device loop did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("tunnel components did not stop after cancellation")
+	}
+	if observed := <-cleanupObserved; observed {
+		t.Fatal("tunnel device closed before route cleanup")
+	}
+	if !device.Closed() {
+		t.Fatal("tunnel device remained open after component shutdown")
+	}
+}
+
 type issuerRoundTripper func(*http.Request) (*http.Response, error)
 
 func (roundTrip issuerRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	return roundTrip(request)
 }
+
+type tunComponentDevice struct {
+	closed        chan struct{}
+	started       chan struct{}
+	closeOnce     sync.Once
+	readStartOnce sync.Once
+}
+
+func newTUNComponentDevice() *tunComponentDevice {
+	return &tunComponentDevice{closed: make(chan struct{}), started: make(chan struct{})}
+}
+
+func (d *tunComponentDevice) Read([]byte) (int, error) {
+	d.readStartOnce.Do(func() { close(d.started) })
+	<-d.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (d *tunComponentDevice) Write(packet []byte) (int, error) {
+	select {
+	case <-d.closed:
+		return 0, io.ErrClosedPipe
+	default:
+		return len(packet), nil
+	}
+}
+
+func (d *tunComponentDevice) Close() error {
+	d.closeOnce.Do(func() { close(d.closed) })
+	return nil
+}
+
+func (d *tunComponentDevice) Closed() bool {
+	select {
+	case <-d.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *tunComponentDevice) Started() <-chan struct{} {
+	return d.started
+}
+
+var _ io.ReadWriteCloser = (*tunComponentDevice)(nil)

@@ -148,8 +148,8 @@ func DecodeAuthorityKeyRecord(r *wire.Reader) AuthorityKeyRecord {
 }
 
 func (r AuthorityKeyRecord) Validate(now uint64, requiredUsage uint32) error {
-	if len(r.AuthorityID) != 16 || len(r.AuthorityKeyID) != 16 {
-		return fmt.Errorf("protocol: authority IDs must be 16 bytes")
+	if err := r.ValidateStructural(); err != nil {
+		return err
 	}
 	if r.ValidFromUnix > now || now >= r.ValidUntilUnix {
 		return fmt.Errorf("protocol: authority key outside validity interval")
@@ -157,11 +157,25 @@ func (r AuthorityKeyRecord) Validate(now uint64, requiredUsage uint32) error {
 	if r.KeyStatus != registry.AuthorityActive && r.KeyStatus != registry.AuthorityRetiringVerifyOnly {
 		return fmt.Errorf("protocol: authority key status not usable")
 	}
-	if r.UsageFlags&^registry.UsageAllKnownAuthority != 0 {
-		return fmt.Errorf("protocol: authority usage has reserved bits set")
-	}
 	if requiredUsage != 0 && r.UsageFlags&requiredUsage != requiredUsage {
 		return fmt.Errorf("protocol: authority key lacks required usage 0x%x", requiredUsage)
+	}
+	return nil
+}
+
+// ValidateStructural verifies authority-key fields that do not depend on the current time.
+func (r AuthorityKeyRecord) ValidateStructural() error {
+	if len(r.AuthorityID) != 16 || len(r.AuthorityKeyID) != 16 {
+		return fmt.Errorf("protocol: authority IDs must be 16 bytes")
+	}
+	if r.ValidUntilUnix <= r.ValidFromUnix {
+		return fmt.Errorf("protocol: authority key validity interval is empty")
+	}
+	if r.KeyStatus != registry.AuthorityActive && r.KeyStatus != registry.AuthorityRetiringVerifyOnly && r.KeyStatus != registry.AuthorityRevoked {
+		return fmt.Errorf("protocol: authority key status is reserved")
+	}
+	if r.UsageFlags&^registry.UsageAllKnownAuthority != 0 {
+		return fmt.Errorf("protocol: authority usage has reserved bits set")
 	}
 	if err := r.PublicKey.ValidateCompatibility(); err != nil {
 		return err

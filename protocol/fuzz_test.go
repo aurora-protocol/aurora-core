@@ -47,6 +47,7 @@ func decodeFuzzTargets() []decodeFuzzTarget {
 		readerFuzzTarget("PublicKeyRecord", fuzzSamplePublicKeyRecord()),
 		readerFuzzTarget("AuthorityKeyRecord", fuzzSampleAuthorityKeyRecord()),
 		readerFuzzTarget("ObjectSignature", fuzzSampleObjectSignature()),
+		readerFuzzTarget("SignedSeedRecord", fuzzSampleSignedSeedRecord()),
 		readerFuzzTarget("TokenVerificationKeyRecord", fuzzSampleTokenVerificationKeyRecord()),
 		readerFuzzTarget("SignatureEntry", fuzzSampleSignatureEntry()),
 		readerFuzzTarget("DirectoryConsensus", fuzzSampleDirectoryConsensus()),
@@ -152,6 +153,8 @@ func decodeByName(name string, r *wire.Reader) wire.Encodable {
 		return DecodeAuthorityKeyRecord(r)
 	case "ObjectSignature":
 		return DecodeObjectSignature(r)
+	case "SignedSeedRecord":
+		return DecodeSignedSeedRecord(r)
 	case "TokenVerificationKeyRecord":
 		return DecodeTokenVerificationKeyRecord(r)
 	case "SignatureEntry":
@@ -290,6 +293,25 @@ func fuzzSampleObjectSignature() ObjectSignature {
 		SignatureScheme: registry.SigECDSAP256SHA384DER,
 		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
 		Signature:       fb(0x13, 64),
+	}
+}
+
+func fuzzSampleSignedSeedRecord() SignedSeedRecord {
+	return SignedSeedRecord{
+		SeedVersion:                registry.Version20,
+		SeedID:                     fb(0x14, 16),
+		ValidFromUnix:              10,
+		ValidUntilUnix:             20,
+		DirectoryConsensusHint:     []byte("directory"),
+		BridgeBucketHint:           []byte("bridge"),
+		TokenIssuerHint:            fb(0x15, 16),
+		IssuerMetadataHash:         fb(0x16, 48),
+		BootstrapAuthorityKeys:     []AuthorityKeyRecord{fuzzSampleAuthorityKeyRecord()},
+		BootstrapCoverTemplateHash: fb(0x17, 48),
+		AuthorityKeyUpdates:        []AuthorityKeyRecord{fuzzSampleAuthorityKeyRecord()},
+		NextSeedCommitment:         fb(0x18, 48),
+		SoftwareUpdateEpoch:        7,
+		SeedSignature:              fuzzSampleObjectSignature(),
 	}
 }
 

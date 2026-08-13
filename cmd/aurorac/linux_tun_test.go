@@ -212,6 +212,27 @@ func TestParseTUNConfigRequiresSafeHostPrefixes(t *testing.T) {
 	}
 }
 
+func TestParseTUNConfigValidatesProvisioningSource(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"single provisioning", []string{"--provisioning", "/private/provisioning.bin"}, true},
+		{"wallet provisioning", []string{"--provisioning-wallet", "/private/wallet.bin", "--wallet-state", "/private/wallet-state.bin"}, true},
+		{"both sources", []string{"--provisioning", "/private/provisioning.bin", "--provisioning-wallet", "/private/wallet.bin", "--wallet-state", "/private/wallet-state.bin"}, false},
+		{"wallet missing state", []string{"--provisioning-wallet", "/private/wallet.bin"}, false},
+		{"state without wallet", []string{"--provisioning", "/private/provisioning.bin", "--wallet-state", "/private/wallet-state.bin"}, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := parseTUNConfig(testCase.args, io.Discard)
+			if (err == nil) != testCase.want {
+				t.Fatalf("parse tunnel config error = %v, want success=%t", err, testCase.want)
+			}
+		})
+	}
+}
+
 func mustLinuxTUNNetworkManager(t *testing.T, runner *recordingLinuxIPRunner) *linuxTUNNetworkManager {
 	t.Helper()
 	manager, err := newLinuxTUNNetworkManager(linuxTUNNetworkConfig{

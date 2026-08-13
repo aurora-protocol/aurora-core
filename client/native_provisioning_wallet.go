@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	nativeProvisioningWalletFormat         uint64 = 1
-	maximumNativeProvisioningWalletBytes          = 16 << 20
-	maximumNativeProvisioningWalletEntries        = 64
+	nativeProvisioningWalletFormat uint64 = 1
+	// MaximumNativeProvisioningWalletBytes bounds a complete wallet loaded into memory.
+	MaximumNativeProvisioningWalletBytes   = 16 << 20
+	maximumNativeProvisioningWalletEntries = 64
 
 	// NativeProvisioningWalletTargetUnused is the recommended unused credential reserve per relay bucket.
 	NativeProvisioningWalletTargetUnused = 8
@@ -96,7 +97,7 @@ func EncodeNativeProvisioningWallet(provisioning []NativeProvisioning) ([]byte, 
 	if err != nil {
 		return nil, fmt.Errorf("client: encode native provisioning wallet: %w", err)
 	}
-	if len(encoded) > maximumNativeProvisioningWalletBytes {
+	if len(encoded) > MaximumNativeProvisioningWalletBytes {
 		zeroNativeProvisioningBytes(encoded)
 		return nil, fmt.Errorf("client: native provisioning wallet exceeds size limit")
 	}
@@ -106,7 +107,7 @@ func EncodeNativeProvisioningWallet(provisioning []NativeProvisioning) ([]byte, 
 // ParseNativeProvisioningWallet validates and loads a canonical wallet. Expired
 // entries are discarded; malformed or unauthenticated entries reject the wallet.
 func ParseNativeProvisioningWallet(encoded []byte, now time.Time) (*NativeProvisioningWallet, error) {
-	if len(encoded) == 0 || len(encoded) > maximumNativeProvisioningWalletBytes {
+	if len(encoded) == 0 || len(encoded) > MaximumNativeProvisioningWalletBytes {
 		return nil, fmt.Errorf("client: native provisioning wallet size is invalid")
 	}
 	if now.IsZero() || now.Unix() < 0 {

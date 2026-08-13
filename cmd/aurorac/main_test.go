@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/handshake"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/session"
+	"github.com/aurora-protocol/aurora-core/transport"
 )
 
 func TestRunRequiresClientCommand(t *testing.T) {
@@ -52,6 +54,27 @@ func TestProxyRejectsPublicListenersBeforeProvisioning(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "loopback") {
 		t.Fatalf("public listener error = %s", stderr.String())
+	}
+}
+
+func TestParseProxyConfigValidatesProvisioningSource(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"single provisioning", []string{"--provisioning", "/private/provisioning.bin"}, true},
+		{"wallet provisioning", []string{"--provisioning-wallet", "/private/wallet.bin", "--wallet-state", "/private/wallet-state.bin"}, true},
+		{"both sources", []string{"--provisioning", "/private/provisioning.bin", "--provisioning-wallet", "/private/wallet.bin", "--wallet-state", "/private/wallet-state.bin"}, false},
+		{"wallet missing state", []string{"--provisioning-wallet", "/private/wallet.bin"}, false},
+		{"state without wallet", []string{"--provisioning", "/private/provisioning.bin", "--wallet-state", "/private/wallet-state.bin"}, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := parseProxyConfig(testCase.args, io.Discard)
+			if (err == nil) != testCase.want {
+				t.Fatalf("parse proxy config error = %v, want success=%t", err, testCase.want)
+			}
+		})
 	}
 }
 
@@ -193,6 +216,9 @@ func TestRunWithCarrierRecoveryUsesBoundedBackoff(t *testing.T) {
 	err := runWithCarrierRecovery(context.Background(), carrierRecoveryPolicy{
 		InitialDelay: 100 * time.Millisecond,
 		MaximumDelay: 250 * time.Millisecond,
+		Jitter: func(delay time.Duration) (time.Duration, error) {
+			return delay, nil
+		},
 		Wait: func(_ context.Context, delay time.Duration) error {
 			delays = append(delays, delay)
 			return nil
@@ -215,6 +241,37 @@ func TestRunWithCarrierRecoveryUsesBoundedBackoff(t *testing.T) {
 				t.Fatalf("recovery delays = %v, want %v", delays, want)
 			}
 		}
+	}
+}
+
+func TestRunWithCarrierRecoveryWaitsForJitteredDelay(t *testing.T) {
+	var jitterInputs []time.Duration
+	var waitDelays []time.Duration
+	attempts := 0
+	terminal := errors.New("terminal failure")
+	err := runWithCarrierRecovery(context.Background(), carrierRecoveryPolicy{
+		InitialDelay: 100 * time.Millisecond,
+		MaximumDelay: 200 * time.Millisecond,
+		Jitter: func(delay time.Duration) (time.Duration, error) {
+			jitterInputs = append(jitterInputs, delay)
+			return delay - 25*time.Millisecond, nil
+		},
+		Wait: func(_ context.Context, delay time.Duration) error {
+			waitDelays = append(waitDelays, delay)
+			return nil
+		},
+	}, func(context.Context) (bool, error) {
+		attempts++
+		if attempts == 1 {
+			return true, io.ErrUnexpectedEOF
+		}
+		return false, terminal
+	})
+	if !errors.Is(err, terminal) {
+		t.Fatalf("recovery error = %v, want terminal attempt error", err)
+	}
+	if len(jitterInputs) != 1 || jitterInputs[0] != 100*time.Millisecond || len(waitDelays) != 1 || waitDelays[0] != 75*time.Millisecond {
+		t.Fatalf("jitter inputs = %v, wait delays = %v", jitterInputs, waitDelays)
 	}
 }
 
@@ -249,6 +306,178 @@ func TestRunWithCarrierRecoveryStopsWhenCanceled(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("recovery did not stop after cancellation")
+	}
+}
+
+func TestRunWithCarrierRecoveryTreatsAttemptCancellationAsCleanShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := runWithCarrierRecovery(ctx, carrierRecoveryPolicy{}, func(context.Context) (bool, error) {
+		cancel()
+		return false, context.Canceled
+	})
+	if err != nil {
+		t.Fatalf("attempt cancellation error = %v, want nil", err)
+	}
+}
+
+func TestRunWithProvisioningWalletReservesFreshEntryForEachRecoveryAttempt(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	reserves := 0
+	attempts := 0
+	terminal := errors.New("terminal failure")
+	err := runWithProvisioningWallet(context.Background(), carrierRecoveryPolicy{
+		InitialDelay: time.Millisecond,
+		MaximumDelay: time.Millisecond,
+		Jitter:       func(delay time.Duration) (time.Duration, error) { return delay, nil },
+		Wait:         func(context.Context, time.Duration) error { return nil },
+	}, func(time.Time) (client.NativeProvisioningReservation, error) {
+		reserves++
+		return client.NativeProvisioningReservation{
+			SpentHintKey:         bytes.Repeat([]byte{byte(reserves)}, 48),
+			RelayBucketID:        bytes.Repeat([]byte{0x22}, 16),
+			AccessHintExpiryUnix: uint64(now.Add(time.Hour).Unix()),
+		}, nil
+	}, func(_ context.Context, reservation client.NativeProvisioningReservation) error {
+		attempts++
+		if reservation.AccessHintExpiryUnix == 0 || len(reservation.SpentHintKey) != 48 {
+			t.Fatalf("invalid wallet reservation: %+v", reservation)
+		}
+		if attempts == 1 {
+			return &componentFailure{name: encryptedCarrierComponent, err: fmt.Errorf("%w: %w", transport.ErrCarrierRead, io.ErrUnexpectedEOF)}
+		}
+		return terminal
+	})
+	if !errors.Is(err, terminal) {
+		t.Fatalf("wallet recovery error = %v, want terminal attempt error", err)
+	}
+	if reserves != 2 || attempts != 2 {
+		t.Fatalf("wallet reserves=%d attempts=%d, want 2 each", reserves, attempts)
+	}
+}
+
+func TestRunWithProvisioningWalletTreatsReservationFailureAsTerminal(t *testing.T) {
+	want := errors.New("wallet unavailable")
+	err := runWithProvisioningWallet(context.Background(), carrierRecoveryPolicy{}, func(time.Time) (client.NativeProvisioningReservation, error) {
+		return client.NativeProvisioningReservation{}, want
+	}, func(context.Context, client.NativeProvisioningReservation) error {
+		t.Fatal("attempt ran without a reservation")
+		return nil
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("wallet reservation error = %v, want %v", err, want)
+	}
+}
+
+func TestRunProxyComponentsClassifiesCarrierReadFailure(t *testing.T) {
+	application, err := session.NewApplication(session.Config{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		Write:           session.DirectionConfig{Direction: 0, Secret: bytes.Repeat([]byte{0x11}, 48), Key: bytes.Repeat([]byte{0x12}, 32), IV: bytes.Repeat([]byte{0x13}, 12)},
+		Read:            session.DirectionConfig{Direction: 1, Secret: bytes.Repeat([]byte{0x21}, 48), Key: bytes.Repeat([]byte{0x22}, 32), IV: bytes.Repeat([]byte{0x23}, 12)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	carrier, peer := net.Pipe()
+	t.Cleanup(func() { _ = peer.Close() })
+	established := &handshake.EstablishedSession{Application: application, ReadCarrier: carrier, WriteCarrier: carrier}
+	runtime, err := client.NewTCPProxyRuntime(application, client.TCPProxyRuntimeOptions{MaxFlows: 1, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1024})
+	if err != nil {
+		_ = established.Close()
+		t.Fatal(err)
+	}
+	httpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		_ = runtime.Close()
+		_ = established.Close()
+		t.Fatal(err)
+	}
+	socksListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		_ = httpListener.Close()
+		_ = runtime.Close()
+		_ = established.Close()
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- runProxyComponents(context.Background(), established, runtime, httpListener, socksListener)
+	}()
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if !isRecoverableCarrierFailure(err) {
+			t.Fatalf("carrier close error = %v, want recoverable carrier failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("proxy components did not stop after carrier loss")
+	}
+}
+
+func TestRunTUNComponentsClassifiesCarrierReadFailure(t *testing.T) {
+	application, err := session.NewApplication(session.Config{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		Write:           session.DirectionConfig{Direction: 0, Secret: bytes.Repeat([]byte{0x11}, 48), Key: bytes.Repeat([]byte{0x12}, 32), IV: bytes.Repeat([]byte{0x13}, 12)},
+		Read:            session.DirectionConfig{Direction: 1, Secret: bytes.Repeat([]byte{0x21}, 48), Key: bytes.Repeat([]byte{0x22}, 32), IV: bytes.Repeat([]byte{0x23}, 12)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := newTUNComponentDevice()
+	adapter, err := client.NewPacketAdapter(application, client.PacketAdapterOptions{MaxFlows: 1, MaxPacketBytes: 1500})
+	if err != nil {
+		_ = application.Close()
+		t.Fatal(err)
+	}
+	runtime, err := client.NewPacketTUNRuntime(adapter, device, client.PacketTUNRuntimeOptions{ReadBufferBytes: 1500})
+	if err != nil {
+		_ = application.Close()
+		t.Fatal(err)
+	}
+	carrier, peer := net.Pipe()
+	t.Cleanup(func() { _ = peer.Close() })
+	established := &handshake.EstablishedSession{Application: application, ReadCarrier: carrier, WriteCarrier: carrier}
+	result := make(chan error, 1)
+	go func() {
+		result <- runTUNComponents(context.Background(), established, runtime, nil)
+	}()
+	select {
+	case <-device.Started():
+	case <-time.After(time.Second):
+		t.Fatal("tunnel device loop did not start")
+	}
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if !isRecoverableCarrierFailure(err) {
+			t.Fatalf("carrier close error = %v, want recoverable carrier failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("tunnel components did not stop after carrier loss")
+	}
+	if !device.Closed() {
+		t.Fatal("tunnel device remained open after carrier loss")
+	}
+}
+
+func TestRecoverableCarrierFailureRequiresEncryptedCarrierComponent(t *testing.T) {
+	carrierFailure := &componentFailure{name: encryptedCarrierComponent, err: fmt.Errorf("%w: %w", transport.ErrCarrierRead, io.ErrUnexpectedEOF)}
+	if !isRecoverableCarrierFailure(carrierFailure) {
+		t.Fatal("carrier read failure was not recoverable")
+	}
+	listenerFailure := &componentFailure{name: "HTTP CONNECT listener", err: fmt.Errorf("%w: %w", transport.ErrCarrierRead, io.ErrUnexpectedEOF)}
+	if isRecoverableCarrierFailure(listenerFailure) {
+		t.Fatal("listener failure became recoverable")
+	}
+	malformedCarrierFailure := &componentFailure{name: encryptedCarrierComponent, err: transport.ErrEmptyRecord}
+	if isRecoverableCarrierFailure(malformedCarrierFailure) {
+		t.Fatal("malformed carrier record became recoverable")
 	}
 }
 

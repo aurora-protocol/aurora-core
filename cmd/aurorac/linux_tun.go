@@ -31,13 +31,15 @@ type linuxIPRunner func(context.Context, ...string) ([]byte, error)
 type linuxRelayAddressResolver func(context.Context, string) ([]netip.Addr, error)
 
 type tunConfig struct {
-	provisioningPath string
-	devicePath       string
-	interfaceName    string
-	mtu              int
-	ipv4             netip.Prefix
-	ipv6             netip.Prefix
-	issuerTimeout    time.Duration
+	provisioningPath       string
+	provisioningWalletPath string
+	walletStatePath        string
+	devicePath             string
+	interfaceName          string
+	mtu                    int
+	ipv4                   netip.Prefix
+	ipv6                   netip.Prefix
+	issuerTimeout          time.Duration
 }
 
 type linuxTUNNetworkConfig struct {
@@ -91,7 +93,9 @@ func parseTUNConfig(arguments []string, stderr io.Writer) (tunConfig, error) {
 	config := tunConfig{issuerTimeout: defaultIssuerRequestTimeout}
 	flags := flag.NewFlagSet("aurorac tun", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	flags.StringVar(&config.provisioningPath, "provisioning", "", "owner-only native provisioning file")
+	flags.StringVar(&config.provisioningPath, "provisioning", "", "owner-only one-time native provisioning file")
+	flags.StringVar(&config.provisioningWalletPath, "provisioning-wallet", "", "owner-only native provisioning wallet file")
+	flags.StringVar(&config.walletStatePath, "wallet-state", "", "owner-only local wallet reservation state file")
 	flags.StringVar(&config.devicePath, "tun-device", defaults.DevicePath, "Linux TUN device path")
 	flags.StringVar(&config.interfaceName, "tun-iface", defaults.InterfaceName, "Linux TUN interface name")
 	flags.IntVar(&config.mtu, "tun-mtu", defaults.MTU, "Linux TUN MTU")
@@ -104,8 +108,8 @@ func parseTUNConfig(arguments []string, stderr io.Writer) (tunConfig, error) {
 	if flags.NArg() != 0 {
 		return tunConfig{}, fmt.Errorf("client: unexpected tunnel command arguments")
 	}
-	if strings.TrimSpace(config.provisioningPath) == "" || strings.TrimSpace(config.provisioningPath) != config.provisioningPath {
-		return tunConfig{}, fmt.Errorf("client: provisioning file is required")
+	if err := validateProvisioningSource(config.provisioningPath, config.provisioningWalletPath, config.walletStatePath); err != nil {
+		return tunConfig{}, err
 	}
 	if !validLinuxInterfaceName(config.interfaceName) {
 		return tunConfig{}, fmt.Errorf("client: Linux tunnel interface name is invalid")

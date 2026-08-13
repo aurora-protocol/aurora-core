@@ -735,10 +735,20 @@ func (e *SocketEgress) closeFlow(flowID uint64, flow *socketFlow) {
 	flow.cancel()
 	flow.closeOnce.Do(func() {
 		if !isNilExitDependency(flow.conn) {
-			_ = flow.conn.Close()
+			if err := flow.conn.Close(); err != nil {
+				e.recordCloseFailure()
+			}
 		}
 	})
 	e.releaseFlow(flowID, flow)
+}
+
+func (e *SocketEgress) recordCloseFailure() {
+	e.mu.Lock()
+	if e.closed && e.closeErr == nil {
+		e.closeErr = ErrExitCloseFailed
+	}
+	e.mu.Unlock()
 }
 
 func (f *socketFlow) finish() {
@@ -856,7 +866,6 @@ func (e *SocketEgress) Close() error {
 	if e == nil {
 		return nil
 	}
-	e.cancel()
 	e.closeOnce.Do(func() {
 		e.mu.Lock()
 		e.closed = true
@@ -864,7 +873,7 @@ func (e *SocketEgress) Close() error {
 		e.flows = make(map[uint64]*socketFlow)
 		e.buffered = 0
 		e.mu.Unlock()
-		var closeErr error
+		e.cancel()
 		for _, flow := range flows {
 			if flow != nil {
 				flow.cancel()
@@ -872,8 +881,8 @@ func (e *SocketEgress) Close() error {
 			if flow != nil && !isNilExitDependency(flow.conn) {
 				var err error
 				flow.closeOnce.Do(func() { err = flow.conn.Close() })
-				if err != nil && closeErr == nil {
-					closeErr = ErrExitCloseFailed
+				if err != nil {
+					e.recordCloseFailure()
 				}
 			}
 		}
@@ -883,9 +892,6 @@ func (e *SocketEgress) Close() error {
 				flow.finish()
 			}
 		}
-		e.mu.Lock()
-		e.closeErr = closeErr
-		e.mu.Unlock()
 		close(e.done)
 	})
 	<-e.done

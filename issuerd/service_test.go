@@ -109,6 +109,65 @@ func TestServicePublishesIssuesVerifiesSpendsAndRedacts(t *testing.T) {
 	}
 }
 
+func TestServiceRetainsSpentTokenThroughTokenExpiry(t *testing.T) {
+	cache := &recordingIssuerRetentionCache{}
+	service, err := NewHarnessServiceWithOptions(200, ServiceOptions{SpentTokenCache: cache})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := service.IssueBlindRSA2048(IssueBlindRSA2048Request{
+		TokenNonce:            fill(0x46, 32),
+		RedemptionContextHash: fill(0x47, 48),
+		ExpiryUnix:            300,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SpendToken(proof); err != nil {
+		t.Fatal(err)
+	}
+	wantDeadline, err := admission.RetentionDeadline(proof.ExpiryUnix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.requireSingleRetention(t, wantDeadline, 200)
+}
+
+func TestVerifierServiceRetainsSpentTokenThroughReplayEpoch(t *testing.T) {
+	cache := &recordingIssuerRetentionCache{}
+	service, err := NewHarnessServiceWithOptions(200, ServiceOptions{SpentTokenCache: cache})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifierService := service.PublishIssuerMetadata().VerifierServices[0]
+	req := verifierHTTPTestRequest(t, service, verifierService)
+	response, err := service.VerifyIssuerVerifierRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Decision != registry.VerifierDecisionAccept {
+		t.Fatalf("verifier decision = 0x%x, want accept", response.Decision)
+	}
+	wantDeadline, err := admission.RetentionDeadline(req.ReplayEpochValidUntilUnix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.requireSingleRetention(t, wantDeadline, 200)
+}
+
+func TestHarnessServiceRejectsReplayCacheWithoutRetention(t *testing.T) {
+	service, err := NewHarnessServiceWithOptions(200, ServiceOptions{SpentTokenCache: legacyIssuerReplayCache{}})
+	if err == nil {
+		t.Fatal("NewHarnessServiceWithOptions accepted legacy replay cache")
+	}
+	if service != nil {
+		t.Fatal("NewHarnessServiceWithOptions returned a service with a legacy replay cache")
+	}
+	if !strings.Contains(err.Error(), "retention") {
+		t.Fatalf("legacy replay-cache error = %v", err)
+	}
+}
+
 func TestHarnessServiceValidityFollowsWallClockNow(t *testing.T) {
 	nowUnix := uint64(1_800_000_000)
 	service, err := NewHarnessService(nowUnix)
@@ -183,3 +242,55 @@ func fill(b byte, n int) []byte {
 	}
 	return out
 }
+
+type issuerRetentionCall struct {
+	deadline uint64
+	now      uint64
+}
+
+type recordingIssuerRetentionCache struct {
+	legacyCalls    int
+	retentionCalls []issuerRetentionCall
+	seen           map[string]uint64
+}
+
+func (c *recordingIssuerRetentionCache) InsertIfAbsent([]byte) (bool, error) {
+	c.legacyCalls++
+	return true, nil
+}
+
+func (c *recordingIssuerRetentionCache) InsertIfAbsentUntil(key []byte, deadline, now uint64) (bool, error) {
+	c.retentionCalls = append(c.retentionCalls, issuerRetentionCall{deadline: deadline, now: now})
+	if c.seen == nil {
+		c.seen = make(map[string]uint64)
+	}
+	if previous, ok := c.seen[string(key)]; ok && previous > now {
+		return false, nil
+	}
+	c.seen[string(key)] = deadline
+	return true, nil
+}
+
+func (c *recordingIssuerRetentionCache) Has(key []byte) bool {
+	_, ok := c.seen[string(key)]
+	return ok
+}
+
+func (c *recordingIssuerRetentionCache) requireSingleRetention(t *testing.T, wantDeadline, wantNow uint64) {
+	t.Helper()
+	if c.legacyCalls != 0 {
+		t.Fatalf("used %d legacy replay-cache inserts", c.legacyCalls)
+	}
+	if len(c.retentionCalls) != 1 {
+		t.Fatalf("retention calls = %d, want 1", len(c.retentionCalls))
+	}
+	if got := c.retentionCalls[0]; got.deadline != wantDeadline || got.now != wantNow {
+		t.Fatalf("retention call = %+v, want deadline=%d now=%d", got, wantDeadline, wantNow)
+	}
+}
+
+type legacyIssuerReplayCache struct{}
+
+func (legacyIssuerReplayCache) InsertIfAbsent([]byte) (bool, error) { return true, nil }
+
+func (legacyIssuerReplayCache) Has([]byte) bool { return false }

@@ -29,7 +29,7 @@ type Service struct {
 	authorityKeys          []protocol.AuthorityKeyRecord
 	blindRSAKey            *rsa.PrivateKey
 	blindRSATokenKeyDER    []byte
-	spentTokens            admission.ReplayCache
+	spentTokens            admission.RetentionReplayCache
 	verifierServiceSigners map[string]*ecdsa.PrivateKey
 	authorizedRelayKeys    map[uint64][]protocol.PublicKeyRecord
 	voprfVerifierAvailable bool
@@ -81,6 +81,14 @@ func NewHarnessService(nowUnix uint64) (*Service, error) {
 }
 
 func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service, error) {
+	spentTokens := opts.SpentTokenCache
+	if spentTokens == nil {
+		spentTokens = admission.NewMemoryReplayCache()
+	}
+	retentionCache, ok := spentTokens.(admission.RetentionReplayCache)
+	if !ok {
+		return nil, fmt.Errorf("issuerd: spent-token cache does not support retention")
+	}
 	authoritySigner, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -202,17 +210,13 @@ func NewHarnessServiceWithOptions(nowUnix uint64, opts ServiceOptions) (*Service
 		KeyStatus:      registry.AuthorityActive,
 		UsageFlags:     registry.UsageMaySignIssuerMetadata,
 	}}
-	spentTokens := opts.SpentTokenCache
-	if spentTokens == nil {
-		spentTokens = admission.NewMemoryReplayCache()
-	}
 	return &Service{
 		nowUnix:                nowUnix,
 		metadata:               metadata,
 		authorityKeys:          authorityKeys,
 		blindRSAKey:            blindRSAKey,
 		blindRSATokenKeyDER:    blindRSAKeyDER,
-		spentTokens:            spentTokens,
+		spentTokens:            retentionCache,
 		verifierServiceSigners: map[string]*ecdsa.PrivateKey{string(metadata.VerifierServices[0].ServiceID): serviceSigner},
 		authorizedRelayKeys:    make(map[uint64][]protocol.PublicKeyRecord),
 		voprfVerifierAvailable: true,
@@ -390,7 +394,11 @@ func (s *Service) SpendToken(proof protocol.AdmissionProof) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	inserted, err := s.spentTokens.InsertIfAbsent(spentKey)
+	retentionDeadline, err := admission.RetentionDeadline(proof.ExpiryUnix)
+	if err != nil {
+		return nil, fmt.Errorf("issuerd: token replay retention deadline: %w", err)
+	}
+	inserted, err := s.spentTokens.InsertIfAbsentUntil(spentKey, retentionDeadline, s.nowUnix)
 	if err != nil {
 		return nil, fmt.Errorf("issuerd: spent-token store failed: %w", err)
 	}
@@ -438,7 +446,11 @@ func (s *Service) VerifyIssuerVerifierRequest(req protocol.IssuerVerifierRequest
 		return protocol.IssuerVerifierResponse{}, err
 	}
 	decision := registry.VerifierDecisionAccept
-	inserted, err := s.spentTokens.InsertIfAbsent(req.TokenSpentKey)
+	retentionDeadline, err := admission.RetentionDeadline(req.ReplayEpochValidUntilUnix)
+	if err != nil {
+		return protocol.IssuerVerifierResponse{}, fmt.Errorf("issuerd: verifier replay retention deadline: %w", err)
+	}
+	inserted, err := s.spentTokens.InsertIfAbsentUntil(req.TokenSpentKey, retentionDeadline, s.nowUnix)
 	if err != nil {
 		return protocol.IssuerVerifierResponse{}, fmt.Errorf("issuerd: spent-token store failed: %w", err)
 	}

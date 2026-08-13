@@ -164,6 +164,69 @@ func TestPacketTUNRuntimeCloseUnblocksWrite(t *testing.T) {
 	}
 }
 
+func TestPacketTUNRuntimeCanceledFrameHandlingClosesBlockedDeviceWrite(t *testing.T) {
+	runtime, clientApplication, relayApplication, device := packetTUNRuntimeFixture(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	defer runtime.Close()
+
+	serveResult := make(chan error, 1)
+	go func() {
+		serveResult <- runtime.Serve(context.Background())
+	}()
+	device.Inject(packetAdapterTCPv4(t, [4]byte{10, 77, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, 100, 0, tcpFlagSYN, nil))
+
+	blocks, err := relayApplication.HandlePacket(context.Background(), time.Unix(1_700_000_000, 0), nextPacketTUNRuntime(t, clientApplication))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || len(blocks[0].Frames) != 1 || blocks[0].Frames[0].FrameType != registry.FrameFlowOpen {
+		t.Fatalf("captured SYN frames = %+v", blocks)
+	}
+	_ = device.NextWrite(t)
+
+	frame, err := protocol.NewStreamDataFrame(blocks[0].Frames[0].FlowID, []byte("response"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	device.writeStarted = make(chan struct{}, 1)
+	device.allowWrite = make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handleResult := make(chan error, 1)
+	go func() {
+		handleResult <- runtime.HandleFrameBlock(ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}})
+	}()
+	select {
+	case <-device.writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("packet TUN runtime did not begin a relay device write")
+	}
+
+	cancel()
+	select {
+	case err := <-handleResult:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("HandleFrameBlock cancellation = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		_ = runtime.Close()
+		<-handleResult
+		t.Fatal("packet TUN frame handling did not stop after cancellation")
+	}
+	if !device.Closed() {
+		t.Fatal("packet device remained open after canceled frame handling")
+	}
+	select {
+	case err := <-serveResult:
+		if err == nil {
+			t.Fatal("packet TUN runtime stopped without a terminal device error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("packet TUN runtime did not stop after canceled frame handling")
+	}
+}
+
 func TestPacketTUNRuntimeRejectsInvalidConfiguration(t *testing.T) {
 	application, relayApplication := packetAdapterApplications(t)
 	defer application.Close()

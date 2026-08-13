@@ -39,7 +39,7 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: aurorad <harness|serve> [options]")
+		fmt.Fprintln(stderr, "usage: aurorad <harness|serve|issuer> [options]")
 		return 2
 	}
 	switch args[0] {
@@ -47,8 +47,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runHarness(args[1:], stdout, stderr)
 	case "serve":
 		return runServe(args[1:], stdout, stderr)
+	case "issuer":
+		return runIssuer(args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "aurorad: unknown command %q; use harness or serve\n", args[0])
+		fmt.Fprintf(stderr, "aurorad: unknown command %q; use harness, serve, or issuer\n", args[0])
 		return 2
 	}
 }

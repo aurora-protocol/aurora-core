@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -65,11 +66,13 @@ func TestReadRestrictedProvisioningFileRejectsUnsafeInputs(t *testing.T) {
 	if string(encoded) != "private provisioning" {
 		t.Fatalf("restricted provisioning contents = %q", encoded)
 	}
-	if err := os.Chmod(path, 0o640); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readRestrictedProvisioningFile(path); err == nil {
-		t.Fatal("group-readable provisioning file was accepted")
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readRestrictedProvisioningFile(path); err == nil {
+			t.Fatal("group-readable provisioning file was accepted")
+		}
 	}
 	link := filepath.Join(directory, "provisioning-link.bin")
 	if err := os.Symlink(path, link); err != nil {

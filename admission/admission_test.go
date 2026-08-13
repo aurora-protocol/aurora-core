@@ -57,7 +57,7 @@ func TestAccessHintRejectsExpiredCredentialBeforeSpend(t *testing.T) {
 		t.Fatal(err)
 	}
 	cache := NewMemoryReplayCache()
-	if err := VerifyAndSpendAccessHintAt(cache, cred, binding, nonce, hint, 100); err == nil {
+	if err := VerifyAndSpendAccessHintAt(cache, cred, binding, nonce, hint, 100, 200); err == nil {
 		t.Fatalf("expired access hint accepted")
 	}
 	spentKey, err := ComputeSpentHintKey(cred)
@@ -67,9 +67,82 @@ func TestAccessHintRejectsExpiredCredentialBeforeSpend(t *testing.T) {
 	if cache.Has(spentKey) {
 		t.Fatalf("expired access hint was spent")
 	}
-	if err := VerifyAndSpendAccessHintAt(cache, cred, binding, nonce, hint, 99); err != nil {
+	if err := VerifyAndSpendAccessHintAt(cache, cred, binding, nonce, hint, 99, 200); err != nil {
 		t.Fatalf("valid access hint rejected: %v", err)
 	}
+}
+
+func TestVerifyAndSpendAccessHintUsesEpochRetention(t *testing.T) {
+	cred := AccessHintCredential{HintIssuerID: rep(0x41, 16), RelayBucketID: rep(0x42, 16), HintEpochID: 3, HintSelector: rep(0x43, 16), HintSecret: rep(0x44, 32), ExpiryUnix: 200, MaxUses: 1}
+	binding, nonce := rep(0x45, 48), rep(0x46, 32)
+	hint, err := ComputeAccessHint(cred, binding, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &recordingRetentionCache{}
+	if err := VerifyAndSpendAccessHintAt(cache, cred, binding, nonce, hint, 100, 300); err != nil {
+		t.Fatal(err)
+	}
+	if len(cache.deadlines) != 1 || cache.deadlines[0] != 900 {
+		t.Fatalf("hint retention deadlines = %v, want [900]", cache.deadlines)
+	}
+}
+
+func TestVerifyAndSpendAccessHintRejectsExpiredEpochBeforeSpend(t *testing.T) {
+	cred := AccessHintCredential{HintIssuerID: rep(0x41, 16), RelayBucketID: rep(0x42, 16), HintEpochID: 3, HintSelector: rep(0x43, 16), HintSecret: rep(0x44, 32), ExpiryUnix: 200, MaxUses: 1}
+	binding, nonce := rep(0x45, 48), rep(0x46, 32)
+	hint, err := ComputeAccessHint(cred, binding, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &recordingRetentionCache{}
+	if err := VerifyAndSpendAccessHintAt(cache, cred, binding, nonce, hint, 100, 100); err == nil {
+		t.Fatal("access hint accepted expired relay epoch")
+	}
+	if len(cache.deadlines) != 0 {
+		t.Fatalf("expired relay epoch mutated cache: %v", cache.deadlines)
+	}
+}
+
+func TestVerifyAndSpendReplayUsesMaximumRetention(t *testing.T) {
+	proof, replay, binding, contextHash := replayVerificationFixture(t)
+	proof.ExpiryUnix = 200
+	redemption, err := TokenRedemptionHash(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay.TokenRedemptionHash = redemption
+	replay.ReplayContextHash, err = ReplayContextHash(redemption, replay, 0x42, 0, binding, contextHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &recordingRetentionCache{}
+	if _, _, err := VerifyAndSpendReplay(ReplayVerificationInput{AdmissionProof: proof, ReplayProof: replay, RouteInstanceID: 0x42, HandshakeBindingContext: binding, AdmissionContextHash: contextHash, TokenSpentCache: cache, BootstrapDedupCache: cache, NowUnix: 100, AllowLabProofs: true, ReplayEpochValidUntilUnix: 300, RelayEpochValidUntilUnix: 400}); err != nil {
+		t.Fatal(err)
+	}
+	if len(cache.deadlines) != 2 || cache.deadlines[0] != 800 || cache.deadlines[1] != 1000 {
+		t.Fatalf("replay retention deadlines = %v", cache.deadlines)
+	}
+}
+
+func TestVerifyAndSpendReplayRejectsExpiredEpochBeforeSpend(t *testing.T) {
+	proof, replay, binding, contextHash := replayVerificationFixture(t)
+	cache := &recordingRetentionCache{}
+	if _, _, err := VerifyAndSpendReplay(ReplayVerificationInput{AdmissionProof: proof, ReplayProof: replay, RouteInstanceID: 0x42, HandshakeBindingContext: binding, AdmissionContextHash: contextHash, TokenSpentCache: cache, BootstrapDedupCache: cache, NowUnix: 100, AllowLabProofs: true, ReplayEpochValidUntilUnix: 100, RelayEpochValidUntilUnix: 200}); err == nil {
+		t.Fatal("replay accepted expired epoch")
+	}
+	if len(cache.deadlines) != 0 {
+		t.Fatalf("expired replay epoch mutated cache: %v", cache.deadlines)
+	}
+}
+
+type recordingRetentionCache struct{ deadlines []uint64 }
+
+func (c *recordingRetentionCache) InsertIfAbsent([]byte) (bool, error) { return true, nil }
+func (c *recordingRetentionCache) Has([]byte) bool                     { return false }
+func (c *recordingRetentionCache) InsertIfAbsentUntil(_ []byte, deadline, _ uint64) (bool, error) {
+	c.deadlines = append(c.deadlines, deadline)
+	return true, nil
 }
 
 func TestAccessHintRequiresOneMaxUse(t *testing.T) {
@@ -228,16 +301,18 @@ func TestVerifyAndSpendReplayRejectsSecondSpendWithChangedReplayNonce(t *testing
 	tokenCache := NewMemoryReplayCache()
 	bootstrapCache := NewMemoryReplayCache()
 	if _, _, err := VerifyAndSpendReplay(ReplayVerificationInput{
-		AdmissionProof:          proof,
-		ReplayProof:             replay,
-		RouteInstanceID:         0x42,
-		HopIndex:                0,
-		HandshakeBindingContext: handshakeBinding,
-		AdmissionContextHash:    admissionContext,
-		TokenSpentCache:         tokenCache,
-		BootstrapDedupCache:     bootstrapCache,
-		NowUnix:                 100,
-		AllowLabProofs:          true,
+		AdmissionProof:            proof,
+		ReplayProof:               replay,
+		RouteInstanceID:           0x42,
+		HopIndex:                  0,
+		HandshakeBindingContext:   handshakeBinding,
+		AdmissionContextHash:      admissionContext,
+		TokenSpentCache:           tokenCache,
+		BootstrapDedupCache:       bootstrapCache,
+		NowUnix:                   100,
+		ReplayEpochValidUntilUnix: proof.ExpiryUnix,
+		RelayEpochValidUntilUnix:  proof.ExpiryUnix,
+		AllowLabProofs:            true,
 	}); err != nil {
 		t.Fatalf("first replay spend failed: %v", err)
 	}
@@ -247,16 +322,18 @@ func TestVerifyAndSpendReplayRejectsSecondSpendWithChangedReplayNonce(t *testing
 		t.Fatal(err)
 	}
 	if _, _, err := VerifyAndSpendReplay(ReplayVerificationInput{
-		AdmissionProof:          proof,
-		ReplayProof:             replay,
-		RouteInstanceID:         0x42,
-		HopIndex:                0,
-		HandshakeBindingContext: handshakeBinding,
-		AdmissionContextHash:    admissionContext,
-		TokenSpentCache:         tokenCache,
-		BootstrapDedupCache:     NewMemoryReplayCache(),
-		NowUnix:                 100,
-		AllowLabProofs:          true,
+		AdmissionProof:            proof,
+		ReplayProof:               replay,
+		RouteInstanceID:           0x42,
+		HopIndex:                  0,
+		HandshakeBindingContext:   handshakeBinding,
+		AdmissionContextHash:      admissionContext,
+		TokenSpentCache:           tokenCache,
+		BootstrapDedupCache:       NewMemoryReplayCache(),
+		NowUnix:                   100,
+		ReplayEpochValidUntilUnix: proof.ExpiryUnix,
+		RelayEpochValidUntilUnix:  proof.ExpiryUnix,
+		AllowLabProofs:            true,
 	}); err == nil {
 		t.Fatalf("expected changed replay nonce to fail primary token-spent cache")
 	}

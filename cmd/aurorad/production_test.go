@@ -47,6 +47,20 @@ func TestNewProductionServiceLoadsVerifiedDeploymentAndPrivateDependencies(t *te
 	closeProductionCaches(caches)
 }
 
+func TestNewProductionServiceUsesRetentionReplayCaches(t *testing.T) {
+	service, caches, err := newProductionService(newProductionCommandFixture(t))
+	if err != nil || service == nil {
+		closeProductionCaches(caches)
+		t.Fatalf("new production service: service=%v err=%v", service, err)
+	}
+	defer closeProductionCaches(caches)
+	for index, cache := range caches {
+		if _, ok := cache.(*admission.RetentionFileReplayCache); !ok {
+			t.Fatalf("production cache %d type = %T, want retention cache", index, cache)
+		}
+	}
+}
+
 func TestZeroMLDSA65PrivateKeyClearsPrivateMaterial(t *testing.T) {
 	_, private, err := mldsa65.GenerateKey(rand.Reader)
 	if err != nil {

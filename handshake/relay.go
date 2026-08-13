@@ -89,7 +89,7 @@ func (d *RelayDriver) Begin(ctx context.Context, binding FirstHopBinding, input 
 	if err := contextError(ctx); err != nil {
 		return nil, protocol.CoverPrelude1{}, err
 	}
-	if err := admission.VerifyAndSpendAccessHintAt(d.hintSpentCache, credential, binding.HandshakeBindingContext, prelude0.ClientNonce, prelude0.AccessHint, nowUnix); err != nil {
+	if err := admission.VerifyAndSpendAccessHintAt(d.hintSpentCache, credential, binding.HandshakeBindingContext, prelude0.ClientNonce, prelude0.AccessHint, nowUnix, d.deployment.Descriptor().EpochValidUntilUnix); err != nil {
 		return nil, protocol.CoverPrelude1{}, err
 	}
 
@@ -283,16 +283,18 @@ func (h *RelayHandshake) Finish(ctx context.Context, capsule1Record []byte, nowU
 		return nil, nil, protocol.PolicyAccept{}, err
 	}
 	if _, _, err := admission.VerifyAndSpendReplay(admission.ReplayVerificationInput{
-		AdmissionProof:          capsule1.AdmissionProof,
-		ReplayProof:             capsule1.ReplayProof,
-		RouteInstanceID:         h.routeInstanceID,
-		HopIndex:                0,
-		HandshakeBindingContext: h.handshakeBinding,
-		AdmissionContextHash:    admissionContextHash,
-		TokenSpentCache:         driver.tokenSpentCache,
-		BootstrapDedupCache:     driver.bootstrapCache,
-		NowUnix:                 nowUnix,
-		AllowLabProofs:          false,
+		AdmissionProof:            capsule1.AdmissionProof,
+		ReplayProof:               capsule1.ReplayProof,
+		RouteInstanceID:           h.routeInstanceID,
+		HopIndex:                  0,
+		HandshakeBindingContext:   h.handshakeBinding,
+		AdmissionContextHash:      admissionContextHash,
+		TokenSpentCache:           driver.tokenSpentCache,
+		BootstrapDedupCache:       driver.bootstrapCache,
+		NowUnix:                   nowUnix,
+		ReplayEpochValidUntilUnix: descriptor.ReplayEpochValidUntilUnix,
+		RelayEpochValidUntilUnix:  descriptor.EpochValidUntilUnix,
+		AllowLabProofs:            false,
 	}); err != nil {
 		return nil, nil, protocol.PolicyAccept{}, err
 	}

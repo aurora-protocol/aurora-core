@@ -73,9 +73,9 @@ func addRoutePreludeWrapReplayCase(report *SplitRouteConformanceReport) error {
 	}
 	accessCache := admission.NewMemoryReplayCache()
 	wrapCache := NewWrapNonceReplayCache()
-	opened, binding, openErr := OpenAndVerifyPrivatePreludeWithWrapNonceCache(accessCache, wrapCache, env, envelope, cred, 100)
+	opened, binding, openErr := OpenAndVerifyPrivatePreludeWithWrapNonceCache(accessCache, wrapCache, env, envelope, cred, 100, 300)
 	secondAccessCache := admission.NewMemoryReplayCache()
-	_, _, duplicateErr := OpenAndVerifyPrivatePreludeWithWrapNonceCache(secondAccessCache, wrapCache, env, envelope, cred, 100)
+	_, _, duplicateErr := OpenAndVerifyPrivatePreludeWithWrapNonceCache(secondAccessCache, wrapCache, env, envelope, cred, 100, 300)
 	spentKey, spentErr := admission.ComputeSpentHintKey(cred)
 	passed := openErr == nil &&
 		spentErr == nil &&

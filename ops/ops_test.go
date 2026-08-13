@@ -95,6 +95,7 @@ func TestBuildIssuerVerifierRequestRecomputesTokenSpentKey(t *testing.T) {
 		RouteInstanceID:           77,
 		HopIndex:                  1,
 		ReplayEpochValidUntilUnix: 800,
+		RelayEpochValidUntilUnix:  900,
 		HandshakeBindingContext:   handshakeBinding,
 		AdmissionContextHash:      admissionContextHash,
 		ChallengeDigest:           rb(0x32, 32),
@@ -125,6 +126,7 @@ func TestBuildIssuerVerifierRequestRecomputesTokenSpentKey(t *testing.T) {
 		RouteInstanceID:           77,
 		HopIndex:                  1,
 		ReplayEpochValidUntilUnix: 800,
+		RelayEpochValidUntilUnix:  900,
 		HandshakeBindingContext:   handshakeBinding,
 		AdmissionContextHash:      admissionContextHash,
 		ChallengeDigest:           rb(0x32, 32),
@@ -137,6 +139,38 @@ func TestBuildIssuerVerifierRequestRecomputesTokenSpentKey(t *testing.T) {
 		RequestAuthImplemented:    true,
 	}); err == nil {
 		t.Fatalf("verifier request built from mismatched ReplayProof")
+	}
+}
+
+func TestBuildIssuerVerifierRequestUsesRelayEpochRetention(t *testing.T) {
+	service := verifierServiceRecord()
+	proof, replay, admissionContextHash, handshakeBinding := verifierProofReplay(t)
+	cache := &retentionRecordingCache{}
+	if _, _, err := BuildIssuerVerifierRequest(IssuerVerifierRequestInput{
+		Service:                   service,
+		AdmissionProof:            proof,
+		ReplayProof:               replay,
+		IssuerMetadataHash:        rb(0x30, 48),
+		RelayDescriptorHash:       rb(0x31, 48),
+		RouteInstanceID:           77,
+		HopIndex:                  1,
+		ReplayEpochValidUntilUnix: 800,
+		RelayEpochValidUntilUnix:  900,
+		HandshakeBindingContext:   handshakeBinding,
+		AdmissionContextHash:      admissionContextHash,
+		ChallengeDigest:           rb(0x32, 32),
+		AuthenticatorInputHash:    rb(0x33, 48),
+		TokenSpentCache:           cache,
+		BootstrapDedupCache:       cache,
+		RequestNonce:              rb(0x34, 32),
+		RequestTimeUnix:           100,
+		NowUnix:                   100,
+		RequestAuthImplemented:    true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(cache.deadlines) != 2 || cache.deadlines[0] != 1100 || cache.deadlines[1] != 1500 {
+		t.Fatalf("retention deadlines = %v, want [1100 1500]", cache.deadlines)
 	}
 }
 
@@ -164,6 +198,7 @@ func TestBuildIssuerVerifierRequestRecomputesAuthenticatorFields(t *testing.T) {
 		RouteInstanceID:           77,
 		HopIndex:                  1,
 		ReplayEpochValidUntilUnix: 800,
+		RelayEpochValidUntilUnix:  900,
 		HandshakeBindingContext:   handshakeBinding,
 		AdmissionContextHash:      admissionContextHash,
 		ChallengeDigest:           rb(0xee, 32),
@@ -200,6 +235,7 @@ func TestBuildIssuerVerifierRequestRejectsLocalReplayWithChangedNonce(t *testing
 		RouteInstanceID:           77,
 		HopIndex:                  1,
 		ReplayEpochValidUntilUnix: 800,
+		RelayEpochValidUntilUnix:  900,
 		HandshakeBindingContext:   handshakeBinding,
 		AdmissionContextHash:      admissionContextHash,
 		ChallengeDigest:           rb(0x32, 32),
@@ -253,6 +289,7 @@ func TestBuildIssuerVerifierRequestDoesNotSpendOnMetadataMismatch(t *testing.T) 
 		RouteInstanceID:           77,
 		HopIndex:                  1,
 		ReplayEpochValidUntilUnix: 800,
+		RelayEpochValidUntilUnix:  900,
 		HandshakeBindingContext:   handshakeBinding,
 		AdmissionContextHash:      admissionContextHash,
 		ChallengeDigest:           rb(0x32, 32),
@@ -301,6 +338,7 @@ func TestBuildIssuerVerifierRequestRejectsStructurallyInvalidAdmissionProof(t *t
 				RouteInstanceID:           77,
 				HopIndex:                  1,
 				ReplayEpochValidUntilUnix: 800,
+				RelayEpochValidUntilUnix:  900,
 				HandshakeBindingContext:   handshakeBinding,
 				AdmissionContextHash:      admissionContextHash,
 				ChallengeDigest:           rb(0x32, 32),
@@ -331,6 +369,7 @@ func TestValidateIssuerVerifierResponseRequiresFreshMatchingAccept(t *testing.T)
 		RouteInstanceID:           77,
 		HopIndex:                  1,
 		ReplayEpochValidUntilUnix: 800,
+		RelayEpochValidUntilUnix:  900,
 		HandshakeBindingContext:   handshakeBinding,
 		AdmissionContextHash:      admissionContextHash,
 		ChallengeDigest:           rb(0x32, 32),
@@ -397,6 +436,7 @@ func TestValidateIssuerVerifierResponseRejectsUnusableService(t *testing.T) {
 		RouteInstanceID:           77,
 		HopIndex:                  1,
 		ReplayEpochValidUntilUnix: 800,
+		RelayEpochValidUntilUnix:  900,
 		HandshakeBindingContext:   handshakeBinding,
 		AdmissionContextHash:      admissionContextHash,
 		ChallengeDigest:           rb(0x32, 32),
@@ -440,6 +480,7 @@ func TestValidateIssuerVerifierResponseRejectsInvalidServiceSignature(t *testing
 		RouteInstanceID:           77,
 		HopIndex:                  1,
 		ReplayEpochValidUntilUnix: 800,
+		RelayEpochValidUntilUnix:  900,
 		HandshakeBindingContext:   handshakeBinding,
 		AdmissionContextHash:      admissionContextHash,
 		ChallengeDigest:           rb(0x32, 32),
@@ -482,6 +523,7 @@ func TestVerifyIssuerVerifierServiceMapsTransportOutageToCoverNeutralFailure(t *
 			RouteInstanceID:           77,
 			HopIndex:                  1,
 			ReplayEpochValidUntilUnix: 800,
+			RelayEpochValidUntilUnix:  900,
 			HandshakeBindingContext:   handshakeBinding,
 			AdmissionContextHash:      admissionContextHash,
 			ChallengeDigest:           rb(0x32, 32),
@@ -557,6 +599,7 @@ func verifierServiceVerificationRequest(t *testing.T, service protocol.IssuerVer
 		RouteInstanceID:           77,
 		HopIndex:                  1,
 		ReplayEpochValidUntilUnix: 800,
+		RelayEpochValidUntilUnix:  900,
 		HandshakeBindingContext:   handshakeBinding,
 		AdmissionContextHash:      admissionContextHash,
 		ChallengeDigest:           rb(0x32, 32),
@@ -722,6 +765,15 @@ func verifierProofReplay(t *testing.T) (protocol.AdmissionProof, protocol.Replay
 	}
 	replay.ReplayContextHash = replayHash
 	return proof, replay, admissionContextHash, handshakeBinding
+}
+
+type retentionRecordingCache struct{ deadlines []uint64 }
+
+func (*retentionRecordingCache) InsertIfAbsent([]byte) (bool, error) { return true, nil }
+func (*retentionRecordingCache) Has([]byte) bool                     { return false }
+func (c *retentionRecordingCache) InsertIfAbsentUntil(_ []byte, deadline, _ uint64) (bool, error) {
+	c.deadlines = append(c.deadlines, deadline)
+	return true, nil
 }
 
 func attachVerifierServiceSigningKey(t *testing.T, service *protocol.IssuerVerifierServiceRecord) *ecdsa.PrivateKey {

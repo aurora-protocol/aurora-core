@@ -277,10 +277,10 @@ func newProductionService(config productionConfig) (*server.ProductionFirstHopSe
 	driver, err := handshake.NewRelayDriver(handshake.RelayDriverConfig{
 		Deployment:        deployment,
 		HintResolver:      hintResolver,
-		HintSpentCache:    caches[0].(*admission.FileReplayCache),
+		HintSpentCache:    caches[0].(*admission.RetentionFileReplayCache),
 		AdmissionVerifier: admissionVerifier,
-		TokenSpentCache:   caches[1].(*admission.FileReplayCache),
-		BootstrapCache:    caches[2].(*admission.FileReplayCache),
+		TokenSpentCache:   caches[1].(*admission.RetentionFileReplayCache),
+		BootstrapCache:    caches[2].(*admission.RetentionFileReplayCache),
 		ClassicalSigner:   classicalSigner,
 		PQSigner:          pqSigner,
 		PolicySelector:    policy,
@@ -423,6 +423,10 @@ func openProductionCaches(config productionConfig) ([]io.Closer, error) {
 	if err := validateProductionCachePaths(paths); err != nil {
 		return nil, err
 	}
+	nowUnix := time.Now().Unix()
+	if nowUnix <= 0 {
+		return nil, fmt.Errorf("server: current time is invalid for replay cache retention")
+	}
 	caches := make([]io.Closer, 0, len(paths))
 	for _, path := range paths {
 		clean := filepath.Clean(path)
@@ -431,16 +435,11 @@ func openProductionCaches(config productionConfig) ([]io.Closer, error) {
 			closeProductionCaches(caches)
 			return nil, err
 		}
-		cache, err := admission.NewFileReplayCacheAt(directory, filepath.Base(clean))
-		closeDirectoryErr := directory.Close()
+		cache, err := admission.NewRetentionFileReplayCacheAt(directory, filepath.Base(clean), uint64(nowUnix))
 		if err != nil {
+			_ = directory.Close()
 			closeProductionCaches(caches)
 			return nil, fmt.Errorf("server: open durable replay cache: %w", err)
-		}
-		if closeDirectoryErr != nil {
-			_ = cache.Close()
-			closeProductionCaches(caches)
-			return nil, fmt.Errorf("server: close durable replay cache directory: %w", closeDirectoryErr)
 		}
 		caches = append(caches, cache)
 	}

@@ -240,7 +240,7 @@ func OpenPrivatePrelude(env EnvelopeInput, envelope protocol.RoutePreludeEnvelop
 	return private, nil
 }
 
-func OpenAndVerifyPrivatePrelude(cache admission.ReplayCache, env EnvelopeInput, envelope protocol.RoutePreludeEnvelope, cred admission.AccessHintCredential, nowUnix uint64) (PrivatePrelude, []byte, error) {
+func OpenAndVerifyPrivatePrelude(cache admission.ReplayCache, env EnvelopeInput, envelope protocol.RoutePreludeEnvelope, cred admission.AccessHintCredential, nowUnix, relayEpochValidUntilUnix uint64) (PrivatePrelude, []byte, error) {
 	private, err := OpenPrivatePrelude(env, envelope)
 	if err != nil {
 		return PrivatePrelude{}, nil, err
@@ -257,13 +257,13 @@ func OpenAndVerifyPrivatePrelude(cache admission.ReplayCache, env EnvelopeInput,
 	if err != nil {
 		return PrivatePrelude{}, nil, err
 	}
-	if err := admission.VerifyAndSpendAccessHintAt(cache, cred, binding, private.ClientNonceForThisHop, private.AccessHint, nowUnix); err != nil {
+	if err := admission.VerifyAndSpendAccessHintAt(cache, cred, binding, private.ClientNonceForThisHop, private.AccessHint, nowUnix, relayEpochValidUntilUnix); err != nil {
 		return PrivatePrelude{}, nil, fmt.Errorf("route: access hint verification failed: %w", err)
 	}
 	return private, binding, nil
 }
 
-func OpenAndVerifyPrivatePreludeWithWrapNonceCache(accessHintCache admission.ReplayCache, wrapNonceCache *WrapNonceReplayCache, env EnvelopeInput, envelope protocol.RoutePreludeEnvelope, cred admission.AccessHintCredential, nowUnix uint64) (PrivatePrelude, []byte, error) {
+func OpenAndVerifyPrivatePreludeWithWrapNonceCache(accessHintCache admission.ReplayCache, wrapNonceCache *WrapNonceReplayCache, env EnvelopeInput, envelope protocol.RoutePreludeEnvelope, cred admission.AccessHintCredential, nowUnix, relayEpochValidUntilUnix uint64) (PrivatePrelude, []byte, error) {
 	private, err := OpenPrivatePrelude(env, envelope)
 	if err != nil {
 		return PrivatePrelude{}, nil, err
@@ -288,7 +288,7 @@ func OpenAndVerifyPrivatePreludeWithWrapNonceCache(accessHintCache admission.Rep
 	if err != nil {
 		return PrivatePrelude{}, nil, err
 	}
-	if err := admission.VerifyAndSpendAccessHintAt(accessHintCache, cred, binding, private.ClientNonceForThisHop, private.AccessHint, nowUnix); err != nil {
+	if err := admission.VerifyAndSpendAccessHintAt(accessHintCache, cred, binding, private.ClientNonceForThisHop, private.AccessHint, nowUnix, relayEpochValidUntilUnix); err != nil {
 		return PrivatePrelude{}, nil, fmt.Errorf("route: access hint verification failed: %w", err)
 	}
 	return private, binding, nil

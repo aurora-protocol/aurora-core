@@ -236,7 +236,7 @@ func TestOpenAndVerifyPrivatePreludeSpendsAccessHintWithRouteHopBinding(t *testi
 		t.Fatal(err)
 	}
 	cache := admission.NewMemoryReplayCache()
-	opened, openedBinding, err := OpenAndVerifyPrivatePrelude(cache, env, envelope, cred, 100)
+	opened, openedBinding, err := OpenAndVerifyPrivatePrelude(cache, env, envelope, cred, 100, 300)
 	if err != nil {
 		t.Fatalf("valid route prelude was rejected: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestOpenAndVerifyPrivatePreludeSpendsAccessHintWithRouteHopBinding(t *testi
 	if !cache.Has(spentKey) {
 		t.Fatalf("route AccessHint was not spent")
 	}
-	if _, _, err := OpenAndVerifyPrivatePrelude(cache, env, envelope, cred, 100); err == nil {
+	if _, _, err := OpenAndVerifyPrivatePrelude(cache, env, envelope, cred, 100, 300); err == nil {
 		t.Fatalf("replayed route AccessHint was accepted")
 	}
 }
@@ -285,11 +285,11 @@ func TestOpenAndVerifyPrivatePreludeRejectsDuplicateWrapNonceBeforeAccessHintSpe
 		t.Fatal(err)
 	}
 	wrapCache := NewWrapNonceReplayCache()
-	if _, _, err := OpenAndVerifyPrivatePreludeWithWrapNonceCache(admission.NewMemoryReplayCache(), wrapCache, env, envelope, cred, 100); err != nil {
+	if _, _, err := OpenAndVerifyPrivatePreludeWithWrapNonceCache(admission.NewMemoryReplayCache(), wrapCache, env, envelope, cred, 100, 300); err != nil {
 		t.Fatalf("valid route prelude was rejected: %v", err)
 	}
 	secondAccessCache := admission.NewMemoryReplayCache()
-	if _, _, err := OpenAndVerifyPrivatePreludeWithWrapNonceCache(secondAccessCache, wrapCache, env, envelope, cred, 100); err == nil {
+	if _, _, err := OpenAndVerifyPrivatePreludeWithWrapNonceCache(secondAccessCache, wrapCache, env, envelope, cred, 100, 300); err == nil {
 		t.Fatalf("duplicate route wrap nonce was accepted")
 	}
 	spentKey, err := admission.ComputeSpentHintKey(cred)

@@ -5,24 +5,59 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 )
 
+const replayCacheRetentionGraceSeconds uint64 = 10 * 60
+
 type ReplayCache interface {
 	InsertIfAbsent(key []byte) (bool, error)
 	Has(key []byte) bool
 }
 
+type RetentionReplayCache interface {
+	InsertIfAbsentUntil(key []byte, retainUntilUnix, nowUnix uint64) (bool, error)
+}
+
+func InsertIfAbsentRetained(cache ReplayCache, key []byte, retainUntilUnix, nowUnix uint64) (bool, error) {
+	retained, ok := cache.(RetentionReplayCache)
+	if !ok {
+		return false, fmt.Errorf("admission: replay cache does not support retention")
+	}
+	return retained.InsertIfAbsentUntil(key, retainUntilUnix, nowUnix)
+}
+
+func RetentionDeadline(baseUnix uint64) (uint64, error) {
+	if baseUnix == 0 || baseUnix > math.MaxUint64-replayCacheRetentionGraceSeconds {
+		return 0, fmt.Errorf("admission: replay-cache retention deadline is invalid")
+	}
+	return baseUnix + replayCacheRetentionGraceSeconds, nil
+}
+
+func MaximumRetentionDeadline(values ...uint64) (uint64, error) {
+	var latest uint64
+	for _, value := range values {
+		if value == 0 {
+			return 0, fmt.Errorf("admission: replay-cache retention time is invalid")
+		}
+		if value > latest {
+			latest = value
+		}
+	}
+	return RetentionDeadline(latest)
+}
+
 type MemoryReplayCache struct {
 	mu   sync.Mutex
-	seen map[string]struct{}
+	seen map[string]uint64
 }
 
 func NewMemoryReplayCache() *MemoryReplayCache {
-	return &MemoryReplayCache{seen: make(map[string]struct{})}
+	return &MemoryReplayCache{seen: make(map[string]uint64)}
 }
 
 func (*MemoryReplayCache) Durable() bool { return false }
@@ -37,7 +72,27 @@ func (c *MemoryReplayCache) InsertIfAbsent(key []byte) (bool, error) {
 	if _, ok := c.seen[k]; ok {
 		return false, nil
 	}
-	c.seen[k] = struct{}{}
+	c.seen[k] = 0
+	return true, nil
+}
+
+func (c *MemoryReplayCache) InsertIfAbsentUntil(key []byte, retainUntilUnix, nowUnix uint64) (bool, error) {
+	if c == nil {
+		return false, fmt.Errorf("admission: missing replay cache")
+	}
+	if retainUntilUnix == 0 || nowUnix == 0 || retainUntilUnix <= nowUnix {
+		return false, fmt.Errorf("admission: replay cache retention window is invalid")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	k := string(key)
+	if previous, ok := c.seen[k]; ok {
+		if previous == 0 || previous > nowUnix {
+			return false, nil
+		}
+		delete(c.seen, k)
+	}
+	c.seen[k] = retainUntilUnix
 	return true, nil
 }
 

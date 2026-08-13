@@ -168,6 +168,24 @@ func TestProductionBlindRSAServiceAuthorityPublicationIsDefensive(t *testing.T) 
 	}
 }
 
+func TestProductionBlindRSAServiceDisallowsUntrustedCarrierIssuance(t *testing.T) {
+	options, _ := productionBlindRSAServiceOptionsForTest(t, false)
+	production, err := NewProductionBlindRSAService(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if production.AllowsUntrustedCarrierIssuance() {
+		t.Fatal("production issuer allows untrusted carrier issuance")
+	}
+	harness, err := NewHarnessService(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !harness.AllowsUntrustedCarrierIssuance() {
+		t.Fatal("harness issuer does not allow its carrier issuance checks")
+	}
+}
+
 func productionBlindRSAServiceOptionsForTest(t *testing.T, includeVOPRF bool) (ProductionBlindRSAServiceOptions, *uint64) {
 	t.Helper()
 	harness, err := NewHarnessService(200)

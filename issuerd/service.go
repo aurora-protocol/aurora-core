@@ -723,6 +723,12 @@ func (s *Service) currentUnix() uint64 {
 	return s.nowUnix
 }
 
+// AllowsUntrustedCarrierIssuance reports whether this service may process the
+// unauthenticated cover-carrier issue and spend operations used by the harness.
+func (s *Service) AllowsUntrustedCarrierIssuance() bool {
+	return s != nil && s.allowHarnessHTTPEndpoints
+}
+
 func (s *Service) RedactedOperationalLog(input LogInput) string {
 	admissionProof, _ := protocol.Encode(input.AdmissionProof)
 	fields := []logging.Field{

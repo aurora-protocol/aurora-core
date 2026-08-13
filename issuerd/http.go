@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,10 @@ import (
 	auroratrust "github.com/aurora-protocol/aurora-core/trust"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
+
+const maximumJSONRequestBodyBytes int64 = 1 << 20
+
+var errJSONRequestBodyTooLarge = errors.New("issuerd: JSON request body exceeds limit")
 
 type HTTPReadinessReport struct {
 	Passed                     bool
@@ -465,13 +470,35 @@ func hasMutualTLSClientAuth(r *http.Request) bool {
 }
 
 func decodeJSONBody(r *http.Request, out any) error {
-	decoder := json.NewDecoder(r.Body)
+	if r == nil || r.Body == nil {
+		return fmt.Errorf("issuerd: missing JSON request body")
+	}
+	if r.ContentLength > maximumJSONRequestBodyBytes {
+		return errJSONRequestBodyTooLarge
+	}
+	limitedBody := &io.LimitedReader{
+		R: r.Body,
+		N: maximumJSONRequestBodyBytes + 1,
+	}
+	decoder := json.NewDecoder(limitedBody)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(out); err != nil {
+		if limitedBody.N == 0 {
+			return errJSONRequestBodyTooLarge
+		}
 		return err
 	}
+	if limitedBody.N == 0 {
+		return errJSONRequestBodyTooLarge
+	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if limitedBody.N == 0 {
+			return errJSONRequestBodyTooLarge
+		}
 		return fmt.Errorf("issuerd: trailing JSON content")
+	}
+	if limitedBody.N == 0 {
+		return errJSONRequestBodyTooLarge
 	}
 	return nil
 }

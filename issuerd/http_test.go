@@ -167,6 +167,53 @@ func TestHTTPDaemonRejectsTrailingJSON(t *testing.T) {
 	}
 }
 
+func TestHTTPDaemonRejectsOversizedJSONBody(t *testing.T) {
+	service, err := NewHarnessService(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHTTPHandler(service)
+	body := mustJSON(t, IssueRequest{
+		TokenNonce:            hex.EncodeToString(fill(0x44, 32)),
+		RedemptionContextHash: hex.EncodeToString(fill(0x45, 48)),
+		ExpiryUnix:            300,
+	})
+	body = append(body, []byte(strings.Repeat(" ", 1<<20))...)
+
+	resp := serveHTTP(t, handler, http.MethodPost, "/blind-rsa/issue", body)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("oversized JSON response = %d %s", resp.Code, resp.Body.String())
+	}
+	if strings.Contains(resp.Body.String(), "token_nonce") {
+		t.Fatalf("oversized JSON failure leaked request details: %s", resp.Body.String())
+	}
+}
+
+func TestHTTPDaemonRejectsOversizedStreamingJSONBody(t *testing.T) {
+	service, err := NewHarnessService(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHTTPHandler(service)
+	body := mustJSON(t, IssueRequest{
+		TokenNonce:            hex.EncodeToString(fill(0x44, 32)),
+		RedemptionContextHash: hex.EncodeToString(fill(0x45, 48)),
+		ExpiryUnix:            300,
+	})
+	body = append(body, []byte(strings.Repeat(" ", 1<<20))...)
+	request := httptest.NewRequest(http.MethodPost, "/blind-rsa/issue", bytes.NewReader(body))
+	request.ContentLength = -1
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("oversized streaming JSON response = %d %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "token_nonce") {
+		t.Fatalf("oversized streaming JSON failure leaked request details: %s", response.Body.String())
+	}
+}
+
 func TestVerifierHTTPHandlerExchangesSignedBinaryResponseOverMTLS(t *testing.T) {
 	service, err := NewHarnessService(200)
 	if err != nil {

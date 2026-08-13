@@ -424,10 +424,22 @@ func openProductionCaches(config productionConfig) ([]io.Closer, error) {
 	}
 	caches := make([]io.Closer, 0, len(paths))
 	for _, path := range paths {
-		cache, err := admission.NewFileReplayCache(path)
+		clean := filepath.Clean(path)
+		directory, err := openProductionCacheDirectory(filepath.Dir(clean))
+		if err != nil {
+			closeProductionCaches(caches)
+			return nil, err
+		}
+		cache, err := admission.NewFileReplayCacheAt(directory, filepath.Base(clean))
+		closeDirectoryErr := directory.Close()
 		if err != nil {
 			closeProductionCaches(caches)
 			return nil, fmt.Errorf("server: open durable replay cache: %w", err)
+		}
+		if closeDirectoryErr != nil {
+			_ = cache.Close()
+			closeProductionCaches(caches)
+			return nil, fmt.Errorf("server: close durable replay cache directory: %w", closeDirectoryErr)
 		}
 		caches = append(caches, cache)
 	}
@@ -445,25 +457,73 @@ func validateProductionCachePaths(paths []string) error {
 			return fmt.Errorf("server: durable replay cache paths must be distinct")
 		}
 		seen[clean] = struct{}{}
+		if err := validateProductionCacheDirectory(filepath.Dir(clean)); err != nil {
+			return err
+		}
 		info, err := os.Lstat(clean)
 		if err == nil {
 			if !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) {
 				return fmt.Errorf("server: durable replay cache file is unsafe")
+			}
+			if err := validateProductionFileOwner(info); err != nil {
+				return fmt.Errorf("server: durable replay cache file: %w", err)
 			}
 			continue
 		}
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("server: inspect durable replay cache: %w", err)
 		}
-		parent, err := os.Lstat(filepath.Dir(clean))
-		if err != nil {
-			return fmt.Errorf("server: inspect durable replay cache directory: %w", err)
-		}
-		if !parent.IsDir() {
-			return fmt.Errorf("server: durable replay cache directory is invalid")
-		}
 	}
 	return nil
+}
+
+func validateProductionCacheDirectory(directory string) error {
+	info, err := os.Lstat(directory)
+	if err != nil {
+		return fmt.Errorf("server: inspect durable replay cache directory: %w", err)
+	}
+	return validateProductionCacheDirectoryInfo(info)
+}
+
+func validateProductionCacheDirectoryInfo(info os.FileInfo) error {
+	if info == nil || !info.IsDir() {
+		return fmt.Errorf("server: durable replay cache directory is invalid")
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("server: durable replay cache directory permissions are too broad")
+	}
+	if err := validateProductionFileOwner(info); err != nil {
+		return fmt.Errorf("server: durable replay cache directory: %w", err)
+	}
+	return nil
+}
+
+func openProductionCacheDirectory(path string) (*os.File, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("server: inspect durable replay cache directory: %w", err)
+	}
+	if err := validateProductionCacheDirectoryInfo(info); err != nil {
+		return nil, err
+	}
+	directory, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("server: open durable replay cache directory: %w", err)
+	}
+	openedInfo, err := directory.Stat()
+	if err != nil {
+		_ = directory.Close()
+		return nil, fmt.Errorf("server: inspect opened durable replay cache directory: %w", err)
+	}
+	if !openedInfo.IsDir() || !os.SameFile(info, openedInfo) {
+		_ = directory.Close()
+		return nil, fmt.Errorf("server: durable replay cache directory changed while opening")
+	}
+	if err := validateProductionCacheDirectoryInfo(openedInfo); err != nil {
+		_ = directory.Close()
+		return nil, err
+	}
+	return directory, nil
 }
 
 func closeProductionCaches(caches []io.Closer) {
@@ -496,6 +556,14 @@ func readProductionFileWithMode(path string, restricted bool) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("server: configuration file must be regular")
 	}
+	if restricted {
+		if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+			return nil, fmt.Errorf("server: private configuration file permissions are too broad")
+		}
+		if err := validateProductionFileOwner(info); err != nil {
+			return nil, fmt.Errorf("server: private configuration file: %w", err)
+		}
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("server: open configuration file: %w", err)
@@ -508,8 +576,13 @@ func readProductionFileWithMode(path string, restricted bool) ([]byte, error) {
 	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
 		return nil, fmt.Errorf("server: configuration file changed while opening")
 	}
-	if restricted && runtime.GOOS != "windows" && openedInfo.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("server: private configuration file permissions are too broad")
+	if restricted {
+		if runtime.GOOS != "windows" && openedInfo.Mode().Perm()&0o077 != 0 {
+			return nil, fmt.Errorf("server: private configuration file permissions are too broad")
+		}
+		if err := validateProductionFileOwner(openedInfo); err != nil {
+			return nil, fmt.Errorf("server: private configuration file: %w", err)
+		}
 	}
 	encoded, err := io.ReadAll(io.LimitReader(file, maximumProductionConfigurationFileBytes+1))
 	if err != nil {

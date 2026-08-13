@@ -46,11 +46,11 @@
 - [x] Make `proxy` and `tun` load the wallet and reserve a new entry for each session attempt.
 - [x] Rebuild all session-bound resources after a classified carrier failure only when another entry exists.
 - [x] Keep a one-entry provisioning invocation durable and terminal after its session ends; it must never perform automatic recovery.
-- [ ] Add real first-hop integration coverage proving that the failed and recovered sessions use different access hints and distinct application state.
+- [x] Add real first-hop integration coverage proving that the failed and recovered sessions use different access hints and distinct application state.
 
 ## Task 5: Verify And Review
 
 - [x] Run focused, full, race, static, and cross-compile suites.
-- [ ] Run fuzz and first-hop integration suites.
+- [x] Run fuzz and first-hop integration suites.
 - [ ] Review for credential reuse, state rollback, symlink/permission races, goroutine leaks, unbounded buffers, session-state reuse, and error misclassification.
 - [ ] Commit reviewed implementation in small independently testable changes, publish the branch, open a draft review, and merge only after all checks pass.

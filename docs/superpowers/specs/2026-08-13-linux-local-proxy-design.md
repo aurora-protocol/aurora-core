@@ -68,6 +68,12 @@ frame encoding logic.
   reads sensitive material and does not print provisioning, issuer, or frame
   contents.
 
+The existing handle-based native-session registry remains unchanged in this
+increment. Its lifecycle is already covered by ABI tests and the Linux command
+will be verified against the same strict relay fixture. Consolidating its
+internal lifecycle with `ProvisionedSession` is a separate compatibility pass,
+after the new Linux surface has proven stable.
+
 ## Tests
 
 - Unit tests cover issuer-work lifecycle, issuer response rejection, duplicate

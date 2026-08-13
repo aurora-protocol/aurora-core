@@ -27,8 +27,6 @@
 **Files:**
 - Create: `client/provisioned_session.go`
 - Create: `client/provisioned_session_test.go`
-- Modify: `mobile/auroracore/session.go`
-- Modify: `mobile/auroracore/session_test.go`
 
 **Interfaces:**
 - Produces `type IssuerWork struct { IssuerURL string; IssuerCarrierPath string; RequestBody []byte }`.
@@ -78,18 +76,18 @@ func (s *ProvisionedSession) Complete(ctx context.Context, issuerResponse []byte
 }
 ```
 
-Clone and zero temporary proof material, enforce existing size limits, cancel abandoned work after the configured issuer timeout, and close the established session on failure. Move equivalent mobile lifecycle helpers to this API so the ABI path does not drift.
+Clone and zero temporary proof material, enforce existing size limits, cancel abandoned work after the configured issuer timeout, and close the established session on failure. Keep the existing native handle registry unchanged; this task introduces the portable lifecycle needed by the Linux process.
 
 - [ ] **Step 4: Run focused tests**
 
-Run: `GOCACHE=/private/tmp/aurora-gocache go test ./client ./mobile/auroracore -run 'TestProvisionedSession|TestNativeSession' -count=1`
+Run: `GOCACHE=/private/tmp/aurora-gocache go test ./client -run TestProvisionedSession -count=1`
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```sh
-git add client/provisioned_session.go client/provisioned_session_test.go mobile/auroracore/session.go mobile/auroracore/session_test.go
+git add client/provisioned_session.go client/provisioned_session_test.go
 git commit -m "feat: share provisioned client session lifecycle"
 ```
 

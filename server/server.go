@@ -43,7 +43,7 @@ type ReadinessReport struct {
 }
 
 func NewHarnessHandler(opts HarnessOptions) (http.Handler, error) {
-	now := normalizeHarnessNow(opts.NowUnix)
+	now := NormalizeHarnessNow(opts.NowUnix)
 	service, err := issuerd.NewHarnessServiceWithOptions(now, issuerd.ServiceOptions{
 		SpentTokenCache: opts.SpentTokenCache,
 	})
@@ -100,7 +100,7 @@ func NewHandler(opts Options) http.Handler {
 }
 
 func RunReadinessHarness(nowUnix uint64) (ReadinessReport, error) {
-	nowUnix = normalizeHarnessNow(nowUnix)
+	nowUnix = NormalizeHarnessNow(nowUnix)
 	handler, err := NewHarnessHandler(HarnessOptions{NowUnix: nowUnix})
 	if err != nil {
 		return ReadinessReport{}, err
@@ -289,7 +289,8 @@ func repeatedByte(b byte, n int) []byte {
 	return out
 }
 
-func normalizeHarnessNow(now uint64) uint64 {
+// NormalizeHarnessNow supplies the deterministic harness time for zero input.
+func NormalizeHarnessNow(now uint64) uint64 {
 	if now == 0 {
 		return 200
 	}

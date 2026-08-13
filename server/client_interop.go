@@ -32,7 +32,7 @@ type ClientInteropReport struct {
 }
 
 func RunClientInteropHarness(nowUnix uint64) (ClientInteropReport, error) {
-	nowUnix = normalizeHarnessNow(nowUnix)
+	nowUnix = NormalizeHarnessNow(nowUnix)
 	coverBody := []byte("<html>cover</html>")
 	handler, err := NewHarnessHandler(HarnessOptions{
 		NowUnix:   nowUnix,

@@ -258,6 +258,43 @@ func TestRunOpensPersistentSpentTokenCacheWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestOpenHarnessSpentTokenCacheCompactsExpiredEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spent-token-cache.log")
+	cache, err := openHarnessSpentTokenCache(path, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inserted, err := cache.InsertIfAbsentUntil([]byte("expired"), 101, 100); err != nil || !inserted {
+		t.Fatalf("insert expired entry inserted=%t err=%v", inserted, err)
+	}
+	if err := cache.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := openHarnessSpentTokenCache(path, 101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if reopened.Has([]byte("expired")) {
+		t.Fatal("expired entry remained in reopened harness cache")
+	}
+}
+
+func TestRunNormalizesZeroHarnessTimeForSpentTokenCache(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spent-token-cache.log")
+	restoreListen := setListenAndServeForTest(func(addr string, handler http.Handler) error {
+		return http.ErrServerClosed
+	})
+	defer restoreListen()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"harness", "--harness-now", "0", "--spent-token-cache", path}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run returned %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestRunRejectsUnknownPacketMode(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"harness", "--packet-mode", "bogus"}, &stdout, &stderr)

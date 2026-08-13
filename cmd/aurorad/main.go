@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -82,6 +83,7 @@ func runHarness(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "server: packet mode %q must be loopback or tun\n", *packetMode)
 		return 2
 	}
+	nowUnix := server.NormalizeHarnessNow(*now)
 	if !*readinessCheck && !isLoopbackListenAddress(*listen) {
 		fmt.Fprintln(stderr, "server: harness only permits loopback listen addresses; use aurorad serve")
 		return 2
@@ -91,7 +93,7 @@ func runHarness(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if *readinessCheck {
-		report, err := server.RunReadinessHarness(*now)
+		report, err := server.RunReadinessHarness(nowUnix)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
@@ -119,7 +121,7 @@ func runHarness(args []string, stdout, stderr io.Writer) int {
 	var spentTokenCache admission.ReplayCache
 	var spentTokenCacheCloser io.Closer
 	if *spentTokenCachePath != "" {
-		cache, err := admission.NewFileReplayCache(*spentTokenCachePath)
+		cache, err := openHarnessSpentTokenCache(*spentTokenCachePath, nowUnix)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
@@ -139,7 +141,7 @@ func runHarness(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	handler, err := server.NewHarnessHandler(server.HarnessOptions{
-		NowUnix:         *now,
+		NowUnix:         nowUnix,
 		CoverBody:       []byte(*coverBody),
 		CoverOrigin:     coverOrigin,
 		PacketExchanger: packetExchanger,
@@ -165,6 +167,23 @@ func runHarness(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func openHarnessSpentTokenCache(path string, nowUnix uint64) (*admission.RetentionFileReplayCache, error) {
+	clean := filepath.Clean(path)
+	if clean == "." || clean == string(filepath.Separator) {
+		return nil, fmt.Errorf("server: harness spent-token cache path is invalid")
+	}
+	directory, err := os.Open(filepath.Dir(clean))
+	if err != nil {
+		return nil, fmt.Errorf("server: open harness spent-token cache directory: %w", err)
+	}
+	cache, err := admission.NewRetentionFileReplayCacheAt(directory, filepath.Base(clean), nowUnix)
+	if err != nil {
+		_ = directory.Close()
+		return nil, fmt.Errorf("server: open harness spent-token cache: %w", err)
+	}
+	return cache, nil
 }
 
 func newReverseProxyCoverOrigin(raw string) (http.Handler, error) {

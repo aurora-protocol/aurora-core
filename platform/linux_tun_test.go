@@ -1,6 +1,10 @@
 package platform
 
-import "testing"
+import (
+	"os"
+	"sync"
+	"testing"
+)
 
 func TestDefaultLinuxTUNConfigRequiresProxyFallback(t *testing.T) {
 	config := DefaultLinuxTUNConfig()
@@ -100,5 +104,70 @@ func TestOpenLinuxTUNDeviceRejectsInvalidConfigBeforeOSOpen(t *testing.T) {
 	config.InterfaceName = ""
 	if _, err := OpenLinuxTUNDevice(config); err == nil {
 		t.Fatalf("OpenLinuxTUNDevice accepted invalid config")
+	}
+}
+
+func TestLinuxTUNDeviceCloseIsConcurrentAndIdempotent(t *testing.T) {
+	for attempt := 0; attempt < 64; attempt++ {
+		file, err := os.CreateTemp(t.TempDir(), "aurora-linux-tun-device")
+		if err != nil {
+			t.Fatal(err)
+		}
+		device := newLinuxTUNDevice(file, "aurora0", 1280)
+		start := make(chan struct{})
+		errors := make(chan error, 64)
+		var wait sync.WaitGroup
+		for worker := 0; worker < cap(errors); worker++ {
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				<-start
+				errors <- device.Close()
+			}()
+		}
+		close(start)
+		wait.Wait()
+		close(errors)
+		for err := range errors {
+			if err != nil {
+				t.Fatalf("concurrent Linux TUN device close: %v", err)
+			}
+		}
+	}
+}
+
+func TestLinuxTUNDeviceCloseIsConcurrentWithIO(t *testing.T) {
+	for attempt := 0; attempt < 64; attempt++ {
+		file, err := os.CreateTemp(t.TempDir(), "aurora-linux-tun-device")
+		if err != nil {
+			t.Fatal(err)
+		}
+		device := newLinuxTUNDevice(file, "aurora0", 1280)
+		start := make(chan struct{})
+		var wait sync.WaitGroup
+		for _, operation := range []func(){
+			func() {
+				for index := 0; index < 64; index++ {
+					_, _ = device.Read(make([]byte, 1))
+				}
+			},
+			func() {
+				for index := 0; index < 64; index++ {
+					_, _ = device.Write([]byte{0})
+				}
+			},
+			func() {
+				_ = device.Close()
+			},
+		} {
+			wait.Add(1)
+			go func(operation func()) {
+				defer wait.Done()
+				<-start
+				operation()
+			}(operation)
+		}
+		close(start)
+		wait.Wait()
 	}
 }

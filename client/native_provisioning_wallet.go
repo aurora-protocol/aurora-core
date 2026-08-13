@@ -176,6 +176,22 @@ func ParseNativeProvisioningWallet(encoded []byte, now time.Time) (*NativeProvis
 	return result, nil
 }
 
+// ValidateNativeProvisioningSource verifies a complete single provisioning
+// bundle or canonical wallet without reserving an entry or returning any
+// credential material.
+func ValidateNativeProvisioningSource(encoded []byte, now time.Time) error {
+	if wallet, err := ParseNativeProvisioningWallet(encoded, now); err == nil {
+		wallet.Zero()
+		return nil
+	}
+	provisioning, err := ParseNativeProvisioning(encoded, now)
+	if err == nil {
+		zeroNativeProvisioning(&provisioning)
+		return nil
+	}
+	return fmt.Errorf("client: native provisioning source is invalid")
+}
+
 // ReserveNativeProvisioning validates and reserves one entry from either a
 // canonical wallet or a single native provisioning bundle. The returned entry
 // is consumed regardless of subsequent session setup outcome.

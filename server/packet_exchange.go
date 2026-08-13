@@ -10,6 +10,7 @@ const (
 
 	maxPacketBatchPackets = 64
 	maxPacketBytes        = 65535
+	maxPacketBatchBytes   = 2 + maxPacketBatchPackets*(2+4+maxPacketBytes)
 )
 
 type PacketBatch struct {

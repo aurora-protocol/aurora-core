@@ -49,12 +49,13 @@ const (
 )
 
 const (
-	carrierTokenNonceLen        = carrier.TokenNonceLength
-	carrierRedemptionContextLen = carrier.RedemptionContextLength
-	carrierIssueRequestLen      = carrierTokenNonceLen + carrierRedemptionContextLen + 8
-	carrierSpentKeyLen          = 48
-	carrierMetadataHashLen      = 48
-	maxCarrierBodyBytes         = 1 << 20
+	carrierTokenNonceLen          = carrier.TokenNonceLength
+	carrierRedemptionContextLen   = carrier.RedemptionContextLength
+	carrierIssueRequestLen        = carrierTokenNonceLen + carrierRedemptionContextLen + 8
+	carrierSpentKeyLen            = 48
+	carrierMetadataHashLen        = 48
+	maxCarrierControlPayloadBytes = (1 << 20) - 1
+	maxCarrierBodyBytes           = 1 + maxPacketBatchBytes
 )
 
 // IssuerCarrier is the minimal issuer capability the cover carrier forwards to.
@@ -140,12 +141,7 @@ func DecodeCarrierMetadataResponse(payload []byte) (encoded, hash []byte, err er
 // malformed body, unknown type, or downstream failure maps to cover-neutral
 // behaviour so the surface is indistinguishable from an ordinary origin.
 func serveCoverCarrier(w http.ResponseWriter, r *http.Request, origin relay.Origin, coverOrigin http.Handler, exchanger PacketExchanger, issuer IssuerCarrier) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxCarrierBodyBytes+1))
-	if err != nil || len(body) > maxCarrierBodyBytes {
-		serveCoverFailure(w, r, origin, coverOrigin)
-		return
-	}
-	carrierType, payload, err := DecodeCarrier(body)
+	carrierType, payload, err := readCarrierRequest(r.Body)
 	if err != nil {
 		serveCoverFailure(w, r, origin, coverOrigin)
 		return
@@ -162,6 +158,26 @@ func serveCoverCarrier(w http.ResponseWriter, r *http.Request, origin relay.Orig
 	default:
 		serveCoverFailure(w, r, origin, coverOrigin)
 	}
+}
+
+func readCarrierRequest(body io.Reader) (CarrierType, []byte, error) {
+	var kind [1]byte
+	if _, err := io.ReadFull(body, kind[:]); err != nil {
+		return 0, nil, fmt.Errorf("server: read carrier type: %w", err)
+	}
+	carrierType := CarrierType(kind[0])
+	maximumPayloadBytes := maxCarrierControlPayloadBytes
+	if carrierType == CarrierPacketBatch {
+		maximumPayloadBytes = maxPacketBatchBytes
+	}
+	payload, err := io.ReadAll(io.LimitReader(body, int64(maximumPayloadBytes)+1))
+	if err != nil {
+		return 0, nil, fmt.Errorf("server: read carrier payload: %w", err)
+	}
+	if len(payload) > maximumPayloadBytes {
+		return 0, nil, fmt.Errorf("server: carrier payload exceeds limit")
+	}
+	return carrierType, payload, nil
 }
 
 func writeCarrier(w http.ResponseWriter, t CarrierType, payload []byte) {

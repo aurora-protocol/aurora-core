@@ -88,7 +88,7 @@ func (c serviceIssuerCarrier) IssuerMetadata() ([]byte, []byte, error) {
 }
 
 func (c serviceIssuerCarrier) IssueBlindRSA(tokenNonce, redemptionContextHash []byte, expiryUnix uint64) ([]byte, error) {
-	if c.service == nil {
+	if c.service == nil || !c.service.AllowsUntrustedCarrierIssuance() {
 		return nil, fmt.Errorf("server: issuer unavailable")
 	}
 	proof, err := c.service.IssueBlindRSA2048(issuerd.IssueBlindRSA2048Request{
@@ -103,7 +103,7 @@ func (c serviceIssuerCarrier) IssueBlindRSA(tokenNonce, redemptionContextHash []
 }
 
 func (c serviceIssuerCarrier) SpendToken(admissionProof []byte) ([]byte, error) {
-	if c.service == nil {
+	if c.service == nil || !c.service.AllowsUntrustedCarrierIssuance() {
 		return nil, fmt.Errorf("server: issuer unavailable")
 	}
 	proof, err := issuerd.DecodeAdmissionProofBytes(admissionProof)

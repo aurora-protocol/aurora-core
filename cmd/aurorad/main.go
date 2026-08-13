@@ -64,7 +64,7 @@ func runHarness(args []string, stdout, stderr io.Writer) int {
 	now := flags.Uint64("harness-now", uint64(time.Now().Unix()), "harness unix timestamp")
 	readinessCheck := flags.Bool("readiness-check", false, "run the server readiness harness and exit")
 	packetMode := flags.String("packet-mode", packetModeLoopback, "packet exchange mode: loopback or tun")
-	spentTokenCachePath := flags.String("spent-token-cache", "", "append-only spent-token replay cache path")
+	spentTokenCachePath := flags.String("spent-token-cache", "", "local diagnostic spent-token replay cache path")
 	tunDevice := flags.String("tun-device", defaultTUN.DevicePath, "Linux TUN device path")
 	tunInterface := flags.String("tun-iface", defaultTUN.InterfaceName, "Linux TUN interface name")
 	tunMTU := flags.Int("tun-mtu", defaultTUN.MTU, "Linux TUN MTU")
@@ -82,24 +82,12 @@ func runHarness(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "server: packet mode %q must be loopback or tun\n", *packetMode)
 		return 2
 	}
+	if !*readinessCheck && !isLoopbackListenAddress(*listen) {
+		fmt.Fprintln(stderr, "server: harness only permits loopback listen addresses; use aurorad serve")
+		return 2
+	}
 	if (*tlsCert == "") != (*tlsKey == "") {
 		fmt.Fprintln(stderr, "server: TLS certificate and key must be configured together")
-		return 2
-	}
-	if *tlsCert == "" && !isLoopbackListenAddress(*listen) {
-		fmt.Fprintln(stderr, "server: TLS is required for non-loopback listen addresses")
-		return 2
-	}
-	if !*readinessCheck && !isLoopbackListenAddress(*listen) && *spentTokenCachePath == "" {
-		fmt.Fprintln(stderr, "server: persistent spent-token replay cache is required for non-loopback listen addresses")
-		return 2
-	}
-	if !*readinessCheck && !isLoopbackListenAddress(*listen) && *coverOriginURL == "" {
-		fmt.Fprintln(stderr, "server: cover origin URL is required for non-loopback listen addresses")
-		return 2
-	}
-	if !*readinessCheck && !isLoopbackListenAddress(*listen) && *packetMode != platform.PacketTUN {
-		fmt.Fprintln(stderr, "server: packet mode tun is required for non-loopback listen addresses")
 		return 2
 	}
 	if *readinessCheck {

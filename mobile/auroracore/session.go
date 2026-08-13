@@ -168,6 +168,11 @@ func (r *nativeSessionRegistry) begin(provisioning client.NativeProvisioning) (n
 	handle, err := r.allocateHandleLocked()
 	if err == nil {
 		r.sessions[handle] = session
+		session.mu.Lock()
+		session.issuerTimer = time.AfterFunc(r.issuerTimeout, func() {
+			r.expire(handle, session)
+		})
+		session.mu.Unlock()
 	}
 	r.mu.Unlock()
 	if err != nil {
@@ -175,9 +180,6 @@ func (r *nativeSessionRegistry) begin(provisioning client.NativeProvisioning) (n
 		zeroNativeIssuerWork(&work)
 		return nativeIssuerWork{}, err
 	}
-	session.issuerTimer = time.AfterFunc(r.issuerTimeout, func() {
-		r.expire(handle, session)
-	})
 	work.Handle = handle
 	return work, nil
 }

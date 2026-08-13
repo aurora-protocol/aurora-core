@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -182,6 +183,72 @@ func TestIssuerWorkURLRejectsNonCanonicalInputs(t *testing.T) {
 		if _, err := issuerWorkURL(work); err == nil {
 			t.Fatalf("noncanonical issuer work was accepted: %+v", work)
 		}
+	}
+}
+
+func TestRunWithCarrierRecoveryUsesBoundedBackoff(t *testing.T) {
+	terminal := errors.New("local listener failed")
+	var delays []time.Duration
+	attempts := 0
+	err := runWithCarrierRecovery(context.Background(), carrierRecoveryPolicy{
+		InitialDelay: 100 * time.Millisecond,
+		MaximumDelay: 250 * time.Millisecond,
+		Wait: func(_ context.Context, delay time.Duration) error {
+			delays = append(delays, delay)
+			return nil
+		},
+	}, func(context.Context) (bool, error) {
+		attempts++
+		if attempts < 4 {
+			return true, io.ErrUnexpectedEOF
+		}
+		return false, terminal
+	})
+	if !errors.Is(err, terminal) {
+		t.Fatalf("recovery error = %v, want terminal attempt error", err)
+	}
+	if want := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 250 * time.Millisecond}; len(delays) != len(want) {
+		t.Fatalf("recovery delays = %v, want %v", delays, want)
+	} else {
+		for index := range want {
+			if delays[index] != want[index] {
+				t.Fatalf("recovery delays = %v, want %v", delays, want)
+			}
+		}
+	}
+}
+
+func TestRunWithCarrierRecoveryStopsWhenCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	waitStarted := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		result <- runWithCarrierRecovery(ctx, carrierRecoveryPolicy{
+			InitialDelay: time.Millisecond,
+			MaximumDelay: time.Millisecond,
+			Wait: func(ctx context.Context, _ time.Duration) error {
+				close(waitStarted)
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		}, func(context.Context) (bool, error) {
+			return true, io.EOF
+		})
+	}()
+	select {
+	case <-waitStarted:
+	case <-time.After(time.Second):
+		t.Fatal("recovery did not begin waiting")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("recovery cancellation error = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("recovery did not stop after cancellation")
 	}
 }
 

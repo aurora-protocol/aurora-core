@@ -28,6 +28,8 @@ const (
 	maximumProvisioningFileBytes = 1 << 20
 	maximumIssuerResponseBytes   = 1 << 20
 	defaultIssuerRequestTimeout  = 30 * time.Second
+	defaultCarrierRetryInitial   = 250 * time.Millisecond
+	defaultCarrierRetryMaximum   = 10 * time.Second
 )
 
 var (
@@ -53,6 +55,14 @@ type proxyComponentResult struct {
 	name string
 	err  error
 }
+
+type carrierRecoveryPolicy struct {
+	InitialDelay time.Duration
+	MaximumDelay time.Duration
+	Wait         func(context.Context, time.Duration) error
+}
+
+type carrierRecoveryAttempt func(context.Context) (recoverable bool, err error)
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -304,6 +314,73 @@ func runTUN(ctx context.Context, config tunConfig, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "aurorac tunnel interface=%s\n", platformConfig.InterfaceName)
 	componentErr := runTUNComponents(ctx, established, runtime, state.Close)
 	return errors.Join(componentErr, provisioned.Close())
+}
+
+func runWithCarrierRecovery(ctx context.Context, policy carrierRecoveryPolicy, attempt carrierRecoveryAttempt) error {
+	if ctx == nil {
+		return fmt.Errorf("client: carrier recovery context is required")
+	}
+	if attempt == nil {
+		return fmt.Errorf("client: carrier recovery attempt is required")
+	}
+	policy, err := normalizeCarrierRecoveryPolicy(policy)
+	if err != nil {
+		return err
+	}
+	delay := policy.InitialDelay
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
+		recoverable, err := attempt(ctx)
+		if err == nil {
+			return nil
+		}
+		if !recoverable {
+			return err
+		}
+		if waitErr := policy.Wait(ctx, delay); waitErr != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return waitErr
+		}
+		delay = nextCarrierRecoveryDelay(delay, policy.MaximumDelay)
+	}
+}
+
+func normalizeCarrierRecoveryPolicy(policy carrierRecoveryPolicy) (carrierRecoveryPolicy, error) {
+	if policy.InitialDelay == 0 {
+		policy.InitialDelay = defaultCarrierRetryInitial
+	}
+	if policy.MaximumDelay == 0 {
+		policy.MaximumDelay = defaultCarrierRetryMaximum
+	}
+	if policy.InitialDelay <= 0 || policy.MaximumDelay <= 0 || policy.InitialDelay > policy.MaximumDelay {
+		return carrierRecoveryPolicy{}, fmt.Errorf("client: carrier recovery policy is invalid")
+	}
+	if policy.Wait == nil {
+		policy.Wait = waitForCarrierRecovery
+	}
+	return policy, nil
+}
+
+func waitForCarrierRecovery(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func nextCarrierRecoveryDelay(delay, maximum time.Duration) time.Duration {
+	if delay >= maximum || delay > maximum/2 {
+		return maximum
+	}
+	return delay * 2
 }
 
 func exchangeIssuerWork(ctx context.Context, timeout time.Duration, work client.IssuerWork) ([]byte, error) {

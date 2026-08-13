@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -61,10 +62,25 @@ func NewFileReplayCache(path string) (*FileReplayCache, error) {
 	if path == "" {
 		return nil, fmt.Errorf("admission: replay cache path is empty")
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
+	file, err := openReplayCacheFile(path)
 	if err != nil {
 		return nil, err
 	}
+	return newFileReplayCache(path, file)
+}
+
+func NewFileReplayCacheAt(directory *os.File, name string) (*FileReplayCache, error) {
+	if directory == nil || name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return nil, fmt.Errorf("admission: replay cache directory entry is invalid")
+	}
+	file, err := openReplayCacheFileAt(directory, name)
+	if err != nil {
+		return nil, err
+	}
+	return newFileReplayCache(filepath.Join(directory.Name(), name), file)
+}
+
+func newFileReplayCache(path string, file *os.File) (*FileReplayCache, error) {
 	if err := file.Chmod(0o600); err != nil {
 		_ = file.Close()
 		return nil, err

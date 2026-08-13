@@ -120,6 +120,17 @@ func TestProductionReplayCachesMustBeDistinctAndPrivate(t *testing.T) {
 	if err := validateProductionCachePaths([]string{first, second, filepath.Join(directory, "third.log")}); err == nil {
 		t.Fatal("world-readable replay cache accepted")
 	}
+	unsafeDirectory := t.TempDir()
+	if err := os.Chmod(unsafeDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProductionCachePaths([]string{
+		filepath.Join(unsafeDirectory, "first.log"),
+		filepath.Join(unsafeDirectory, "second.log"),
+		filepath.Join(unsafeDirectory, "third.log"),
+	}); err == nil {
+		t.Fatal("replay cache accepted a group-readable parent directory")
+	}
 }
 
 func TestServeReportsIncompleteTLSConfiguration(t *testing.T) {

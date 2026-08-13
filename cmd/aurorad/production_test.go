@@ -356,6 +356,10 @@ func newProductionCommandFixture(t *testing.T) productionConfig {
 		t.Fatal(err)
 	}
 	directory := t.TempDir()
+	cacheDirectory := filepath.Join(directory, "replay-state")
+	if err := os.Mkdir(cacheDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	writeProductionCommandFile(t, filepath.Join(directory, "descriptor.bin"), mustEncodeProductionCommand(t, descriptor), 0o644)
 	writeProductionCommandFile(t, filepath.Join(directory, "descriptor.hash"), descriptorHash, 0o644)
 	writeProductionCommandFile(t, filepath.Join(directory, "template.bin"), mustEncodeProductionCommand(t, template), 0o644)
@@ -422,9 +426,9 @@ func newProductionCommandFixture(t *testing.T) productionConfig {
 		pqSignerPath:              pqPath,
 		accessHintsPath:           accessHintsPath,
 		tokenVerificationKeyPath:  tokenKeyPath,
-		hintSpentCachePath:        filepath.Join(directory, "hint-cache.log"),
-		tokenSpentCachePath:       filepath.Join(directory, "token-cache.log"),
-		bootstrapCachePath:        filepath.Join(directory, "bootstrap-cache.log"),
+		hintSpentCachePath:        filepath.Join(cacheDirectory, "hint-cache.log"),
+		tokenSpentCachePath:       filepath.Join(cacheDirectory, "token-cache.log"),
+		bootstrapCachePath:        filepath.Join(cacheDirectory, "bootstrap-cache.log"),
 		maxConcurrentSessions:     1,
 		policy:                    registry.PolicyBalancedWeb,
 		route:                     registry.RouteFast1,

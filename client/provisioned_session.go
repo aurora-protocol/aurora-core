@@ -30,6 +30,15 @@ type IssuerWork struct {
 	RequestBody       []byte
 }
 
+// Zero erases the caller-owned issuer request once it has been submitted or abandoned.
+func (w *IssuerWork) Zero() {
+	if w == nil {
+		return
+	}
+	zeroProvisionedBytes(w.RequestBody)
+	*w = IssuerWork{}
+}
+
 // ProvisionedSessionOptions controls the bounded lifecycle of a provisioned client.
 type ProvisionedSessionOptions struct {
 	HandshakeTimeout  time.Duration

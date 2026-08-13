@@ -50,6 +50,18 @@ func TestProvisionedSessionBuildsIssuerWorkAndClosesDeferredHandshake(t *testing
 	}
 }
 
+func TestIssuerWorkZeroErasesRequestBody(t *testing.T) {
+	work := IssuerWork{RequestBody: []byte("opaque issuer request")}
+	body := work.RequestBody
+	work.Zero()
+	if work.IssuerURL != "" || work.IssuerCarrierPath != "" || work.RequestBody != nil {
+		t.Fatalf("issuer work was not cleared: %+v", work)
+	}
+	if !bytes.Equal(body, make([]byte, len(body))) {
+		t.Fatal("issuer request body was not erased")
+	}
+}
+
 func TestProvisionedSessionRejectsMalformedIssuerResponseAndCloses(t *testing.T) {
 	deferred := &provisionedSessionTestHandshake{}
 	session, _, err := newProvisionedSession(

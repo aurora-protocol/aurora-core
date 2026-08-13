@@ -131,9 +131,11 @@ func newProvisionedSession(ctx context.Context, provisioning NativeProvisioning,
 		request:   request,
 		options:   options,
 	}
+	session.mu.Lock()
 	session.issuerTimer = time.AfterFunc(options.IssuerTimeout, func() {
 		_ = session.Close()
 	})
+	session.mu.Unlock()
 	return session, work, nil
 }
 

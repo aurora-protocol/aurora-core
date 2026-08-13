@@ -50,6 +50,37 @@ func TestProvisionedSessionBuildsIssuerWorkAndClosesDeferredHandshake(t *testing
 	}
 }
 
+func TestProvisionedSessionExpiresAbandonedIssuerWork(t *testing.T) {
+	deferred := &provisionedSessionTestHandshake{}
+	session, work, err := newProvisionedSession(
+		context.Background(),
+		NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"},
+		ProvisionedSessionOptions{
+			IssuerTimeout: time.Nanosecond,
+			now:           func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+			random:        bytes.NewReader(bytes.Repeat([]byte{0x74}, 32)),
+			start: func(context.Context, NativeProvisioning, time.Time) (provisionedSessionHandshake, handshake.ClientProofRequest, error) {
+				return deferred, provisionedSessionTestRequest(), nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer work.Zero()
+	deadline := time.After(time.Second)
+	for !deferred.Closed() {
+		select {
+		case <-deadline:
+			t.Fatal("abandoned provisioned issuer work did not expire")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if session.Established() != nil {
+		t.Fatal("expired provisioned session retained an established session")
+	}
+}
+
 func TestIssuerWorkZeroErasesRequestBody(t *testing.T) {
 	work := IssuerWork{RequestBody: []byte("opaque issuer request")}
 	body := work.RequestBody

@@ -16,6 +16,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/admission"
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/handshake"
+	"github.com/aurora-protocol/aurora-core/issuerd"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/trust"
@@ -36,6 +37,7 @@ func TestParseNativeProvisioningRejectsMalformedAndTrailingBytes(t *testing.T) {
 	}
 	if parsed.RelayURL != input.RelayURL || parsed.IssuerURL != input.IssuerURL || parsed.IssuerCarrierPath != input.IssuerCarrierPath ||
 		parsed.RequestClassID != input.RequestClassID || parsed.Suite != input.Suite || parsed.RelayExpectedStatus != input.RelayExpectedStatus ||
+		!bytes.Equal(parsed.IssuerMetadata, input.IssuerMetadata) || len(parsed.IssuerAuthorityKeys) != len(input.IssuerAuthorityKeys) ||
 		!bytes.Equal(parsed.Descriptor, input.Descriptor) || !bytes.Equal(parsed.Template, input.Template) ||
 		!bytes.Equal(parsed.AccessHint, input.AccessHint) || !bytes.Equal(parsed.PolicyOffer, input.PolicyOffer) ||
 		!bytes.Equal(parsed.TransportHints, input.TransportHints) || !bytes.Equal(parsed.RelayRequestHeaders, input.RelayRequestHeaders) ||
@@ -109,6 +111,58 @@ func TestNativeProvisioningVerifiesDeploymentBeforeUse(t *testing.T) {
 	}
 	if _, err := ParseNativeProvisioning(encoded, now); err == nil {
 		t.Fatal("native provisioning accepted a descriptor hash mismatch")
+	}
+}
+
+func TestNativeProvisioningRequiresSignedIssuerMetadata(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	input := validNativeProvisioning(t, now)
+	input.IssuerMetadata = nil
+	input.IssuerAuthorityKeys = nil
+	if _, err := EncodeNativeProvisioning(input); err == nil {
+		t.Fatal("native provisioning accepted an issuer without signed metadata")
+	}
+}
+
+func TestNativeProvisioningRejectsTamperedIssuerMetadata(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	input := validNativeProvisioning(t, now)
+	metadata, err := decodeNativeIssuerMetadata(input.IssuerMetadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata.MetadataSignature[0] ^= 0xff
+	input.IssuerMetadata, err = protocol.Encode(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := EncodeNativeProvisioning(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseNativeProvisioning(encoded, now); err == nil {
+		t.Fatal("native provisioning accepted tampered issuer metadata")
+	}
+}
+
+func TestNativeProvisioningRejectsIssuerScopeMismatch(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	input := validNativeProvisioning(t, now)
+	hint, err := admission.DecodeAccessHintCredential(input.AccessHint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hint.RelayBucketID[0] ^= 0xff
+	input.AccessHint, err = admission.EncodeAccessHintCredential(hint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := EncodeNativeProvisioning(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseNativeProvisioning(encoded, now); err == nil {
+		t.Fatal("native provisioning accepted an issuer scope mismatch")
 	}
 }
 
@@ -439,9 +493,18 @@ func validNativeProvisioningWithOriginSPKI(t testing.TB, now time.Time, originSP
 	if err != nil {
 		t.Fatal(err)
 	}
+	issuer, err := issuerd.NewHarnessService(nowUnix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerMetadataBytes, err := protocol.Encode(issuer.PublishIssuerMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerMetadata := issuer.PublishIssuerMetadata()
 	accessHintBytes, err := admission.EncodeAccessHintCredential(admission.AccessHintCredential{
-		HintIssuerID:  nativeProvisioningBytes(0x21, 16),
-		RelayBucketID: nativeProvisioningBytes(0x22, 16),
+		HintIssuerID:  append([]byte(nil), issuerMetadata.IssuerID...),
+		RelayBucketID: append([]byte(nil), issuerMetadata.RelayBucketScopes[0].RelayBucketID...),
 		HintEpochID:   3,
 		HintSelector:  nativeProvisioningBytes(0x23, 16),
 		HintSecret:    nativeProvisioningBytes(0x24, 32),
@@ -484,6 +547,8 @@ func validNativeProvisioningWithOriginSPKI(t testing.TB, now time.Time, originSP
 		RelayURL:              "https://relay.example/assets/upload/42",
 		IssuerURL:             "https://issuer.example",
 		IssuerCarrierPath:     "/assets/issue/42",
+		IssuerMetadata:        issuerMetadataBytes,
+		IssuerAuthorityKeys:   issuer.AuthorityKeys(),
 		Descriptor:            descriptorBytes,
 		TrustedDescriptorHash: descriptorHash,
 		Template:              templateBytes,

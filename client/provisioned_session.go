@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"fmt"
@@ -62,13 +63,14 @@ type provisionedSessionStarter func(context.Context, NativeProvisioning, time.Ti
 type ProvisionedSession struct {
 	mu sync.Mutex
 
-	ctx         context.Context
-	cancel      context.CancelFunc
-	handshake   provisionedSessionHandshake
-	request     handshake.ClientProofRequest
-	established *handshake.EstablishedSession
-	issuerTimer *time.Timer
-	options     ProvisionedSessionOptions
+	ctx            context.Context
+	cancel         context.CancelFunc
+	handshake      provisionedSessionHandshake
+	request        handshake.ClientProofRequest
+	established    *handshake.EstablishedSession
+	issuerTimer    *time.Timer
+	issuerMetadata protocol.IssuerMetadata
+	options        ProvisionedSessionOptions
 
 	completing bool
 	closed     bool
@@ -90,6 +92,10 @@ func newProvisionedSession(ctx context.Context, provisioning NativeProvisioning,
 	now := options.now().UTC()
 	if now.IsZero() || now.Unix() < 0 {
 		return nil, IssuerWork{}, fmt.Errorf("client: provisioned session requires a valid time")
+	}
+	issuerMetadata, err := provisioning.verifiedIssuerMetadataAt(now)
+	if err != nil {
+		return nil, IssuerWork{}, err
 	}
 
 	sessionContext, cancel := context.WithCancel(ctx)
@@ -125,11 +131,12 @@ func newProvisionedSession(ctx context.Context, provisioning NativeProvisioning,
 		return nil, IssuerWork{}, err
 	}
 	session := &ProvisionedSession{
-		ctx:       sessionContext,
-		cancel:    cancel,
-		handshake: deferred,
-		request:   request,
-		options:   options,
+		ctx:            sessionContext,
+		cancel:         cancel,
+		handshake:      deferred,
+		request:        request,
+		issuerMetadata: issuerMetadata,
+		options:        options,
 	}
 	session.mu.Lock()
 	session.issuerTimer = time.AfterFunc(options.IssuerTimeout, func() {
@@ -165,10 +172,16 @@ func (s *ProvisionedSession) Complete(ctx context.Context, issuerResponse []byte
 	deferred := s.handshake
 	request := cloneProvisionedProofRequest(s.request)
 	sessionContext := s.ctx
+	issuerMetadata := s.issuerMetadata
 	options := s.options
 	s.mu.Unlock()
 
-	proof, replay, err := provisionedProofsForIssuerResponse(request, issuerResponse, options.random)
+	now := options.now().UTC()
+	var nowUnix uint64
+	if !now.IsZero() && now.Unix() >= 0 {
+		nowUnix = uint64(now.Unix())
+	}
+	proof, replay, err := provisionedProofsForIssuerResponse(request, issuerResponse, issuerMetadata, nowUnix, options.random)
 	zeroProvisionedProofRequest(&request)
 	var established *handshake.EstablishedSession
 	if err == nil {
@@ -250,6 +263,7 @@ func (s *ProvisionedSession) Close() error {
 	established := s.established
 	s.handshake = nil
 	s.established = nil
+	s.issuerMetadata = protocol.IssuerMetadata{}
 	zeroProvisionedProofRequest(&s.request)
 	s.mu.Unlock()
 
@@ -350,7 +364,10 @@ func buildProvisionedIssuerWork(issuerURL, issuerCarrierPath string, request han
 	}, nil
 }
 
-func provisionedProofsForIssuerResponse(request handshake.ClientProofRequest, issuerResponse []byte, random io.Reader) (protocol.AdmissionProof, protocol.ReplayProof, error) {
+func provisionedProofsForIssuerResponse(request handshake.ClientProofRequest, issuerResponse []byte, issuerMetadata protocol.IssuerMetadata, nowUnix uint64, random io.Reader) (protocol.AdmissionProof, protocol.ReplayProof, error) {
+	if nowUnix == 0 {
+		return protocol.AdmissionProof{}, protocol.ReplayProof{}, fmt.Errorf("client: provisioned issuer response requires a valid time")
+	}
 	carrierType, payload, err := carrier.Decode(issuerResponse)
 	if err != nil || carrierType != carrier.BlindRSAIssueResponse || len(payload) == 0 {
 		return protocol.AdmissionProof{}, protocol.ReplayProof{}, fmt.Errorf("client: invalid provisioned issuer response")
@@ -358,6 +375,18 @@ func provisionedProofsForIssuerResponse(request handshake.ClientProofRequest, is
 	proof, err := issuerd.DecodeAdmissionProofBytes(payload)
 	if err != nil {
 		return protocol.AdmissionProof{}, protocol.ReplayProof{}, fmt.Errorf("client: decode provisioned admission proof: %w", err)
+	}
+	if proof.ExpiryUnix <= nowUnix {
+		zeroProvisionedAdmissionProof(&proof)
+		return protocol.AdmissionProof{}, protocol.ReplayProof{}, fmt.Errorf("client: provisioned admission proof is expired")
+	}
+	if !bytes.Equal(proof.RedemptionContextHash, request.AdmissionContextHash) {
+		zeroProvisionedAdmissionProof(&proof)
+		return protocol.AdmissionProof{}, protocol.ReplayProof{}, fmt.Errorf("client: provisioned admission proof context mismatch")
+	}
+	if err := admission.VerifyBlindRSA2048WithIssuerMetadata(proof, issuerMetadata, nowUnix); err != nil {
+		zeroProvisionedAdmissionProof(&proof)
+		return protocol.AdmissionProof{}, protocol.ReplayProof{}, fmt.Errorf("client: verify provisioned admission proof: %w", err)
 	}
 	redemption, err := admission.TokenRedemptionHash(proof)
 	if err != nil {
@@ -387,6 +416,8 @@ func provisionedProofsForIssuerResponse(request handshake.ClientProofRequest, is
 }
 
 func cloneProvisioningForSession(in NativeProvisioning) NativeProvisioning {
+	in.IssuerMetadata = append([]byte(nil), in.IssuerMetadata...)
+	in.IssuerAuthorityKeys = cloneNativeIssuerAuthorityKeys(in.IssuerAuthorityKeys)
 	in.Descriptor = append([]byte(nil), in.Descriptor...)
 	in.TrustedDescriptorHash = append([]byte(nil), in.TrustedDescriptorHash...)
 	in.Template = append([]byte(nil), in.Template...)
@@ -405,6 +436,7 @@ func zeroProvisioningForSession(value *NativeProvisioning) {
 		return
 	}
 	for _, field := range [][]byte{
+		value.IssuerMetadata,
 		value.Descriptor,
 		value.TrustedDescriptorHash,
 		value.Template,
@@ -418,7 +450,23 @@ func zeroProvisioningForSession(value *NativeProvisioning) {
 	} {
 		zeroProvisionedBytes(field)
 	}
+	for index := range value.IssuerAuthorityKeys {
+		zeroProvisionedBytes(value.IssuerAuthorityKeys[index].AuthorityID)
+		zeroProvisionedBytes(value.IssuerAuthorityKeys[index].AuthorityKeyID)
+		zeroProvisionedBytes(value.IssuerAuthorityKeys[index].PublicKey.PublicKey)
+	}
 	*value = NativeProvisioning{}
+}
+
+func cloneNativeIssuerAuthorityKeys(in []protocol.AuthorityKeyRecord) []protocol.AuthorityKeyRecord {
+	out := make([]protocol.AuthorityKeyRecord, len(in))
+	for index, key := range in {
+		out[index] = key
+		out[index].AuthorityID = append([]byte(nil), key.AuthorityID...)
+		out[index].AuthorityKeyID = append([]byte(nil), key.AuthorityKeyID...)
+		out[index].PublicKey.PublicKey = append([]byte(nil), key.PublicKey.PublicKey...)
+	}
+	return out
 }
 
 func cloneProvisionedProofRequest(in handshake.ClientProofRequest) handshake.ClientProofRequest {

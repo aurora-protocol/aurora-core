@@ -26,19 +26,20 @@ import (
 )
 
 const (
-	nativeProvisioningFormat                  uint64 = 2
-	maximumNativeProvisioningBytes                   = 1 << 20
-	maximumNativeProvisioningURLBytes                = 2048
-	maximumNativeProvisioningObjectBytes             = 256 << 10
-	maximumNativeProvisioningPolicyBytes             = 32 << 10
-	maximumNativeProvisioningHintsBytes              = 32 << 10
-	maximumNativeProvisioningHeaderBytes             = 64 << 10
-	maximumNativeProvisioningTrustRootBytes          = 64 << 10
-	maximumNativeProvisioningTrustRoots              = 16
-	maximumNativeProvisioningHeaderEntries           = 64
-	maximumNativeProvisioningHeaderNameBytes         = 64
-	maximumNativeProvisioningHeaderValueBytes        = 4096
-	nativeTemplateFutureSkew                         = 5 * time.Minute
+	nativeProvisioningFormat                     uint64 = 3
+	maximumNativeProvisioningBytes                      = 1 << 20
+	maximumNativeProvisioningURLBytes                   = 2048
+	maximumNativeProvisioningObjectBytes                = 256 << 10
+	maximumNativeProvisioningIssuerAuthorityKeys        = 16
+	maximumNativeProvisioningPolicyBytes                = 32 << 10
+	maximumNativeProvisioningHintsBytes                 = 32 << 10
+	maximumNativeProvisioningHeaderBytes                = 64 << 10
+	maximumNativeProvisioningTrustRootBytes             = 64 << 10
+	maximumNativeProvisioningTrustRoots                 = 16
+	maximumNativeProvisioningHeaderEntries              = 64
+	maximumNativeProvisioningHeaderNameBytes            = 64
+	maximumNativeProvisioningHeaderValueBytes           = 4096
+	nativeTemplateFutureSkew                            = 5 * time.Minute
 )
 
 // NativeProvisioning is the bounded canonical input for a portable native client session.
@@ -46,6 +47,8 @@ type NativeProvisioning struct {
 	RelayURL              string
 	IssuerURL             string
 	IssuerCarrierPath     string
+	IssuerMetadata        []byte
+	IssuerAuthorityKeys   []protocol.AuthorityKeyRecord
 	Descriptor            []byte
 	TrustedDescriptorHash []byte
 	Template              []byte
@@ -65,6 +68,7 @@ type nativeProvisioningObjects struct {
 	descriptor           protocol.RelayDescriptor
 	template             protocol.CoverTemplate
 	templateAuthorityKey protocol.PublicKeyRecord
+	issuerMetadata       protocol.IssuerMetadata
 	accessHint           admission.AccessHintCredential
 	policyOffer          protocol.PolicyOffer
 	transportHints       protocol.ClientTransportHints
@@ -83,6 +87,11 @@ func EncodeNativeProvisioning(provisioning NativeProvisioning) ([]byte, error) {
 	encoder.WriteOpaque16([]byte(provisioning.RelayURL))
 	encoder.WriteOpaque16([]byte(provisioning.IssuerURL))
 	encoder.WriteOpaque16([]byte(provisioning.IssuerCarrierPath))
+	encoder.WriteOpaque24(provisioning.IssuerMetadata)
+	encoder.WriteVarint(uint64(len(provisioning.IssuerAuthorityKeys)))
+	for _, key := range provisioning.IssuerAuthorityKeys {
+		key.EncodeTo(encoder)
+	}
 	encoder.WriteOpaque24(provisioning.Descriptor)
 	encoder.WritePreHash(provisioning.TrustedDescriptorHash)
 	encoder.WriteOpaque24(provisioning.Template)
@@ -131,6 +140,8 @@ func parseNativeProvisioningContainer(encoded []byte) (NativeProvisioning, error
 		RelayURL:              string(readNativeProvisioningOpaque16(reader, maximumNativeProvisioningURLBytes)),
 		IssuerURL:             string(readNativeProvisioningOpaque16(reader, maximumNativeProvisioningURLBytes)),
 		IssuerCarrierPath:     string(readNativeProvisioningOpaque16(reader, maximumNativeProvisioningURLBytes)),
+		IssuerMetadata:        readNativeProvisioningOpaque24(reader, maximumNativeProvisioningObjectBytes),
+		IssuerAuthorityKeys:   readNativeProvisioningIssuerAuthorityKeys(reader),
 		Descriptor:            readNativeProvisioningOpaque24(reader, maximumNativeProvisioningObjectBytes),
 		TrustedDescriptorHash: reader.ReadPreHash(),
 		Template:              readNativeProvisioningOpaque24(reader, maximumNativeProvisioningObjectBytes),
@@ -250,6 +261,12 @@ func (p NativeProvisioning) validatedObjectsAndDeployment(now time.Time) (native
 	if objects.accessHint.ExpiryUnix == 0 || uint64(now.Unix()) >= objects.accessHint.ExpiryUnix {
 		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, fmt.Errorf("client: native provisioning access hint is expired")
 	}
+	if err := validateNativeIssuerMetadata(objects.issuerMetadata, p.IssuerAuthorityKeys, uint64(now.Unix())); err != nil {
+		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, err
+	}
+	if err := validateNativeIssuerScope(objects.issuerMetadata, objects.accessHint, uint64(now.Unix())); err != nil {
+		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, err
+	}
 	if err := validateNativePolicy(objects.policyOffer, objects.transportHints, p.Suite); err != nil {
 		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, err
 	}
@@ -284,6 +301,12 @@ func (p NativeProvisioning) validateContainer() error {
 	}
 	if err := validateNativeCarrierPath(p.IssuerCarrierPath); err != nil {
 		return fmt.Errorf("client: invalid issuer carrier path: %w", err)
+	}
+	if len(p.IssuerMetadata) == 0 || len(p.IssuerMetadata) > maximumNativeProvisioningObjectBytes {
+		return fmt.Errorf("client: native provisioning issuer metadata size is invalid")
+	}
+	if len(p.IssuerAuthorityKeys) == 0 || len(p.IssuerAuthorityKeys) > maximumNativeProvisioningIssuerAuthorityKeys {
+		return fmt.Errorf("client: native provisioning issuer authority key count is invalid")
 	}
 	for _, field := range []struct {
 		label   string
@@ -336,6 +359,10 @@ func (p NativeProvisioning) decodeObjects() (nativeProvisioningObjects, error) {
 	if err != nil {
 		return nativeProvisioningObjects{}, err
 	}
+	issuerMetadata, err := decodeNativeIssuerMetadata(p.IssuerMetadata)
+	if err != nil {
+		return nativeProvisioningObjects{}, err
+	}
 	accessHint, err := admission.DecodeAccessHintCredential(p.AccessHint)
 	if err != nil {
 		return nativeProvisioningObjects{}, fmt.Errorf("client: invalid native access hint: %w", err)
@@ -364,6 +391,7 @@ func (p NativeProvisioning) decodeObjects() (nativeProvisioningObjects, error) {
 		descriptor:           descriptor,
 		template:             template,
 		templateAuthorityKey: authorityKey,
+		issuerMetadata:       issuerMetadata,
 		accessHint:           accessHint,
 		policyOffer:          policyOffer,
 		transportHints:       transportHints,
@@ -371,6 +399,81 @@ func (p NativeProvisioning) decodeObjects() (nativeProvisioningObjects, error) {
 		relayResponseHeaders: relayResponseHeaders,
 		relayTrustRoots:      relayTrustRoots,
 	}, nil
+}
+
+func (p NativeProvisioning) verifiedIssuerMetadataAt(now time.Time) (protocol.IssuerMetadata, error) {
+	if now.IsZero() || now.Unix() < 0 {
+		return protocol.IssuerMetadata{}, fmt.Errorf("client: native issuer metadata requires a valid time")
+	}
+	if err := validateNativeHTTPSURL(p.IssuerURL, false); err != nil {
+		return protocol.IssuerMetadata{}, fmt.Errorf("client: invalid issuer URL: %w", err)
+	}
+	if err := validateNativeCarrierPath(p.IssuerCarrierPath); err != nil {
+		return protocol.IssuerMetadata{}, fmt.Errorf("client: invalid issuer carrier path: %w", err)
+	}
+	if len(p.IssuerMetadata) == 0 || len(p.IssuerMetadata) > maximumNativeProvisioningObjectBytes || len(p.IssuerAuthorityKeys) == 0 || len(p.IssuerAuthorityKeys) > maximumNativeProvisioningIssuerAuthorityKeys {
+		return protocol.IssuerMetadata{}, fmt.Errorf("client: native issuer metadata inputs are invalid")
+	}
+	metadata, err := decodeNativeIssuerMetadata(p.IssuerMetadata)
+	if err != nil {
+		return protocol.IssuerMetadata{}, err
+	}
+	if err := validateNativeIssuerMetadata(metadata, p.IssuerAuthorityKeys, uint64(now.Unix())); err != nil {
+		return protocol.IssuerMetadata{}, err
+	}
+	return metadata, nil
+}
+
+func validateNativeIssuerMetadata(metadata protocol.IssuerMetadata, authorityKeys []protocol.AuthorityKeyRecord, nowUnix uint64) error {
+	if err := trust.VerifyIssuerMetadataSignature(metadata, authorityKeys, nowUnix); err != nil {
+		return fmt.Errorf("client: native issuer metadata verification: %w", err)
+	}
+	if !containsNativeID(metadata.SupportedProofTypes, registry.ProofBlindRSA2048) {
+		return fmt.Errorf("client: native issuer metadata does not support Blind RSA")
+	}
+	for _, key := range metadata.TokenKeyMappings {
+		if key.ProofType == registry.ProofBlindRSA2048 && key.Validate(nowUnix) == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("client: native issuer metadata has no active Blind RSA key")
+}
+
+func validateNativeIssuerScope(metadata protocol.IssuerMetadata, hint admission.AccessHintCredential, nowUnix uint64) error {
+	if !bytes.Equal(metadata.IssuerID, hint.HintIssuerID) {
+		return fmt.Errorf("client: native issuer metadata does not match access hint issuer")
+	}
+	for _, scope := range metadata.RelayBucketScopes {
+		if bytes.Equal(scope.RelayBucketID, hint.RelayBucketID) && nowUnix >= scope.ValidFromUnix && nowUnix < scope.ValidUntilUnix {
+			return nil
+		}
+	}
+	return fmt.Errorf("client: native issuer metadata does not authorize access hint relay bucket")
+}
+
+func decodeNativeIssuerMetadata(encoded []byte) (protocol.IssuerMetadata, error) {
+	if len(encoded) == 0 || len(encoded) > maximumNativeProvisioningObjectBytes {
+		return protocol.IssuerMetadata{}, fmt.Errorf("client: native issuer metadata size is invalid")
+	}
+	reader := wire.NewReader(encoded)
+	metadata := protocol.DecodeIssuerMetadata(reader)
+	if reader.Err() != nil || !reader.EOF() {
+		return protocol.IssuerMetadata{}, fmt.Errorf("client: malformed native issuer metadata")
+	}
+	return metadata, nil
+}
+
+func readNativeProvisioningIssuerAuthorityKeys(reader *wire.Reader) []protocol.AuthorityKeyRecord {
+	count := reader.ReadVectorCount("native issuer authority key")
+	if reader.Err() != nil || count > maximumNativeProvisioningIssuerAuthorityKeys {
+		reader.SetErr(fmt.Errorf("client: native issuer authority key count is invalid"))
+		return nil
+	}
+	keys := make([]protocol.AuthorityKeyRecord, 0, count)
+	for index := uint64(0); index < count; index++ {
+		keys = append(keys, protocol.DecodeAuthorityKeyRecord(reader))
+	}
+	return keys
 }
 
 func decodeNativeRelayDescriptor(encoded []byte) (protocol.RelayDescriptor, error) {

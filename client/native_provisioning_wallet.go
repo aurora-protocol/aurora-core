@@ -397,6 +397,7 @@ func zeroNativeProvisioning(provisioning *NativeProvisioning) {
 		return
 	}
 	for _, field := range [][]byte{
+		provisioning.IssuerMetadata,
 		provisioning.Descriptor,
 		provisioning.TrustedDescriptorHash,
 		provisioning.Template,
@@ -409,6 +410,11 @@ func zeroNativeProvisioning(provisioning *NativeProvisioning) {
 		provisioning.RelayTrustRoots,
 	} {
 		zeroNativeProvisioningBytes(field)
+	}
+	for index := range provisioning.IssuerAuthorityKeys {
+		zeroNativeProvisioningBytes(provisioning.IssuerAuthorityKeys[index].AuthorityID)
+		zeroNativeProvisioningBytes(provisioning.IssuerAuthorityKeys[index].AuthorityKeyID)
+		zeroNativeProvisioningBytes(provisioning.IssuerAuthorityKeys[index].PublicKey.PublicKey)
 	}
 	*provisioning = NativeProvisioning{}
 }

@@ -239,6 +239,10 @@ func (f *Fixture) Provisioning(t testing.TB) client.NativeProvisioning {
 	if err != nil {
 		t.Fatal(err)
 	}
+	issuerMetadata, err := protocol.Encode(f.issuer.PublishIssuerMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
 	accessHint, err := admission.EncodeAccessHintCredential(f.accessHint)
 	if err != nil {
 		t.Fatal(err)
@@ -276,6 +280,8 @@ func (f *Fixture) Provisioning(t testing.TB) client.NativeProvisioning {
 		RelayURL:              "https://" + f.authority + fixturePath,
 		IssuerURL:             "https://issuer.example",
 		IssuerCarrierPath:     fixtureIssuerPath,
+		IssuerMetadata:        issuerMetadata,
+		IssuerAuthorityKeys:   f.issuer.AuthorityKeys(),
 		Descriptor:            descriptor,
 		TrustedDescriptorHash: f.deployment.DescriptorHash(),
 		Template:              template,

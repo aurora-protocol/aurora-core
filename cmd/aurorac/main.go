@@ -812,6 +812,9 @@ func readRestrictedOwnerFile(path string, maximumBytes int, label string) ([]byt
 	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
 		return nil, fmt.Errorf("client: %s changed while opening", label)
 	}
+	if err := validateRestrictedOwnerFileOwner(openedInfo); err != nil {
+		return nil, fmt.Errorf("client: %s: %w", label, err)
+	}
 	if runtime.GOOS != "windows" && openedInfo.Mode().Perm()&0o077 != 0 {
 		return nil, fmt.Errorf("client: %s permissions are too broad", label)
 	}

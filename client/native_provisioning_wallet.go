@@ -44,9 +44,10 @@ type nativeProvisioningWalletEntry struct {
 // NativeProvisioningReservation is a provisioning entry removed from its wallet.
 // The entry is consumed even if subsequent session setup fails.
 type NativeProvisioningReservation struct {
-	SpentHintKey  []byte
-	RelayBucketID []byte
-	Provisioning  NativeProvisioning
+	SpentHintKey         []byte
+	RelayBucketID        []byte
+	AccessHintExpiryUnix uint64
+	Provisioning         NativeProvisioning
 }
 
 // NativeProvisioningWalletBucketStatus reports non-secret wallet availability for one relay bucket.
@@ -204,9 +205,10 @@ func (w *NativeProvisioningWallet) Reserve(alreadyReserved func([]byte) bool, no
 			continue
 		}
 		reservation := NativeProvisioningReservation{
-			SpentHintKey:  append([]byte(nil), entry.spentHintKey...),
-			RelayBucketID: append([]byte(nil), entry.relayBucketID...),
-			Provisioning:  provisioning,
+			SpentHintKey:         append([]byte(nil), entry.spentHintKey...),
+			RelayBucketID:        append([]byte(nil), entry.relayBucketID...),
+			AccessHintExpiryUnix: entry.expiryUnix,
+			Provisioning:         provisioning,
 		}
 		entry.zero()
 		return reservation, nil

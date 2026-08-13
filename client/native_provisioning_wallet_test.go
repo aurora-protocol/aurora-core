@@ -34,6 +34,14 @@ func TestNativeProvisioningWalletCanonicalRoundTripAndReservation(t *testing.T) 
 	if len(firstReservation.SpentHintKey) != 48 || len(firstReservation.RelayBucketID) != 16 {
 		t.Fatalf("reservation identifiers have unexpected lengths: key=%d bucket=%d", len(firstReservation.SpentHintKey), len(firstReservation.RelayBucketID))
 	}
+	credential, err := admission.DecodeAccessHintCredential(firstReservation.Provisioning.AccessHint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstReservation.AccessHintExpiryUnix != credential.ExpiryUnix {
+		t.Fatalf("reservation expiry = %d, want %d", firstReservation.AccessHintExpiryUnix, credential.ExpiryUnix)
+	}
+	zeroNativeAccessHintCredential(&credential)
 	if _, err := firstReservation.Provisioning.ClientDriverConfig(now, nativeProvisioningProofProvider{}); err != nil {
 		t.Fatalf("reserved provisioning is invalid: %v", err)
 	}

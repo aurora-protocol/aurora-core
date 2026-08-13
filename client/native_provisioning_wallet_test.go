@@ -276,6 +276,76 @@ func TestReserveNativeProvisioningSupportsSingleAndWalletSources(t *testing.T) {
 	}
 }
 
+func TestValidateNativeProvisioningSourceAcceptsSingleAndWalletWithoutReservation(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	first := validNativeProvisioning(t, now)
+	second := nativeProvisioningWithDistinctHint(t, first, 0x42)
+
+	single, err := EncodeNativeProvisioning(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeProvisioningBytes(single)
+	if err := ValidateNativeProvisioningSource(single, now); err != nil {
+		t.Fatalf("validate single provisioning: %v", err)
+	}
+	singleReservation, err := ReserveNativeProvisioning(single, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer singleReservation.Zero()
+
+	wallet, err := EncodeNativeProvisioningWallet([]NativeProvisioning{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeProvisioningBytes(wallet)
+	expectedReservation, err := ReserveNativeProvisioning(wallet, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer expectedReservation.Zero()
+	if err := ValidateNativeProvisioningSource(wallet, now); err != nil {
+		t.Fatalf("validate wallet provisioning: %v", err)
+	}
+	actualReservation, err := ReserveNativeProvisioning(wallet, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer actualReservation.Zero()
+	if !bytes.Equal(expectedReservation.SpentHintKey, actualReservation.SpentHintKey) {
+		t.Fatal("validation consumed a wallet provisioning entry")
+	}
+}
+
+func TestValidateNativeProvisioningSourceRejectsMalformedAndExpiredInput(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := ValidateNativeProvisioningSource([]byte{byte(nativeProvisioningWalletFormat)}, now); err == nil {
+		t.Fatal("malformed native provisioning source was accepted")
+	}
+
+	expired := validNativeProvisioning(t, now)
+	credential, err := admission.DecodeAccessHintCredential(expired.AccessHint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential.ExpiryUnix = uint64(now.Add(-time.Second).Unix())
+	expired.AccessHint, err = admission.EncodeAccessHintCredential(credential)
+	zeroNativeAccessHintCredential(&credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeProvisioning(&expired)
+	encoded, err := EncodeNativeProvisioningWallet([]NativeProvisioning{expired})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeProvisioningBytes(encoded)
+	if err := ValidateNativeProvisioningSource(encoded, now); err == nil {
+		t.Fatal("expired native provisioning wallet was accepted")
+	}
+}
+
 func nativeProvisioningWithDistinctHint(t testing.TB, input NativeProvisioning, selector byte) NativeProvisioning {
 	t.Helper()
 	output := cloneProvisioningForSession(input)

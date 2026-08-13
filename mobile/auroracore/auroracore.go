@@ -40,25 +40,26 @@ import (
 
 // Operation codes for AuroraCoreCall. Kept stable as part of the ABI contract.
 const (
-	opEncodeMetadataRequest     = 1
-	opEncodeIssueRequest        = 2
-	opEncodeSpendRequest        = 3
-	opDecodeMetadataResponse    = 4
-	opDecodeIssueResponse       = 5
-	opDecodeSpendResponse       = 6
-	opParseAdmissionProof       = 7
-	opBeginNativeSession        = 8
-	opCompleteNativeSession     = 9
-	opCloseNativeSession        = 10
-	opQueueFrameBlock           = 11
-	opNextPacket                = 12
-	opHandlePacket              = 13
-	opIngressLocalPacket        = 14
-	opNextLocalPacket           = 15
-	opBeginNativeSessionJSON    = 16
-	opCompleteNativeSessionRaw  = 17
-	opIngressLocalPacketJSON    = 18
-	opReserveNativeProvisioning = 19
+	opEncodeMetadataRequest            = 1
+	opEncodeIssueRequest               = 2
+	opEncodeSpendRequest               = 3
+	opDecodeMetadataResponse           = 4
+	opDecodeIssueResponse              = 5
+	opDecodeSpendResponse              = 6
+	opParseAdmissionProof              = 7
+	opBeginNativeSession               = 8
+	opCompleteNativeSession            = 9
+	opCloseNativeSession               = 10
+	opQueueFrameBlock                  = 11
+	opNextPacket                       = 12
+	opHandlePacket                     = 13
+	opIngressLocalPacket               = 14
+	opNextLocalPacket                  = 15
+	opBeginNativeSessionJSON           = 16
+	opCompleteNativeSessionRaw         = 17
+	opIngressLocalPacketJSON           = 18
+	opReserveNativeProvisioning        = 19
+	opValidateNativeProvisioningSource = 20
 )
 
 // Result status bytes.
@@ -367,6 +368,14 @@ func dispatch(op int, in []byte, arg uint64) (byte, []byte) {
 			return statusError, nil
 		}
 		return statusOK, encoded
+	case opValidateNativeProvisioningSource:
+		if arg == 0 || arg > uint64(^uint64(0)>>1) {
+			return statusError, nil
+		}
+		if err := client.ValidateNativeProvisioningSource(in, time.Unix(int64(arg), 0).UTC()); err != nil {
+			return statusError, nil
+		}
+		return statusOK, nil
 	default:
 		return statusError, nil
 	}

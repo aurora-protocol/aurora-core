@@ -119,6 +119,25 @@ func TestNativeProvisioningReservationTraversesCABI(t *testing.T) {
 	}
 }
 
+func TestValidateNativeProvisioningSourceTraversesCABI(t *testing.T) {
+	caller := newNativeIntegrationCaller(t)
+	fixture := newNativeSessionFixture(t, time.Now())
+	defer fixture.Close(t)
+	encoded, err := client.EncodeNativeProvisioning(fixture.Provisioning(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeBytes(encoded)
+
+	status, payload := nativeIntegrationCall(t, caller, opValidateNativeProvisioningSource, encoded, uint64(time.Now().Unix()))
+	if status != statusOK || len(payload) != 0 {
+		t.Fatalf("C ABI validation = status %d payload %x", status, payload)
+	}
+	if status, payload := nativeIntegrationCall(t, caller, opValidateNativeProvisioningSource, []byte{0x01}, uint64(time.Now().Unix())); status != statusError || len(payload) != 0 {
+		t.Fatalf("C ABI malformed validation = status %d payload %x", status, payload)
+	}
+}
+
 type nativeProvisioningReservationTestResult struct {
 	provisioning  []byte
 	spentHintKey  []byte

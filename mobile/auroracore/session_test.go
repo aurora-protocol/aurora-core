@@ -429,6 +429,9 @@ func TestNativeSessionTerminalDuplexReleasesRegistrySlot(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("local packet wait did not observe terminal duplex")
 	}
+	if _, err := registry.nextLocalPacket(context.Background(), 1); !errors.Is(err, io.EOF) {
+		t.Fatalf("late local packet wait error = %v, want io.EOF", err)
+	}
 	if _, err := registry.lookup(1); err == nil {
 		t.Fatal("terminal native duplex retained its registry handle")
 	}

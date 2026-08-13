@@ -53,6 +53,8 @@ type nativeSessionRegistry struct {
 	randomMu      sync.Mutex
 	next          uint64
 	sessions      map[uint64]*nativeSession
+	terminals     map[uint64]error
+	terminalOrder []uint64
 	now           func() time.Time
 	random        io.Reader
 	start         nativeSessionStarter
@@ -104,6 +106,7 @@ func newNativeSessionRegistry(options nativeSessionRegistryOptions) *nativeSessi
 	return &nativeSessionRegistry{
 		next:          1,
 		sessions:      make(map[uint64]*nativeSession),
+		terminals:     make(map[uint64]error),
 		now:           options.now,
 		random:        options.random,
 		start:         options.start,
@@ -476,6 +479,9 @@ func (r *nativeSessionRegistry) nextLocalPacket(ctx context.Context, handle uint
 	}
 	session, err := r.lookup(handle)
 	if err != nil {
+		if terminalErr := r.terminalLocalPacketError(handle); terminalErr != nil {
+			return nil, terminalErr
+		}
 		return nil, err
 	}
 	session.mu.Lock()
@@ -551,9 +557,11 @@ func (r *nativeSessionRegistry) finishNativeDuplex(handle uint64, session *nativ
 		return
 	}
 	session.finishDuplex(err)
+	terminalErr := session.localPacketTerminationError()
 	r.mu.Lock()
 	if r.sessions[handle] == session {
 		delete(r.sessions, handle)
+		r.rememberTerminalLocked(handle, terminalErr)
 	}
 	r.mu.Unlock()
 	_ = session.close()
@@ -631,6 +639,41 @@ func (r *nativeSessionRegistry) lookup(handle uint64) (*nativeSession, error) {
 		return nil, fmt.Errorf("auroracore: native session handle is unknown")
 	}
 	return session, nil
+}
+
+func (r *nativeSessionRegistry) terminalLocalPacketError(handle uint64) error {
+	if r == nil || handle == 0 {
+		return nil
+	}
+	r.mu.Lock()
+	err := r.terminals[handle]
+	r.mu.Unlock()
+	return err
+}
+
+func (r *nativeSessionRegistry) rememberTerminalLocked(handle uint64, err error) {
+	if handle == 0 {
+		return
+	}
+	if err == nil {
+		err = session.ErrClosed
+	}
+	if r.terminals == nil {
+		r.terminals = make(map[uint64]error)
+	}
+	if _, exists := r.terminals[handle]; exists {
+		r.terminals[handle] = err
+		return
+	}
+	if len(r.terminalOrder) == maximumNativeSessions {
+		oldest := r.terminalOrder[0]
+		delete(r.terminals, oldest)
+		copy(r.terminalOrder, r.terminalOrder[1:])
+		r.terminalOrder[len(r.terminalOrder)-1] = handle
+	} else {
+		r.terminalOrder = append(r.terminalOrder, handle)
+	}
+	r.terminals[handle] = err
 }
 
 func (r *nativeSessionRegistry) allocateHandleLocked() (uint64, error) {

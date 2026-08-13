@@ -1,10 +1,22 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"time"
+)
+
+const (
+	productionCoverRequestTimeout        = 4 * time.Second
+	productionCoverResponseHeaderTimeout = productionCoverRequestTimeout
+	productionCoverTLSHandshakeTimeout   = 5 * time.Second
+	productionCoverMaxConnections        = 256
+	productionCoverMaxIdleConnections    = 256
+	productionCoverMaxIdlePerHost        = 64
+	productionCoverMaxResponseHeaders    = 64 << 10
 )
 
 type CoverOrigin interface {
@@ -24,6 +36,18 @@ type productionCoverOrigin struct {
 
 func (productionCoverOrigin) productionFirstHopCoverOrigin() {}
 
+func (o productionCoverOrigin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), productionCoverRequestTimeout)
+	defer cancel()
+	o.CoverOrigin.ServeHTTP(w, r.WithContext(ctx))
+}
+
+func (o productionCoverOrigin) ServeFailureHTTP(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), productionCoverRequestTimeout)
+	defer cancel()
+	o.CoverOrigin.ServeFailureHTTP(w, r.WithContext(ctx))
+}
+
 type reverseProxyCoverOrigin struct {
 	proxy *httputil.ReverseProxy
 }
@@ -39,11 +63,27 @@ func NewProductionReverseProxyCoverOrigin(target *url.URL) (ProductionCoverOrigi
 
 // NewProductionReverseProxyCoverOriginWithTransport constructs a production cover origin with a fixed transport.
 func NewProductionReverseProxyCoverOriginWithTransport(target *url.URL, transport http.RoundTripper) (ProductionCoverOrigin, error) {
+	if transport == nil {
+		transport = newProductionCoverTransport()
+	}
 	origin, err := NewReverseProxyCoverOriginWithTransport(target, transport)
 	if err != nil {
 		return nil, err
 	}
 	return productionCoverOrigin{CoverOrigin: origin}, nil
+}
+
+func newProductionCoverTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// A configured origin must not be redirected through ambient proxy settings.
+	transport.Proxy = nil
+	transport.ResponseHeaderTimeout = productionCoverResponseHeaderTimeout
+	transport.TLSHandshakeTimeout = productionCoverTLSHandshakeTimeout
+	transport.MaxConnsPerHost = productionCoverMaxConnections
+	transport.MaxIdleConns = productionCoverMaxIdleConnections
+	transport.MaxIdleConnsPerHost = productionCoverMaxIdlePerHost
+	transport.MaxResponseHeaderBytes = productionCoverMaxResponseHeaders
+	return transport
 }
 
 func NewReverseProxyCoverOriginWithTransport(target *url.URL, transport http.RoundTripper) (CoverOrigin, error) {

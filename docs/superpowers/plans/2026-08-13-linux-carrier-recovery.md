@@ -52,5 +52,5 @@
 
 - [x] Run focused, full, race, static, and cross-compile suites.
 - [x] Run fuzz and first-hop integration suites.
-- [ ] Review for credential reuse, state rollback, symlink/permission races, goroutine leaks, unbounded buffers, session-state reuse, and error misclassification.
+- [x] Review for credential reuse, state rollback, symlink/permission races, goroutine leaks, unbounded buffers, session-state reuse, and error misclassification.
 - [ ] Commit reviewed implementation in small independently testable changes, publish the branch, open a draft review, and merge only after all checks pass.

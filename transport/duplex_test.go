@@ -157,6 +157,27 @@ func TestRunPacketDuplexClassifiesCarrierReadEOF(t *testing.T) {
 	requireDuplexClosedOnce(t, reader.closeCalls.Load(), writer.closeCalls.Load(), endpoint.closeCalls.Load())
 }
 
+func TestRunPacketDuplexCancellationWinsWhileDrainingCarrierFailure(t *testing.T) {
+	reader := newGatedCloseReadCloser(bytes.NewReader(nil))
+	writer := &discardWriteCloser{}
+	endpoint := newDuplexTestEndpoint()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- RunPacketDuplex(ctx, reader, writer, endpoint, discardFrameBlock, 64)
+	}()
+
+	awaitSignal(t, reader.closeStarted, "carrier-failure cleanup")
+	cancel()
+	close(reader.releaseClose)
+
+	if err := awaitDuplexResult(t, result); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunPacketDuplex cancellation during cleanup error = %v, want context.Canceled", err)
+	}
+	requireDuplexClosedOnce(t, reader.closeCalls.Load(), writer.closeCalls.Load(), endpoint.closeCalls.Load())
+}
+
 func TestRunPacketDuplexReturnsHandlerErrorAndDestroysBlocks(t *testing.T) {
 	var encoded bytes.Buffer
 	recordWriter, err := NewRecordWriter(&encoded, 64)
@@ -460,6 +481,31 @@ type blockingReadCloser struct {
 	startOnce  sync.Once
 	closeOnce  sync.Once
 	closeCalls atomic.Int32
+}
+
+type gatedCloseReadCloser struct {
+	io.Reader
+	closeStarted chan struct{}
+	releaseClose chan struct{}
+	closeOnce    sync.Once
+	closeCalls   atomic.Int32
+}
+
+func newGatedCloseReadCloser(reader io.Reader) *gatedCloseReadCloser {
+	return &gatedCloseReadCloser{
+		Reader:       reader,
+		closeStarted: make(chan struct{}),
+		releaseClose: make(chan struct{}),
+	}
+}
+
+func (r *gatedCloseReadCloser) Close() error {
+	r.closeCalls.Add(1)
+	r.closeOnce.Do(func() {
+		close(r.closeStarted)
+		<-r.releaseClose
+	})
+	return nil
 }
 
 func newBlockingReadCloser() *blockingReadCloser {

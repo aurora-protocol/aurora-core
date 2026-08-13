@@ -101,6 +101,9 @@ func RunPacketDuplex(ctx context.Context, readCarrier io.ReadCloser, writeCarrie
 		<-results
 		collected++
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if triggerErr != nil {
 		return triggerErr
 	}

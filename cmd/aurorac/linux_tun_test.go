@@ -190,12 +190,12 @@ func TestLinuxTUNNetworkRejectsUnsafeRelayRouteData(t *testing.T) {
 
 func TestParseTUNConfigRequiresSafeHostPrefixes(t *testing.T) {
 	for name, arguments := range map[string][]string{
-		"IPv4 subnet":       {"--provisioning", "/private/provisioning.bin", "--ipv4-address", "10.77.0.2/24"},
-		"IPv6 subnet":       {"--provisioning", "/private/provisioning.bin", "--ipv6-address", "fd77::2/64"},
-		"bad interface":     {"--provisioning", "/private/provisioning.bin", "--tun-iface", "aurora/0"},
-		"dynamic interface": {"--provisioning", "/private/provisioning.bin", "--tun-iface", "aurora%d"},
-		"spaced interface":  {"--provisioning", "/private/provisioning.bin", "--tun-iface", "aurora 0"},
-		"bad MTU":           {"--provisioning", "/private/provisioning.bin", "--tun-mtu", "575"},
+		"IPv4 subnet":       {"--provisioning", "/private/provisioning.bin", "--wallet-state", "/private/wallet-state.bin", "--ipv4-address", "10.77.0.2/24"},
+		"IPv6 subnet":       {"--provisioning", "/private/provisioning.bin", "--wallet-state", "/private/wallet-state.bin", "--ipv6-address", "fd77::2/64"},
+		"bad interface":     {"--provisioning", "/private/provisioning.bin", "--wallet-state", "/private/wallet-state.bin", "--tun-iface", "aurora/0"},
+		"dynamic interface": {"--provisioning", "/private/provisioning.bin", "--wallet-state", "/private/wallet-state.bin", "--tun-iface", "aurora%d"},
+		"spaced interface":  {"--provisioning", "/private/provisioning.bin", "--wallet-state", "/private/wallet-state.bin", "--tun-iface", "aurora 0"},
+		"bad MTU":           {"--provisioning", "/private/provisioning.bin", "--wallet-state", "/private/wallet-state.bin", "--tun-mtu", "575"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parseTUNConfig(arguments, io.Discard); err == nil {
@@ -203,12 +203,34 @@ func TestParseTUNConfigRequiresSafeHostPrefixes(t *testing.T) {
 			}
 		})
 	}
-	config, err := parseTUNConfig([]string{"--provisioning", "/private/provisioning.bin"}, io.Discard)
+	config, err := parseTUNConfig([]string{"--provisioning", "/private/provisioning.bin", "--wallet-state", "/private/wallet-state.bin"}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if config.devicePath == "" || config.interfaceName == "" || config.mtu != 1280 || config.ipv4 != netip.MustParsePrefix("10.77.0.2/32") || config.ipv6 != netip.MustParsePrefix("fd77::2/128") {
 		t.Fatalf("default TUN configuration = %+v", config)
+	}
+}
+
+func TestParseTUNConfigValidatesProvisioningSource(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"single provisioning", []string{"--provisioning", "/private/provisioning.bin", "--wallet-state", "/private/wallet-state.bin"}, true},
+		{"wallet provisioning", []string{"--provisioning-wallet", "/private/wallet.bin", "--wallet-state", "/private/wallet-state.bin"}, true},
+		{"both sources", []string{"--provisioning", "/private/provisioning.bin", "--provisioning-wallet", "/private/wallet.bin", "--wallet-state", "/private/wallet-state.bin"}, false},
+		{"single missing state", []string{"--provisioning", "/private/provisioning.bin"}, false},
+		{"wallet missing state", []string{"--provisioning-wallet", "/private/wallet.bin"}, false},
+		{"state without source", []string{"--wallet-state", "/private/wallet-state.bin"}, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := parseTUNConfig(testCase.args, io.Discard)
+			if (err == nil) != testCase.want {
+				t.Fatalf("parse tunnel config error = %v, want success=%t", err, testCase.want)
+			}
+		})
 	}
 }
 

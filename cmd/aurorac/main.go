@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"math/big"
 	"mime"
 	"net"
 	"net/http"
@@ -28,6 +30,9 @@ const (
 	maximumProvisioningFileBytes = 1 << 20
 	maximumIssuerResponseBytes   = 1 << 20
 	defaultIssuerRequestTimeout  = 30 * time.Second
+	defaultCarrierRetryInitial   = 250 * time.Millisecond
+	defaultCarrierRetryMaximum   = 10 * time.Second
+	encryptedCarrierComponent    = "encrypted carrier"
 )
 
 var (
@@ -41,17 +46,63 @@ var (
 )
 
 type proxyConfig struct {
-	provisioningPath    string
-	httpListenAddress   string
-	socksListenAddress  string
-	allowPublicListener bool
-	issuerTimeout       time.Duration
-	runtimeOptions      client.TCPProxyRuntimeOptions
+	provisioningPath       string
+	provisioningWalletPath string
+	walletStatePath        string
+	httpListenAddress      string
+	socksListenAddress     string
+	allowPublicListener    bool
+	issuerTimeout          time.Duration
+	runtimeOptions         client.TCPProxyRuntimeOptions
 }
 
 type proxyComponentResult struct {
 	name string
 	err  error
+}
+
+type componentFailure struct {
+	name string
+	err  error
+}
+
+func (e *componentFailure) Error() string {
+	if e == nil {
+		return "client: component failure is unavailable"
+	}
+	if e.err == nil {
+		return fmt.Sprintf("client: %s stopped unexpectedly", e.name)
+	}
+	return fmt.Sprintf("client: %s: %v", e.name, e.err)
+}
+
+func (e *componentFailure) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+type carrierRecoveryPolicy struct {
+	InitialDelay time.Duration
+	MaximumDelay time.Duration
+	Jitter       func(time.Duration) (time.Duration, error)
+	Wait         func(context.Context, time.Duration) error
+}
+
+type carrierRecoveryAttempt func(context.Context) (recoverable bool, err error)
+
+type provisioningWalletReservation func(time.Time) (client.NativeProvisioningReservation, error)
+
+type provisioningWalletAttempt func(context.Context, client.NativeProvisioningReservation) error
+
+func newComponentFailure(result proxyComponentResult) *componentFailure {
+	return &componentFailure{name: result.name, err: result.err}
+}
+
+func isRecoverableCarrierFailure(err error) bool {
+	var failure *componentFailure
+	return errors.As(err, &failure) && failure.name == encryptedCarrierComponent && (errors.Is(failure.err, transport.ErrCarrierRead) || errors.Is(failure.err, transport.ErrCarrierWrite))
 }
 
 func main() {
@@ -122,7 +173,9 @@ func parseProxyConfig(args []string, stderr io.Writer) (proxyConfig, error) {
 	flags := flag.NewFlagSet("aurorac proxy", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	config := proxyConfig{}
-	flags.StringVar(&config.provisioningPath, "provisioning", "", "owner-only native provisioning file")
+	flags.StringVar(&config.provisioningPath, "provisioning", "", "owner-only one-time native provisioning file")
+	flags.StringVar(&config.provisioningWalletPath, "provisioning-wallet", "", "owner-only native provisioning wallet file")
+	flags.StringVar(&config.walletStatePath, "wallet-state", "", "owner-only local wallet reservation state file")
 	flags.StringVar(&config.httpListenAddress, "http-listen", "127.0.0.1:8080", "local HTTP CONNECT listen address")
 	flags.StringVar(&config.socksListenAddress, "socks-listen", "127.0.0.1:1080", "local SOCKS5 listen address")
 	flags.BoolVar(&config.allowPublicListener, "allow-public-listeners", false, "allow non-loopback local proxy listeners")
@@ -136,8 +189,8 @@ func parseProxyConfig(args []string, stderr io.Writer) (proxyConfig, error) {
 	if flags.NArg() != 0 {
 		return proxyConfig{}, fmt.Errorf("client: unexpected proxy command arguments")
 	}
-	if strings.TrimSpace(config.provisioningPath) == "" || strings.TrimSpace(config.provisioningPath) != config.provisioningPath {
-		return proxyConfig{}, fmt.Errorf("client: provisioning file is required")
+	if err := validateProvisioningSource(config.provisioningPath, config.provisioningWalletPath, config.walletStatePath); err != nil {
+		return proxyConfig{}, err
 	}
 	if config.issuerTimeout <= 0 || config.issuerTimeout > 5*time.Minute {
 		return proxyConfig{}, fmt.Errorf("client: issuer timeout is invalid")
@@ -160,6 +213,26 @@ func parseProxyConfig(args []string, stderr io.Writer) (proxyConfig, error) {
 		return proxyConfig{}, err
 	}
 	return config, nil
+}
+
+func validateProvisioningSource(provisioningPath, walletPath, statePath string) error {
+	single := validProvisioningPath(provisioningPath)
+	wallet := validProvisioningPath(walletPath)
+	state := validProvisioningPath(statePath)
+	if (provisioningPath != "" && !single) || (walletPath != "" && !wallet) || (statePath != "" && !state) {
+		return fmt.Errorf("client: provisioning source path is invalid")
+	}
+	if single == wallet {
+		return fmt.Errorf("client: exactly one provisioning source is required")
+	}
+	if (single || wallet) != state {
+		return fmt.Errorf("client: provisioning requires a wallet state file")
+	}
+	return nil
+}
+
+func validProvisioningPath(path string) bool {
+	return strings.TrimSpace(path) != "" && strings.TrimSpace(path) == path
 }
 
 func validateProxyListenAddress(address string, allowPublic bool) error {
@@ -189,15 +262,50 @@ func runProxy(ctx context.Context, config proxyConfig, stdout io.Writer) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	encoded, err := readRestrictedProvisioningFile(config.provisioningPath)
+	if config.provisioningWalletPath != "" {
+		return runProxyWithProvisioningWallet(ctx, config, stdout)
+	}
+	return runProxyAttempt(ctx, config, stdout)
+}
+
+func runProxyAttempt(ctx context.Context, config proxyConfig, stdout io.Writer) error {
+	if ctx == nil {
+		return fmt.Errorf("client: proxy context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	reservation, err := reserveSingleNativeProvisioning(config.provisioningPath, config.walletStatePath, time.Now().UTC())
 	if err != nil {
 		return err
 	}
-	provisioning, err := client.ParseNativeProvisioning(encoded, time.Now())
+	defer reservation.Zero()
+	return runProxyWithProvisioning(ctx, config, reservation.Provisioning, stdout)
+}
+
+func runProxyWithProvisioningWallet(ctx context.Context, config proxyConfig, stdout io.Writer) error {
+	encoded, err := readRestrictedProvisioningWalletFile(config.provisioningWalletPath)
+	if err != nil {
+		return err
+	}
+	wallet, err := client.ParseNativeProvisioningWallet(encoded, time.Now().UTC())
 	zeroProxyBytes(encoded)
 	if err != nil {
-		return fmt.Errorf("client: parse provisioning: %w", err)
+		return fmt.Errorf("client: parse provisioning wallet: %w", err)
 	}
+	defer wallet.Zero()
+	store, err := newProvisioningWalletStateStore(config.walletStatePath)
+	if err != nil {
+		return err
+	}
+	return runWithProvisioningWallet(ctx, carrierRecoveryPolicy{}, func(now time.Time) (client.NativeProvisioningReservation, error) {
+		return store.Reserve(wallet, now)
+	}, func(attemptContext context.Context, reservation client.NativeProvisioningReservation) error {
+		return runProxyWithProvisioning(attemptContext, config, reservation.Provisioning, stdout)
+	})
+}
+
+func runProxyWithProvisioning(ctx context.Context, config proxyConfig, provisioning client.NativeProvisioning, stdout io.Writer) error {
 	provisioned, work, err := client.BeginProvisionedSession(ctx, provisioning, client.ProvisionedSessionOptions{IssuerTimeout: config.issuerTimeout})
 	zeroProxyProvisioning(&provisioning)
 	if err != nil {
@@ -243,16 +351,50 @@ func runTUN(ctx context.Context, config tunConfig, stdout io.Writer) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	encoded, err := readRestrictedProvisioningFile(config.provisioningPath)
+	if config.provisioningWalletPath != "" {
+		return runTUNWithProvisioningWallet(ctx, config, stdout)
+	}
+	return runTUNAttempt(ctx, config, stdout)
+}
+
+func runTUNAttempt(ctx context.Context, config tunConfig, stdout io.Writer) error {
+	if ctx == nil {
+		return fmt.Errorf("client: tunnel context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	reservation, err := reserveSingleNativeProvisioning(config.provisioningPath, config.walletStatePath, time.Now().UTC())
 	if err != nil {
 		return err
 	}
-	provisioning, err := client.ParseNativeProvisioning(encoded, time.Now())
+	defer reservation.Zero()
+	return runTUNWithProvisioning(ctx, config, reservation.Provisioning, stdout)
+}
+
+func runTUNWithProvisioningWallet(ctx context.Context, config tunConfig, stdout io.Writer) error {
+	encoded, err := readRestrictedProvisioningWalletFile(config.provisioningWalletPath)
+	if err != nil {
+		return err
+	}
+	wallet, err := client.ParseNativeProvisioningWallet(encoded, time.Now().UTC())
 	zeroProxyBytes(encoded)
 	if err != nil {
-		return fmt.Errorf("client: parse provisioning: %w", err)
+		return fmt.Errorf("client: parse provisioning wallet: %w", err)
 	}
-	defer zeroProxyProvisioning(&provisioning)
+	defer wallet.Zero()
+	store, err := newProvisioningWalletStateStore(config.walletStatePath)
+	if err != nil {
+		return err
+	}
+	return runWithProvisioningWallet(ctx, carrierRecoveryPolicy{}, func(now time.Time) (client.NativeProvisioningReservation, error) {
+		return store.Reserve(wallet, now)
+	}, func(attemptContext context.Context, reservation client.NativeProvisioningReservation) error {
+		return runTUNWithProvisioning(attemptContext, config, reservation.Provisioning, stdout)
+	})
+}
+
+func runTUNWithProvisioning(ctx context.Context, config tunConfig, provisioning client.NativeProvisioning, stdout io.Writer) error {
 	platformConfig, err := config.platformTUNConfig()
 	if err != nil {
 		return err
@@ -304,6 +446,127 @@ func runTUN(ctx context.Context, config tunConfig, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "aurorac tunnel interface=%s\n", platformConfig.InterfaceName)
 	componentErr := runTUNComponents(ctx, established, runtime, state.Close)
 	return errors.Join(componentErr, provisioned.Close())
+}
+
+func runWithCarrierRecovery(ctx context.Context, policy carrierRecoveryPolicy, attempt carrierRecoveryAttempt) error {
+	if ctx == nil {
+		return fmt.Errorf("client: carrier recovery context is required")
+	}
+	if attempt == nil {
+		return fmt.Errorf("client: carrier recovery attempt is required")
+	}
+	policy, err := normalizeCarrierRecoveryPolicy(policy)
+	if err != nil {
+		return err
+	}
+	delay := policy.InitialDelay
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
+		recoverable, err := attempt(ctx)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err == nil {
+			return nil
+		}
+		if !recoverable {
+			return err
+		}
+		waitDelay, jitterErr := policy.Jitter(delay)
+		if jitterErr != nil {
+			return fmt.Errorf("client: randomize carrier recovery delay: %w", jitterErr)
+		}
+		if waitDelay <= 0 || waitDelay > delay {
+			return fmt.Errorf("client: carrier recovery jitter is invalid")
+		}
+		if waitErr := policy.Wait(ctx, waitDelay); waitErr != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return waitErr
+		}
+		delay = nextCarrierRecoveryDelay(delay, policy.MaximumDelay)
+	}
+}
+
+func runWithProvisioningWallet(ctx context.Context, policy carrierRecoveryPolicy, reserve provisioningWalletReservation, attempt provisioningWalletAttempt) error {
+	if reserve == nil {
+		return fmt.Errorf("client: wallet reservation is required")
+	}
+	if attempt == nil {
+		return fmt.Errorf("client: wallet attempt is required")
+	}
+	return runWithCarrierRecovery(ctx, policy, func(attemptContext context.Context) (bool, error) {
+		now := time.Now().UTC()
+		reservation, err := reserve(now)
+		if err != nil {
+			return false, err
+		}
+		defer reservation.Zero()
+		if reservation.AccessHintExpiryUnix <= uint64(now.Unix()) {
+			return false, fmt.Errorf("client: wallet reservation is expired")
+		}
+		err = attempt(attemptContext, reservation)
+		return isRecoverableCarrierFailure(err), err
+	})
+}
+
+func normalizeCarrierRecoveryPolicy(policy carrierRecoveryPolicy) (carrierRecoveryPolicy, error) {
+	if policy.InitialDelay == 0 {
+		policy.InitialDelay = defaultCarrierRetryInitial
+	}
+	if policy.MaximumDelay == 0 {
+		policy.MaximumDelay = defaultCarrierRetryMaximum
+	}
+	if policy.InitialDelay <= 0 || policy.MaximumDelay <= 0 || policy.InitialDelay > policy.MaximumDelay {
+		return carrierRecoveryPolicy{}, fmt.Errorf("client: carrier recovery policy is invalid")
+	}
+	if policy.Wait == nil {
+		policy.Wait = waitForCarrierRecovery
+	}
+	if policy.Jitter == nil {
+		policy.Jitter = jitterCarrierRecoveryDelay
+	}
+	return policy, nil
+}
+
+func jitterCarrierRecoveryDelay(maximum time.Duration) (time.Duration, error) {
+	if maximum <= 0 {
+		return 0, fmt.Errorf("client: carrier recovery delay is invalid")
+	}
+	minimum := maximum / 2
+	if minimum == 0 {
+		return maximum, nil
+	}
+	span := maximum - minimum
+	if span == 0 {
+		return maximum, nil
+	}
+	random, err := rand.Int(rand.Reader, big.NewInt(int64(span)+1))
+	if err != nil {
+		return 0, err
+	}
+	return minimum + time.Duration(random.Int64()), nil
+}
+
+func waitForCarrierRecovery(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func nextCarrierRecoveryDelay(delay, maximum time.Duration) time.Duration {
+	if delay >= maximum || delay > maximum/2 {
+		return maximum
+	}
+	return delay * 2
 }
 
 func exchangeIssuerWork(ctx context.Context, timeout time.Duration, work client.IssuerWork) ([]byte, error) {
@@ -406,7 +669,7 @@ func runProxyComponents(ctx context.Context, established *handshake.EstablishedS
 	}()
 	go func() {
 		results <- proxyComponentResult{
-			name: "encrypted carrier",
+			name: encryptedCarrierComponent,
 			err:  transport.RunPacketDuplex(componentContext, established.ReadCarrier, established.WriteCarrier, established.Application, runtime.HandleFrameBlock, transport.DefaultMaxRecordBodyBytes),
 		}
 	}()
@@ -425,13 +688,11 @@ func runProxyComponents(ctx context.Context, established *handshake.EstablishedS
 	if ctx.Err() != nil {
 		return nil
 	}
-	if terminal.err == nil {
-		return fmt.Errorf("client: %s stopped unexpectedly", terminal.name)
-	}
+	terminalErr := newComponentFailure(terminal)
 	if closeErr != nil {
-		return errors.Join(fmt.Errorf("client: %s: %w", terminal.name, terminal.err), closeErr)
+		return errors.Join(terminalErr, closeErr)
 	}
-	return fmt.Errorf("client: %s: %w", terminal.name, terminal.err)
+	return terminalErr
 }
 
 func runTUNComponents(ctx context.Context, established *handshake.EstablishedSession, runtime *client.PacketTUNRuntime, beforeDeviceClose func() error) error {
@@ -449,7 +710,7 @@ func runTUNComponents(ctx context.Context, established *handshake.EstablishedSes
 	}()
 	go func() {
 		results <- proxyComponentResult{
-			name: "encrypted carrier",
+			name: encryptedCarrierComponent,
 			err:  transport.RunPacketDuplex(componentContext, established.ReadCarrier, established.WriteCarrier, established.Application, runtime.HandleFrameBlock, transport.DefaultMaxRecordBodyBytes),
 		}
 	}()
@@ -478,10 +739,7 @@ func runTUNComponents(ctx context.Context, established *handshake.EstablishedSes
 	if ctx.Err() != nil {
 		return closeErr
 	}
-	if terminal.err == nil {
-		return errors.Join(fmt.Errorf("client: %s stopped unexpectedly", terminal.name), closeErr)
-	}
-	return errors.Join(fmt.Errorf("client: %s: %w", terminal.name, terminal.err), closeErr)
+	return errors.Join(newComponentFailure(terminal), closeErr)
 }
 
 func closeProxyListener(listener net.Listener) error {
@@ -496,35 +754,77 @@ func closeProxyListener(listener net.Listener) error {
 }
 
 func readRestrictedProvisioningFile(path string) ([]byte, error) {
+	return readRestrictedOwnerFile(path, maximumProvisioningFileBytes, "provisioning file")
+}
+
+func readRestrictedProvisioningWalletFile(path string) ([]byte, error) {
+	return readRestrictedOwnerFile(path, client.MaximumNativeProvisioningWalletBytes, "provisioning wallet file")
+}
+
+func reserveSingleNativeProvisioning(provisioningPath, statePath string, now time.Time) (client.NativeProvisioningReservation, error) {
+	encoded, err := readRestrictedProvisioningFile(provisioningPath)
+	if err != nil {
+		return client.NativeProvisioningReservation{}, err
+	}
+	provisioning, err := client.ParseNativeProvisioning(encoded, now)
+	zeroProxyBytes(encoded)
+	if err != nil {
+		return client.NativeProvisioningReservation{}, fmt.Errorf("client: parse provisioning: %w", err)
+	}
+	walletEncoded, err := client.EncodeNativeProvisioningWallet([]client.NativeProvisioning{provisioning})
+	zeroProxyProvisioning(&provisioning)
+	if err != nil {
+		return client.NativeProvisioningReservation{}, fmt.Errorf("client: encode single provisioning wallet: %w", err)
+	}
+	wallet, err := client.ParseNativeProvisioningWallet(walletEncoded, now)
+	zeroProxyBytes(walletEncoded)
+	if err != nil {
+		return client.NativeProvisioningReservation{}, fmt.Errorf("client: load single provisioning wallet: %w", err)
+	}
+	defer wallet.Zero()
+	store, err := newProvisioningWalletStateStore(statePath)
+	if err != nil {
+		return client.NativeProvisioningReservation{}, err
+	}
+	return store.Reserve(wallet, now)
+}
+
+func readRestrictedOwnerFile(path string, maximumBytes int, label string) ([]byte, error) {
+	if maximumBytes <= 0 || label == "" {
+		return nil, fmt.Errorf("client: restricted file limits are invalid")
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, fmt.Errorf("client: inspect provisioning file: %w", err)
+		return nil, fmt.Errorf("client: inspect %s: %w", label, err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("client: provisioning file must be regular")
+		return nil, fmt.Errorf("client: %s must be regular", label)
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("client: open provisioning file: %w", err)
+		return nil, fmt.Errorf("client: open %s: %w", label, err)
 	}
 	defer file.Close()
 	openedInfo, err := file.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("client: inspect opened provisioning file: %w", err)
+		return nil, fmt.Errorf("client: inspect opened %s: %w", label, err)
 	}
 	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
-		return nil, fmt.Errorf("client: provisioning file changed while opening")
+		return nil, fmt.Errorf("client: %s changed while opening", label)
+	}
+	if err := validateRestrictedOwnerFileOwner(openedInfo); err != nil {
+		return nil, fmt.Errorf("client: %s: %w", label, err)
 	}
 	if runtime.GOOS != "windows" && openedInfo.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("client: provisioning file permissions are too broad")
+		return nil, fmt.Errorf("client: %s permissions are too broad", label)
 	}
-	encoded, err := io.ReadAll(io.LimitReader(file, maximumProvisioningFileBytes+1))
+	encoded, err := io.ReadAll(io.LimitReader(file, int64(maximumBytes)+1))
 	if err != nil {
-		return nil, fmt.Errorf("client: read provisioning file: %w", err)
+		return nil, fmt.Errorf("client: read %s: %w", label, err)
 	}
-	if len(encoded) == 0 || len(encoded) > maximumProvisioningFileBytes {
+	if len(encoded) == 0 || len(encoded) > maximumBytes {
 		zeroProxyBytes(encoded)
-		return nil, fmt.Errorf("client: provisioning file length is invalid")
+		return nil, fmt.Errorf("client: %s length is invalid", label)
 	}
 	return encoded, nil
 }

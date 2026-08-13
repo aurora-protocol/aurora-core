@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -10,6 +11,11 @@ import (
 )
 
 var (
+	// ErrCarrierRead marks a failure while reading a packet record from the carrier.
+	ErrCarrierRead = errors.New("transport: packet carrier read failed")
+	// ErrCarrierWrite marks a failure while writing a packet record to the carrier.
+	ErrCarrierWrite = errors.New("transport: packet carrier write failed")
+
 	errNilDuplexContext       = errors.New("transport: nil duplex context")
 	errNilPacketEndpoint      = errors.New("transport: nil packet endpoint")
 	errNilPacketEndpointDone  = errors.New("transport: nil packet endpoint lifecycle")
@@ -105,7 +111,7 @@ func runPacketReadPump(ctx context.Context, reader *RecordReader, endpoint Packe
 	for {
 		packet, err := reader.Read()
 		if err != nil {
-			return err
+			return classifyCarrierReadError(err)
 		}
 		if err := handlePacketRecord(ctx, endpoint, handler, packet); err != nil {
 			return err
@@ -146,12 +152,29 @@ func runPacketWritePump(ctx context.Context, writer *RecordWriter, endpoint Pack
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			return writer.Write(packet)
+			if err := writer.Write(packet); err != nil {
+				return classifyCarrierWriteError(err)
+			}
+			return nil
 		}()
 		if writeErr != nil {
 			return writeErr
 		}
 	}
+}
+
+func classifyCarrierReadError(err error) error {
+	if errors.Is(err, ErrEmptyRecord) || errors.Is(err, ErrRecordTooLarge) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrCarrierRead, err)
+}
+
+func classifyCarrierWriteError(err error) error {
+	if errors.Is(err, ErrEmptyRecord) || errors.Is(err, ErrRecordTooLarge) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrCarrierWrite, err)
 }
 
 func closePacketDuplex(readCarrier io.ReadCloser, writeCarrier io.WriteCloser, endpoint PacketEndpoint) error {

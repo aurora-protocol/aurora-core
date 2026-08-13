@@ -722,6 +722,134 @@ func TestLiveFirstHopProvisionedSessionEgress(t *testing.T) {
 	}
 }
 
+func TestLiveFirstHopProvisioningWalletRebuildsAfterCarrierLoss(t *testing.T) {
+	now := time.Now().UTC()
+	tlsMaterial := newLiveFirstHopTLSMaterial(t)
+	certificate, err := x509.ParseCertificate(tlsMaterial.certificate.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := newLiveFirstHopFixtureWithOriginSPKI(t, now, auroracrypto.PreHash(certificate.RawSubjectPublicKeyInfo))
+	secondCredential := cloneLiveFirstHopHintCredential(fixture.accessHint)
+	secondCredential.HintSelector = randomLiveFirstHopBytes(t, 16)
+	secondCredential.HintSecret = randomLiveFirstHopBytes(t, 32)
+	if bytes.Equal(secondCredential.HintSelector, fixture.accessHint.HintSelector) {
+		secondCredential.HintSelector[0] ^= 0xff
+	}
+	secondFixture := fixture
+	secondFixture.accessHint = secondCredential
+	relayDriver := fixture.newRelayDriver(t, liveFirstHopRelayOptions{
+		hintResolver: liveFirstHopMultiHintResolver{credentials: []admission.AccessHintCredential{fixture.accessHint, secondCredential}},
+	})
+	harness := startLiveFirstHopHarnessWithSessionFactoryAndTLS(t, fixture, relayDriver, nil, nil, tlsMaterial)
+	issuer := startLiveFirstHopIssuer(t, fixture)
+	firstProvisioning := fixture.nativeProvisioningForHarness(t, harness, issuer.URL)
+	secondProvisioning := secondFixture.nativeProvisioningForHarness(t, harness, issuer.URL)
+	walletEncoded, err := auroraclient.EncodeNativeProvisioningWallet([]auroraclient.NativeProvisioning{firstProvisioning, secondProvisioning})
+	zeroLiveFirstHopNativeProvisioning(&firstProvisioning)
+	zeroLiveFirstHopNativeProvisioning(&secondProvisioning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wallet, err := auroraclient.ParseNativeProvisioningWallet(walletEncoded, now)
+	zeroLiveFirstHopBytes(walletEncoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wallet.Zero()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	firstReservation, err := wallet.Reserve(nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstReservation.Zero()
+	firstProvisioned, firstEstablished := completeLiveFirstHopProvisionedSession(t, ctx, issuer, firstReservation.Provisioning)
+	defer firstProvisioned.Close()
+	defer firstEstablished.Close()
+	firstRelayApplication := <-harness.relayApplications
+	if err := firstEstablished.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-firstRelayApplication.Done():
+	case <-time.After(time.Second):
+		t.Fatal("first relay application did not stop after carrier loss")
+	}
+
+	secondReservation, err := wallet.Reserve(nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondReservation.Zero()
+	if bytes.Equal(firstReservation.SpentHintKey, secondReservation.SpentHintKey) {
+		t.Fatal("recovery reused the first access hint")
+	}
+	secondProvisioned, secondEstablished := completeLiveFirstHopProvisionedSession(t, ctx, issuer, secondReservation.Provisioning)
+	defer secondProvisioned.Close()
+	defer secondEstablished.Close()
+	secondRelayApplication := <-harness.relayApplications
+	if firstEstablished.Application == secondEstablished.Application || firstRelayApplication == secondRelayApplication {
+		t.Fatal("recovery reused authenticated application state")
+	}
+
+	pumpContext, cancelPump := context.WithCancel(ctx)
+	pumpResult := make(chan error, 1)
+	go func() {
+		pumpResult <- transport.RunPacketDuplex(
+			pumpContext,
+			secondEstablished.ReadCarrier,
+			secondEstablished.WriteCarrier,
+			secondEstablished.Application,
+			func(context.Context, protocol.FrameBlock) error { return nil },
+			1<<20,
+		)
+	}()
+	payload := randomLiveFirstHopBytes(t, 111)
+	if err := secondEstablished.Application.QueueFrames(ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding, Payload: payload}}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case received := <-harness.serverFrames:
+		if !bytes.Equal(received, payload) {
+			t.Fatalf("recovered relay payload = %x, want %x", received, payload)
+		}
+	case <-ctx.Done():
+		t.Fatalf("recovered client payload did not reach relay: %v", ctx.Err())
+	}
+	cancelPump()
+	if err := secondEstablished.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case pumpErr := <-pumpResult:
+		if pumpErr != nil && !errors.Is(pumpErr, context.Canceled) && !errors.Is(pumpErr, session.ErrClosed) && !errors.Is(pumpErr, net.ErrClosed) && !errors.Is(pumpErr, io.ErrClosedPipe) && !errors.Is(pumpErr, io.EOF) {
+			t.Fatal(pumpErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("recovered carrier pump did not stop")
+	}
+}
+
+func completeLiveFirstHopProvisionedSession(t testing.TB, ctx context.Context, issuer *httptest.Server, provisioning auroraclient.NativeProvisioning) (*auroraclient.ProvisionedSession, *handshake.EstablishedSession) {
+	t.Helper()
+	provisioned, work, err := auroraclient.BeginProvisionedSession(ctx, provisioning, auroraclient.ProvisionedSessionOptions{})
+	zeroLiveFirstHopNativeProvisioning(&provisioning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerResponse := liveFirstHopIssueResponse(t, issuer, work)
+	work.Zero()
+	defer zeroLiveFirstHopBytes(issuerResponse)
+	established, err := provisioned.Complete(ctx, issuerResponse)
+	if err != nil {
+		_ = provisioned.Close()
+		t.Fatal(err)
+	}
+	return provisioned, established
+}
+
 func TestLiveFirstHopEgressPolicyDenialPreventsDial(t *testing.T) {
 	dialer := &rejectingLiveFirstHopDialer{}
 	sessionFactory, err := NewFirstHopProxySessionFactory(FirstHopProxySessionOptions{
@@ -2338,6 +2466,27 @@ func zeroLiveFirstHopBytes(value []byte) {
 	for index := range value {
 		value[index] = 0
 	}
+}
+
+func zeroLiveFirstHopNativeProvisioning(provisioning *auroraclient.NativeProvisioning) {
+	if provisioning == nil {
+		return
+	}
+	for _, field := range [][]byte{
+		provisioning.Descriptor,
+		provisioning.TrustedDescriptorHash,
+		provisioning.Template,
+		provisioning.TemplateAuthorityKey,
+		provisioning.AccessHint,
+		provisioning.PolicyOffer,
+		provisioning.TransportHints,
+		provisioning.RelayRequestHeaders,
+		provisioning.RelayResponseHeaders,
+		provisioning.RelayTrustRoots,
+	} {
+		zeroLiveFirstHopBytes(field)
+	}
+	*provisioning = auroraclient.NativeProvisioning{}
 }
 
 type liveFirstHopMutatingOpener struct {

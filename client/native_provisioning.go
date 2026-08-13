@@ -108,6 +108,18 @@ func EncodeNativeProvisioning(provisioning NativeProvisioning) ([]byte, error) {
 
 // ParseNativeProvisioning validates a complete native provisioning bundle before use.
 func ParseNativeProvisioning(encoded []byte, now time.Time) (NativeProvisioning, error) {
+	provisioning, err := parseNativeProvisioningContainer(encoded)
+	if err != nil {
+		return NativeProvisioning{}, err
+	}
+	if err := provisioning.validateAt(now); err != nil {
+		zeroNativeProvisioning(&provisioning)
+		return NativeProvisioning{}, err
+	}
+	return provisioning, nil
+}
+
+func parseNativeProvisioningContainer(encoded []byte) (NativeProvisioning, error) {
 	if len(encoded) == 0 || len(encoded) > maximumNativeProvisioningBytes {
 		return NativeProvisioning{}, fmt.Errorf("client: native provisioning size is invalid")
 	}
@@ -134,10 +146,8 @@ func ParseNativeProvisioning(encoded []byte, now time.Time) (NativeProvisioning,
 		RelayTrustRoots:       readNativeProvisioningOpaque24(reader, maximumNativeProvisioningTrustRootBytes*maximumNativeProvisioningTrustRoots),
 	}
 	if reader.Err() != nil || !reader.EOF() {
+		zeroNativeProvisioning(&provisioning)
 		return NativeProvisioning{}, fmt.Errorf("client: malformed native provisioning")
-	}
-	if err := provisioning.validateAt(now); err != nil {
-		return NativeProvisioning{}, err
 	}
 	return provisioning, nil
 }

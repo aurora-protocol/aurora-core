@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -33,6 +34,9 @@ const (
 	defaultPacketAdapterIPv4FragmentLifetime = 15 * time.Second
 	maximumPacketAdapterIPv4FragmentSets     = 32
 	maximumPacketAdapterIPv4Fragments        = 128
+	defaultPacketAdapterIPv6FragmentLifetime = 15 * time.Second
+	maximumPacketAdapterIPv6FragmentSets     = 32
+	maximumPacketAdapterIPv6Fragments        = 128
 	packetAdapterTCP                         = 6
 	packetAdapterUDP                         = 17
 	packetAdapterDNSPort                     = 53
@@ -78,6 +82,7 @@ type PacketAdapter struct {
 	flowsByID     map[uint64]*packetAdapterFlow
 	dnsRequests   map[uint64]packetAdapterDNSRequest
 	ipv4Fragments map[packetAdapterIPv4FragmentKey]*packetAdapterIPv4FragmentSet
+	ipv6Fragments map[packetAdapterIPv6FragmentKey]*packetAdapterIPv6FragmentSet
 	localPackets  [][]byte
 }
 
@@ -133,6 +138,37 @@ type packetAdapterIPv4FragmentSegment struct {
 type packetAdapterIPv4FragmentSet struct {
 	header             []byte
 	segments           []packetAdapterIPv4FragmentSegment
+	totalPayloadLength int
+	payloadBytes       int
+	expiresAt          time.Time
+}
+
+type packetAdapterIPv6FragmentKey struct {
+	source netip.Addr
+	target netip.Addr
+	id     uint32
+}
+
+type packetAdapterIPv6FragmentPacket struct {
+	key                     packetAdapterIPv6FragmentKey
+	header                  []byte
+	nextHeaderOffset        int
+	nextHeaderAfterFragment uint8
+	payload                 []byte
+	offset                  int
+	more                    bool
+}
+
+type packetAdapterIPv6FragmentSegment struct {
+	offset  int
+	payload []byte
+}
+
+type packetAdapterIPv6FragmentSet struct {
+	header             []byte
+	nextHeaderOffset   int
+	nextHeader         uint8
+	segments           []packetAdapterIPv6FragmentSegment
 	totalPayloadLength int
 	payloadBytes       int
 	expiresAt          time.Time
@@ -198,6 +234,7 @@ func NewPacketAdapter(application *session.Application, options PacketAdapterOpt
 		flowsByID:     make(map[uint64]*packetAdapterFlow),
 		dnsRequests:   make(map[uint64]packetAdapterDNSRequest),
 		ipv4Fragments: make(map[packetAdapterIPv4FragmentKey]*packetAdapterIPv4FragmentSet),
+		ipv6Fragments: make(map[packetAdapterIPv6FragmentKey]*packetAdapterIPv6FragmentSet),
 	}, nil
 }
 
@@ -217,12 +254,28 @@ func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Ti
 	}
 	a.mu.Lock()
 	a.expireIPv4FragmentsLocked(now)
+	a.expireIPv6FragmentsLocked(now)
 	a.mu.Unlock()
 	if fragment, fragmented, err := parsePacketAdapterIPv4Fragment(encoded, a.maximumPacket); err != nil {
 		return err
 	} else if fragmented {
 		a.mu.Lock()
 		reassembled, err := a.ingressIPv4FragmentLocked(fragment, now)
+		a.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		if reassembled == nil {
+			return nil
+		}
+		defer zeroPacketAdapterBytes(reassembled)
+		encoded = reassembled
+	}
+	if fragment, fragmented, err := parsePacketAdapterIPv6Fragment(encoded, a.maximumPacket); err != nil {
+		return err
+	} else if fragmented {
+		a.mu.Lock()
+		reassembled, err := a.ingressIPv6FragmentLocked(fragment, now)
 		a.mu.Unlock()
 		if err != nil {
 			return err
@@ -1110,6 +1163,195 @@ func (a *PacketAdapter) discardIPv4FragmentSetLocked(key packetAdapterIPv4Fragme
 	set.payloadBytes = 0
 }
 
+func parsePacketAdapterIPv6Fragment(encoded []byte, maximum int) (packetAdapterIPv6FragmentPacket, bool, error) {
+	if len(encoded) == 0 || encoded[0]>>4 != 6 {
+		return packetAdapterIPv6FragmentPacket{}, false, nil
+	}
+	if len(encoded) > maximum || len(encoded) < 40 || int(binary.BigEndian.Uint16(encoded[4:6])) != len(encoded)-40 || encoded[7] == 0 {
+		return packetAdapterIPv6FragmentPacket{}, false, fmt.Errorf("client: packet adapter IPv6 packet is malformed")
+	}
+	nextHeader := encoded[6]
+	nextHeaderOffset := 6
+	offset := 40
+	seenDestination := false
+	for headerCount := 0; ; headerCount++ {
+		switch nextHeader {
+		case packetAdapterTCP, packetAdapterUDP:
+			return packetAdapterIPv6FragmentPacket{}, false, nil
+		case packetAdapterIPv6HopByHop:
+			if headerCount != 0 {
+				return packetAdapterIPv6FragmentPacket{}, false, fmt.Errorf("client: packet adapter IPv6 hop-by-hop header position is invalid")
+			}
+		case packetAdapterIPv6Destination:
+			if seenDestination {
+				return packetAdapterIPv6FragmentPacket{}, false, fmt.Errorf("client: packet adapter IPv6 destination options are duplicated")
+			}
+			seenDestination = true
+		case packetAdapterIPv6Fragment:
+			if headerCount >= maximumPacketAdapterIPv6Options {
+				return packetAdapterIPv6FragmentPacket{}, false, fmt.Errorf("client: packet adapter IPv6 extension header chain is too long")
+			}
+			next, payloadOffset, fragmentOffset, more, id, err := parsePacketAdapterIPv6FragmentFields(encoded, offset)
+			if err != nil {
+				return packetAdapterIPv6FragmentPacket{}, false, err
+			}
+			if next != packetAdapterTCP && next != packetAdapterUDP && next != packetAdapterIPv6Destination {
+				return packetAdapterIPv6FragmentPacket{}, false, fmt.Errorf("client: packet adapter IPv6 fragment next header is unsupported")
+			}
+			if next == packetAdapterIPv6Destination && seenDestination {
+				return packetAdapterIPv6FragmentPacket{}, false, fmt.Errorf("client: packet adapter IPv6 destination options are duplicated")
+			}
+			if fragmentOffset == 0 && !more {
+				return packetAdapterIPv6FragmentPacket{}, false, nil
+			}
+			payload := encoded[payloadOffset:]
+			if len(payload) == 0 || (more && len(payload)%8 != 0) || fragmentOffset+len(payload) > maximum-40 {
+				return packetAdapterIPv6FragmentPacket{}, false, fmt.Errorf("client: packet adapter IPv6 fragment is malformed")
+			}
+			header := append([]byte(nil), encoded[:offset]...)
+			binary.BigEndian.PutUint16(header[4:6], 0)
+			fragment := packetAdapterIPv6FragmentPacket{
+				key: packetAdapterIPv6FragmentKey{
+					source: netip.AddrFrom16([16]byte(encoded[8:24])),
+					target: netip.AddrFrom16([16]byte(encoded[24:40])),
+					id:     id,
+				},
+				header:                  header,
+				nextHeaderOffset:        nextHeaderOffset,
+				nextHeaderAfterFragment: next,
+				payload:                 payload,
+				offset:                  fragmentOffset,
+				more:                    more,
+			}
+			if !fragment.key.source.IsValid() || !fragment.key.target.IsValid() {
+				zeroPacketAdapterBytes(header)
+				return packetAdapterIPv6FragmentPacket{}, false, fmt.Errorf("client: packet adapter IPv6 address is invalid")
+			}
+			return fragment, true, nil
+		default:
+			return packetAdapterIPv6FragmentPacket{}, false, nil
+		}
+		if headerCount >= maximumPacketAdapterIPv6Options {
+			return packetAdapterIPv6FragmentPacket{}, false, fmt.Errorf("client: packet adapter IPv6 extension header chain is too long")
+		}
+		var err error
+		nextHeaderOffset = offset
+		nextHeader, offset, err = parsePacketAdapterIPv6OptionsHeader(encoded, offset)
+		if err != nil {
+			return packetAdapterIPv6FragmentPacket{}, false, err
+		}
+	}
+}
+
+func (a *PacketAdapter) ingressIPv6FragmentLocked(fragment packetAdapterIPv6FragmentPacket, now time.Time) ([]byte, error) {
+	set := a.ipv6Fragments[fragment.key]
+	if set == nil {
+		fragmentSetLimit := a.maximumFlows
+		if fragmentSetLimit > maximumPacketAdapterIPv6FragmentSets {
+			fragmentSetLimit = maximumPacketAdapterIPv6FragmentSets
+		}
+		if len(a.ipv6Fragments) >= fragmentSetLimit {
+			zeroPacketAdapterBytes(fragment.header)
+			return nil, fmt.Errorf("client: packet adapter IPv6 fragment set limit reached")
+		}
+		set = &packetAdapterIPv6FragmentSet{
+			header:             fragment.header,
+			nextHeaderOffset:   fragment.nextHeaderOffset,
+			nextHeader:         fragment.nextHeaderAfterFragment,
+			totalPayloadLength: -1,
+			expiresAt:          now.Add(defaultPacketAdapterIPv6FragmentLifetime),
+		}
+		a.ipv6Fragments[fragment.key] = set
+	} else {
+		if !bytes.Equal(set.header, fragment.header) || set.nextHeaderOffset != fragment.nextHeaderOffset || set.nextHeader != fragment.nextHeaderAfterFragment {
+			zeroPacketAdapterBytes(fragment.header)
+			a.discardIPv6FragmentSetLocked(fragment.key, set)
+			return nil, fmt.Errorf("client: packet adapter IPv6 fragments have inconsistent headers")
+		}
+		zeroPacketAdapterBytes(fragment.header)
+	}
+	end := fragment.offset + len(fragment.payload)
+	if set.totalPayloadLength >= 0 && end > set.totalPayloadLength {
+		a.discardIPv6FragmentSetLocked(fragment.key, set)
+		return nil, fmt.Errorf("client: packet adapter IPv6 fragment exceeds final length")
+	}
+	if !fragment.more {
+		if set.totalPayloadLength >= 0 && set.totalPayloadLength != end {
+			a.discardIPv6FragmentSetLocked(fragment.key, set)
+			return nil, fmt.Errorf("client: packet adapter IPv6 fragments have inconsistent final length")
+		}
+		for _, existing := range set.segments {
+			if existing.offset+len(existing.payload) > end {
+				a.discardIPv6FragmentSetLocked(fragment.key, set)
+				return nil, fmt.Errorf("client: packet adapter IPv6 fragment exceeds final length")
+			}
+		}
+		if len(set.header)+end > a.maximumPacket {
+			a.discardIPv6FragmentSetLocked(fragment.key, set)
+			return nil, fmt.Errorf("client: packet adapter IPv6 reassembled packet exceeds limit")
+		}
+		set.totalPayloadLength = end
+	}
+	if len(set.segments) >= maximumPacketAdapterIPv6Fragments || set.payloadBytes+len(fragment.payload) > a.maximumPacket-40 {
+		a.discardIPv6FragmentSetLocked(fragment.key, set)
+		return nil, fmt.Errorf("client: packet adapter IPv6 fragment set exceeds limits")
+	}
+	for _, existing := range set.segments {
+		if fragment.offset < existing.offset+len(existing.payload) && existing.offset < end {
+			a.discardIPv6FragmentSetLocked(fragment.key, set)
+			return nil, fmt.Errorf("client: packet adapter IPv6 fragments overlap")
+		}
+	}
+	set.segments = append(set.segments, packetAdapterIPv6FragmentSegment{
+		offset:  fragment.offset,
+		payload: append([]byte(nil), fragment.payload...),
+	})
+	set.payloadBytes += len(fragment.payload)
+	if set.totalPayloadLength < 0 {
+		return nil, nil
+	}
+	sort.Slice(set.segments, func(i, j int) bool { return set.segments[i].offset < set.segments[j].offset })
+	nextOffset := 0
+	for _, segment := range set.segments {
+		if segment.offset != nextOffset {
+			return nil, nil
+		}
+		nextOffset += len(segment.payload)
+	}
+	if nextOffset != set.totalPayloadLength || len(set.header)+nextOffset > a.maximumPacket {
+		return nil, nil
+	}
+	reassembled := make([]byte, len(set.header)+nextOffset)
+	copy(reassembled, set.header)
+	binary.BigEndian.PutUint16(reassembled[4:6], uint16(len(reassembled)-40))
+	reassembled[set.nextHeaderOffset] = set.nextHeader
+	for _, segment := range set.segments {
+		copy(reassembled[len(set.header)+segment.offset:], segment.payload)
+	}
+	a.discardIPv6FragmentSetLocked(fragment.key, set)
+	return reassembled, nil
+}
+
+func (a *PacketAdapter) expireIPv6FragmentsLocked(now time.Time) {
+	for key, set := range a.ipv6Fragments {
+		if !now.Before(set.expiresAt) {
+			a.discardIPv6FragmentSetLocked(key, set)
+		}
+	}
+}
+
+func (a *PacketAdapter) discardIPv6FragmentSetLocked(key packetAdapterIPv6FragmentKey, set *packetAdapterIPv6FragmentSet) {
+	delete(a.ipv6Fragments, key)
+	zeroPacketAdapterBytes(set.header)
+	for index := range set.segments {
+		zeroPacketAdapterBytes(set.segments[index].payload)
+	}
+	set.header = nil
+	set.segments = nil
+	set.totalPayloadLength = 0
+	set.payloadBytes = 0
+}
+
 func parsePacketAdapterIPv6(encoded []byte) (packetAdapterIPPacket, error) {
 	if len(encoded) < 40 || int(binary.BigEndian.Uint16(encoded[4:6])) != len(encoded)-40 || encoded[7] == 0 {
 		return packetAdapterIPPacket{}, fmt.Errorf("client: packet adapter IPv6 packet is malformed")
@@ -1172,17 +1414,25 @@ func parsePacketAdapterIPv6Headers(encoded []byte) (uint8, int, error) {
 }
 
 func parsePacketAdapterIPv6FragmentHeader(encoded []byte, offset int) (uint8, int, error) {
+	nextHeader, payloadOffset, fragmentOffset, more, _, err := parsePacketAdapterIPv6FragmentFields(encoded, offset)
+	if err != nil {
+		return 0, 0, err
+	}
+	if fragmentOffset != 0 || more {
+		return 0, 0, fmt.Errorf("client: packet adapter IPv6 fragmented packets are unsupported")
+	}
+	return nextHeader, payloadOffset, nil
+}
+
+func parsePacketAdapterIPv6FragmentFields(encoded []byte, offset int) (uint8, int, int, bool, uint32, error) {
 	if offset < 40 || offset+8 > len(encoded) || encoded[offset+1] != 0 {
-		return 0, 0, fmt.Errorf("client: packet adapter IPv6 fragment header is malformed")
+		return 0, 0, 0, false, 0, fmt.Errorf("client: packet adapter IPv6 fragment header is malformed")
 	}
 	flags := binary.BigEndian.Uint16(encoded[offset+2 : offset+4])
 	if flags&0x0006 != 0 {
-		return 0, 0, fmt.Errorf("client: packet adapter IPv6 fragment header reserved bits are set")
+		return 0, 0, 0, false, 0, fmt.Errorf("client: packet adapter IPv6 fragment header reserved bits are set")
 	}
-	if flags&0xfff8 != 0 || flags&0x0001 != 0 {
-		return 0, 0, fmt.Errorf("client: packet adapter IPv6 fragmented packets are unsupported")
-	}
-	return encoded[offset], offset + 8, nil
+	return encoded[offset], offset + 8, int(flags & 0xfff8), flags&0x0001 != 0, binary.BigEndian.Uint32(encoded[offset+4 : offset+8]), nil
 }
 
 func parsePacketAdapterIPv6OptionsHeader(encoded []byte, offset int) (uint8, int, error) {

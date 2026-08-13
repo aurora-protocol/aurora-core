@@ -116,7 +116,7 @@ git commit -m "feat: run packet adapter on tunnel devices"
 - Produces `func resolveRelayRoutes(context.Context, string) ([]linuxHostRoute, error)`.
 - Produces `func (m *linuxTUNNetworkManager) Configure(context.Context, []linuxHostRoute) (*linuxTUNNetworkState, error)` and `func (s *linuxTUNNetworkState) Close() error`.
 
-- [ ] **Step 1: Write failing route-validation and rollback tests**
+- [x] **Step 1: Write failing route-validation and rollback tests**
 
 ```go
 func TestLinuxTUNNetworkConfiguresBypassesBeforeDefaults(t *testing.T) {
@@ -141,13 +141,13 @@ func TestLinuxTUNNetworkRollsBackOnlyOwnedRoutes(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the new tests and verify they fail**
+- [x] **Step 2: Run the new tests and verify they fail**
 
 Run: `GOCACHE=/private/tmp/aurora-gocache go test ./cmd/aurorac -run 'LinuxTUN|TUNConfig|RelayRoute' -count=1`
 
 Expected: compile failure naming `linuxTUNNetworkManager`.
 
-- [ ] **Step 3: Implement fail-closed Linux network setup**
+- [x] **Step 3: Implement fail-closed Linux network setup**
 
 Use `ip -j -4/-6 route get ADDRESS` and `ip -j -4/-6 route show
 default` to build bounded typed route data. Require correct address families,
@@ -157,7 +157,7 @@ configure TUN addresses and link state, then add IPv4 and IPv6 defaults. On
 failure or close, remove successful additions in reverse order. Resolve the
 production `ip` executable from absolute system paths only.
 
-- [ ] **Step 4: Add and run malformed-data tests**
+- [x] **Step 4: Add and run malformed-data tests**
 
 ```go
 func TestResolveRelayRoutesRejectsUnsafeJSON(t *testing.T) {
@@ -179,7 +179,7 @@ Run: `GOCACHE=/private/tmp/aurora-gocache go test ./cmd/aurorac -run 'LinuxTUN|T
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add cmd/aurorac/linux_tun.go cmd/aurorac/linux_tun_test.go

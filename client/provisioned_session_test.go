@@ -51,6 +51,26 @@ func TestProvisionedSessionBuildsIssuerWorkAndClosesDeferredHandshake(t *testing
 	}
 }
 
+func TestProvisionedSessionClosesDeferredHandshakeReturnedWithError(t *testing.T) {
+	deferred := &provisionedSessionTestHandshake{}
+	_, _, err := newProvisionedSession(
+		context.Background(),
+		provisionedSessionTestProvisioning(t, time.Unix(1_700_000_000, 0).UTC(), nil),
+		ProvisionedSessionOptions{
+			now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+			start: func(context.Context, NativeProvisioning, time.Time) (provisionedSessionHandshake, handshake.ClientProofRequest, error) {
+				return deferred, provisionedSessionTestRequest(), errors.New("starter failed after opening handshake")
+			},
+		},
+	)
+	if err == nil {
+		t.Fatal("provisioned session accepted a failing starter")
+	}
+	if !deferred.Closed() {
+		t.Fatal("failing provisioned session starter left its handshake open")
+	}
+}
+
 func TestProvisionedSessionExpiresAbandonedIssuerWork(t *testing.T) {
 	deferred := &provisionedSessionTestHandshake{}
 	session, work, err := newProvisionedSession(

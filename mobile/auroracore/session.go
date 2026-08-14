@@ -136,6 +136,9 @@ func (r *nativeSessionRegistry) begin(provisioning client.NativeProvisioning) (n
 	}
 	if err != nil {
 		cancel()
+		if deferred != nil {
+			err = errors.Join(err, deferred.Close())
+		}
 		zeroNativeProofRequest(&request)
 		return nativeIssuerWork{}, err
 	}

@@ -11,11 +11,16 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
+	"time"
 
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/wire"
+)
+
+const (
+	issuerVerifierRequestTimeout  = 2 * time.Second
+	issuerVerifierMaxResponseSize = 1 << 20
 )
 
 type MTLSIssuerVerifierTransport struct {
@@ -30,6 +35,10 @@ func (t MTLSIssuerVerifierTransport) ExchangeIssuerVerifier(service protocol.Iss
 	if err != nil {
 		return protocol.IssuerVerifierResponse{}, err
 	}
+	client, err := issuerVerifierHTTPClient(t.Client)
+	if err != nil {
+		return protocol.IssuerVerifierResponse{}, err
+	}
 	encoded, err := protocol.Encode(req)
 	if err != nil {
 		return protocol.IssuerVerifierResponse{}, err
@@ -39,7 +48,9 @@ func (t MTLSIssuerVerifierTransport) ExchangeIssuerVerifier(service protocol.Iss
 		return protocol.IssuerVerifierResponse{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/octet-stream")
-	resp, err := t.Client.Do(httpReq)
+	httpReq.Header.Set("Accept", "application/octet-stream")
+	httpReq.Header.Set("Accept-Encoding", "identity")
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return protocol.IssuerVerifierResponse{}, err
 	}
@@ -50,7 +61,7 @@ func (t MTLSIssuerVerifierTransport) ExchangeIssuerVerifier(service protocol.Iss
 	if resp.StatusCode != http.StatusOK {
 		return protocol.IssuerVerifierResponse{}, fmt.Errorf("ops: verifier service status %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := readIssuerVerifierResponse(resp)
 	if err != nil {
 		return protocol.IssuerVerifierResponse{}, err
 	}
@@ -65,6 +76,70 @@ func (t MTLSIssuerVerifierTransport) ExchangeIssuerVerifier(service protocol.Iss
 	return out, nil
 }
 
+func issuerVerifierHTTPClient(source *http.Client) (*http.Client, error) {
+	transport, err := issuerVerifierHTTPTransport(source.Transport)
+	if err != nil {
+		return nil, err
+	}
+	client := *source
+	client.Transport = transport
+	client.Jar = nil
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return fmt.Errorf("ops: verifier service redirects are not allowed")
+	}
+	if client.Timeout <= 0 || client.Timeout > issuerVerifierRequestTimeout {
+		client.Timeout = issuerVerifierRequestTimeout
+	}
+	return &client, nil
+}
+
+func issuerVerifierHTTPTransport(roundTripper http.RoundTripper) (*http.Transport, error) {
+	var base *http.Transport
+	switch transport := roundTripper.(type) {
+	case nil:
+		defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+		if !ok {
+			return nil, fmt.Errorf("ops: default verifier HTTP transport is not standard")
+		}
+		base = defaultTransport
+	case *http.Transport:
+		base = transport
+	default:
+		return nil, fmt.Errorf("ops: verifier HTTP client must use a standard HTTP transport")
+	}
+	transport := base.Clone()
+	transport.DisableCompression = true
+	tlsConfig := transport.TLSClientConfig
+	if tlsConfig == nil {
+		tlsConfig = &tls.Config{}
+	} else {
+		tlsConfig = tlsConfig.Clone()
+	}
+	if tlsConfig.InsecureSkipVerify {
+		return nil, fmt.Errorf("ops: verifier HTTP client must verify TLS certificates")
+	}
+	if tlsConfig.MaxVersion != 0 && tlsConfig.MaxVersion < tls.VersionTLS13 {
+		return nil, fmt.Errorf("ops: verifier HTTP client TLS maximum is below TLS 1.3")
+	}
+	tlsConfig.MinVersion = tls.VersionTLS13
+	transport.TLSClientConfig = tlsConfig
+	return transport, nil
+}
+
+func readIssuerVerifierResponse(resp *http.Response) ([]byte, error) {
+	if resp.ContentLength > issuerVerifierMaxResponseSize {
+		return nil, fmt.Errorf("ops: verifier response exceeds %d-byte limit", issuerVerifierMaxResponseSize)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, issuerVerifierMaxResponseSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > issuerVerifierMaxResponseSize {
+		return nil, fmt.Errorf("ops: verifier response exceeds %d-byte limit", issuerVerifierMaxResponseSize)
+	}
+	return body, nil
+}
+
 func issuerVerifierEndpoint(service protocol.IssuerVerifierServiceRecord) (string, error) {
 	if service.ServiceProtocolID != registry.IssuerVerifierVOPRFMTLS13 {
 		return "", fmt.Errorf("ops: verifier service protocol 0x%x is not mTLS13", service.ServiceProtocolID)
@@ -76,10 +151,11 @@ func issuerVerifierEndpoint(service protocol.IssuerVerifierServiceRecord) (strin
 	if authority == "" {
 		return "", fmt.Errorf("ops: empty verifier service authority")
 	}
-	if strings.Contains(authority, "://") {
-		return "", fmt.Errorf("ops: verifier service locator must not include a URL scheme")
+	parsed, err := url.Parse("https://" + authority)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("ops: verifier service locator must contain only an authority")
 	}
-	u := url.URL{Scheme: "https", Host: authority, Path: "/"}
+	u := url.URL{Scheme: "https", Host: parsed.Host, Path: "/"}
 	return u.String(), nil
 }
 

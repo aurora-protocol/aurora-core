@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -584,6 +585,159 @@ func TestMTLSIssuerVerifierTransportRejectsServiceAuthKeyMismatch(t *testing.T) 
 	var failureErr *failure.Error
 	if !errors.As(err, &failureErr) || failureErr.Kind != failure.VerifierUnavailable {
 		t.Fatalf("service auth key mismatch error = %T %[1]v, want %v", err, failure.VerifierUnavailable)
+	}
+}
+
+func TestMTLSIssuerVerifierTransportDoesNotFollowRedirects(t *testing.T) {
+	service := verifierServiceRecord()
+	serviceSigner := attachVerifierServiceSigningKey(t, &service)
+	server, client := startVerifierServiceTLSServer(t, &service, serviceSigner, serviceSigner)
+	defer server.Close()
+
+	redirected := make(chan struct{}, 1)
+	destination := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		redirected <- struct{}{}
+	}))
+	defer destination.Close()
+	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusFound)
+	})
+
+	_, err := (MTLSIssuerVerifierTransport{Client: client}).ExchangeIssuerVerifier(service, verifierTransportRequest(t, service))
+	if err == nil {
+		t.Fatalf("redirecting verifier response was accepted")
+	}
+	select {
+	case <-redirected:
+		t.Fatalf("verifier request followed an untrusted redirect")
+	default:
+	}
+}
+
+func TestMTLSIssuerVerifierTransportBoundsDefaultRequestLifetime(t *testing.T) {
+	service := verifierServiceRecord()
+	serviceSigner := attachVerifierServiceSigningKey(t, &service)
+	server, client := startVerifierServiceTLSServer(t, &service, serviceSigner, serviceSigner)
+	defer server.Close()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	releaseServer := func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}
+	defer releaseServer()
+	server.Config.Handler = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	})
+
+	request := verifierTransportRequest(t, service)
+	result := make(chan error, 1)
+	go func() {
+		_, err := (MTLSIssuerVerifierTransport{Client: client}).ExchangeIssuerVerifier(service, request)
+		result <- err
+	}()
+	select {
+	case <-started:
+	case err := <-result:
+		t.Fatalf("verifier request completed before reaching service: %v", err)
+	case <-time.After(time.Second):
+		t.Fatalf("verifier request did not reach TLS service")
+	}
+	select {
+	case err := <-result:
+		releaseServer()
+		if err == nil {
+			t.Fatalf("slow verifier response was accepted")
+		}
+	case <-time.After(issuerVerifierRequestTimeout + 2*time.Second):
+		releaseServer()
+		<-result
+		t.Fatalf("verifier transport has no bounded default request lifetime")
+	}
+}
+
+func verifierTransportRequest(t *testing.T, service protocol.IssuerVerifierServiceRecord) protocol.IssuerVerifierRequest {
+	t.Helper()
+	req, _, err := BuildIssuerVerifierRequest(verifierServiceVerificationRequest(t, service))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req
+}
+
+func TestIssuerVerifierEndpointRejectsURLComponentsInAuthority(t *testing.T) {
+	for _, authority := range []string{
+		":443",
+		"verifier.example/path",
+		"user@verifier.example",
+		"verifier.example?query=yes",
+		"verifier.example#fragment",
+		"//verifier.example",
+	} {
+		t.Run(authority, func(t *testing.T) {
+			service := verifierServiceRecord()
+			service.ServiceLocator = protocol.RoutingRecord{
+				LocatorType: registry.LocatorAuthority,
+				LocatorBody: []byte(authority),
+			}
+			if _, err := issuerVerifierEndpoint(service); err == nil {
+				t.Fatalf("authority %q with URL components was accepted", authority)
+			}
+		})
+	}
+}
+
+func TestIssuerVerifierHTTPClientRejectsUnverifiedTLS(t *testing.T) {
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	if _, err := issuerVerifierHTTPClient(client); err == nil {
+		t.Fatalf("verifier client accepted disabled certificate verification")
+	}
+}
+
+func TestIssuerVerifierHTTPClientClonesTLSConstraints(t *testing.T) {
+	sourceTLS := &tls.Config{}
+	source := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: sourceTLS},
+		Timeout:   10 * time.Second,
+	}
+	client, err := issuerVerifierHTTPClient(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.TLSClientConfig.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("verifier client did not require TLS 1.3")
+	}
+	if client.Timeout != issuerVerifierRequestTimeout {
+		t.Fatalf("verifier client timeout = %v, want %v", client.Timeout, issuerVerifierRequestTimeout)
+	}
+	if sourceTLS.MinVersion != 0 || source.Timeout != 10*time.Second {
+		t.Fatalf("verifier client mutated caller configuration")
+	}
+}
+
+func TestReadIssuerVerifierResponseRejectsOversizedBody(t *testing.T) {
+	for _, response := range []*http.Response{
+		{
+			Body:          io.NopCloser(strings.NewReader("x")),
+			ContentLength: issuerVerifierMaxResponseSize + 1,
+		},
+		{
+			Body:          io.NopCloser(strings.NewReader(strings.Repeat("x", issuerVerifierMaxResponseSize+1))),
+			ContentLength: -1,
+		},
+	} {
+		if _, err := readIssuerVerifierResponse(response); err == nil {
+			t.Fatalf("oversized verifier response was accepted")
+		}
 	}
 }
 

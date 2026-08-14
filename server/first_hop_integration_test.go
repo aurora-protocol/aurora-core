@@ -2520,6 +2520,68 @@ func BenchmarkLiveFirstHopBootstrap(b *testing.B) {
 	}
 }
 
+func BenchmarkLiveFirstHopSteadyStateFrame1200(b *testing.B) {
+	fixture := newLiveFirstHopFixture(b, time.Now())
+	harness := startLiveFirstHopHarness(b, fixture, fixture.newRelayDriver(b), nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	established, err := fixture.newClientDriver(b).Connect(ctx, harness.opener)
+	if err != nil {
+		cancel()
+		_ = harness.close()
+		b.Fatal(err)
+	}
+	relayApplication := <-harness.relayApplications
+	pumpResult := make(chan error, 1)
+	go func() {
+		pumpResult <- transport.RunPacketDuplex(
+			ctx,
+			established.ReadCarrier,
+			established.WriteCarrier,
+			established.Application,
+			func(context.Context, protocol.FrameBlock) error { return nil },
+			transport.DefaultMaxRecordBodyBytes,
+		)
+	}()
+	payload := make([]byte, 1200)
+	frame := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding, Payload: payload}}}
+
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := established.Application.QueueFrames(ctx, frame); err != nil {
+			b.Fatal(err)
+		}
+		select {
+		case received := <-harness.serverFrames:
+			if !bytes.Equal(received, payload) {
+				b.Fatal("relay received different steady-state payload")
+			}
+		case <-ctx.Done():
+			b.Fatal(ctx.Err())
+		}
+	}
+	b.StopTimer()
+	cancel()
+	if err := established.Close(); err != nil {
+		b.Fatal(err)
+	}
+	if err := relayApplication.Close(); err != nil {
+		b.Fatal(err)
+	}
+	select {
+	case err := <-pumpResult:
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, session.ErrClosed) && !errors.Is(err, net.ErrClosed) {
+			b.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		b.Fatal("steady-state packet pump did not stop")
+	}
+	if err := harness.close(); err != nil {
+		b.Fatal(err)
+	}
+}
+
 func BenchmarkLiveFirstHopBootstrapParallel64(b *testing.B) {
 	const connectionCount = 64
 	b.ReportAllocs()

@@ -242,6 +242,59 @@ func TestVerifierHTTPHandlerExchangesSignedBinaryResponseOverMTLS(t *testing.T) 
 	}
 }
 
+func TestVerifierHTTPHandlerRejectsDeclaredOversizedBinaryRequest(t *testing.T) {
+	service, err := NewHarnessService(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifierService := service.PublishIssuerMetadata().VerifierServices[0]
+	encoded, err := protocol.Encode(verifierHTTPTestRequest(t, service, verifierService))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(encoded))
+	request.ContentLength = maximumVerifierRequestBodyBytes + 1
+	request.TLS = &tls.ConnectionState{
+		Version:          tls.VersionTLS13,
+		PeerCertificates: []*x509.Certificate{{PublicKey: &clientKey.PublicKey}},
+	}
+	response := httptest.NewRecorder()
+	NewVerifierHTTPHandler(service).ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("declared oversized verifier request response = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestVerifierHTTPHandlerFailsClosedWithoutService(t *testing.T) {
+	service, err := NewHarnessService(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifierService := service.PublishIssuerMetadata().VerifierServices[0]
+	encoded, err := protocol.Encode(verifierHTTPTestRequest(t, service, verifierService))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(encoded))
+	request.TLS = &tls.ConnectionState{
+		Version:          tls.VersionTLS13,
+		PeerCertificates: []*x509.Certificate{{PublicKey: &clientKey.PublicKey}},
+	}
+	response := httptest.NewRecorder()
+	NewVerifierHTTPHandler(nil).ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("nil verifier service response = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestVerifierHTTPHandlerRequiresMTLSClientCertificate(t *testing.T) {
 	service, err := NewHarnessService(200)
 	if err != nil {

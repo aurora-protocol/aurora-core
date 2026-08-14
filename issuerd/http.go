@@ -23,9 +23,15 @@ import (
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
-const maximumJSONRequestBodyBytes int64 = 1 << 20
+const (
+	maximumJSONRequestBodyBytes     int64 = 1 << 20
+	maximumVerifierRequestBodyBytes int64 = 1 << 20
+)
 
-var errJSONRequestBodyTooLarge = errors.New("issuerd: JSON request body exceeds limit")
+var (
+	errJSONRequestBodyTooLarge = errors.New("issuerd: JSON request body exceeds limit")
+	errVerifierRequestTooLarge = errors.New("issuerd: verifier request body exceeds limit")
+)
 
 type HTTPReadinessReport struct {
 	Passed                     bool
@@ -79,18 +85,12 @@ type SpendResponse struct {
 func NewVerifierHTTPHandler(service *Service) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", methodHandler(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
-		if !hasMutualTLSClientAuth(r) {
+		if service == nil || !service.ready() || !hasMutualTLSClientAuth(r) {
 			writeError(w, http.StatusServiceUnavailable, "verifier unavailable")
 			return
 		}
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		req, err := decodeVerifierRequest(r)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid verifier request")
-			return
-		}
-		reader := wire.NewReader(body)
-		req := protocol.DecodeIssuerVerifierRequest(reader)
-		if reader.Err() != nil || !reader.EOF() {
 			writeError(w, http.StatusBadRequest, "invalid verifier request")
 			return
 		}
@@ -472,6 +472,28 @@ func hasMutualTLSClientAuth(r *http.Request) bool {
 		r.TLS != nil &&
 		r.TLS.Version == tls.VersionTLS13 &&
 		len(r.TLS.PeerCertificates) > 0
+}
+
+func decodeVerifierRequest(r *http.Request) (protocol.IssuerVerifierRequest, error) {
+	if r == nil || r.Body == nil {
+		return protocol.IssuerVerifierRequest{}, fmt.Errorf("issuerd: missing verifier request body")
+	}
+	if r.ContentLength > maximumVerifierRequestBodyBytes {
+		return protocol.IssuerVerifierRequest{}, errVerifierRequestTooLarge
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maximumVerifierRequestBodyBytes+1))
+	if err != nil {
+		return protocol.IssuerVerifierRequest{}, err
+	}
+	if len(body) > int(maximumVerifierRequestBodyBytes) {
+		return protocol.IssuerVerifierRequest{}, errVerifierRequestTooLarge
+	}
+	reader := wire.NewReader(body)
+	req := protocol.DecodeIssuerVerifierRequest(reader)
+	if reader.Err() != nil || !reader.EOF() {
+		return protocol.IssuerVerifierRequest{}, fmt.Errorf("issuerd: invalid verifier request")
+	}
+	return req, nil
 }
 
 func decodeJSONBody(r *http.Request, out any) error {

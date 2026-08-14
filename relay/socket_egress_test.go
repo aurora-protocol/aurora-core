@@ -429,6 +429,28 @@ func TestSocketEgressDNSMessageRejectsMalformedQuestionSections(t *testing.T) {
 	}
 }
 
+func TestSocketEgressDNSMessageRejectsOversizedEncodedName(t *testing.T) {
+	resolver := &recordingIPResolver{answers: []netip.Addr{netip.MustParseAddr("93.184.216.34")}}
+	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink:     &recordingFrameSink{},
+		Dialer:   &recordingContextDialer{},
+		Resolver: resolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = egress.Close() })
+
+	label := strings.Repeat("a", 63)
+	query := socketEgressDNSQuery(t, strings.Join([]string{label, label, label, label}, "."), socketDNSTypeA)
+	if _, err := egress.HandleEvent(context.Background(), ExitFrameEvent{Kind: ExitEventDNSMessage, FlowID: 85, Data: query}); !errors.Is(err, ErrExitEventInvalid) {
+		t.Fatalf("oversized encoded DNS name error = %v, want ErrExitEventInvalid", err)
+	}
+	if len(resolver.calls) != 0 {
+		t.Fatalf("resolver calls = %#v, want none", resolver.calls)
+	}
+}
+
 func TestSocketEgressRejectsMixedPolicyResolutionBeforeDial(t *testing.T) {
 	dialer := &recordingContextDialer{}
 	resolver := &recordingIPResolver{answers: []netip.Addr{

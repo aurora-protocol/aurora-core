@@ -166,6 +166,7 @@ func parseSocketDNSQuestion(message []byte) (socketDNSQuestion, error) {
 		}
 		labels = append(labels, strings.ToLower(string(label)))
 		offset += labelLength
+		nameBytes += labelLength
 	}
 	if len(labels) == 0 || offset+4 > len(message) {
 		return socketDNSQuestion{}, ErrExitEventInvalid

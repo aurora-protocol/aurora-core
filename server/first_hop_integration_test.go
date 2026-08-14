@@ -674,6 +674,104 @@ func TestLiveFirstHopPacketTUNRuntimeInterop(t *testing.T) {
 	}
 }
 
+func TestLiveFirstHopPacketTUNRuntimeUDPEgress(t *testing.T) {
+	payload := randomLiveFirstHopBytes(t, 1201)
+	destination, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = destination.Close() })
+	destinationResult := make(chan error, 1)
+	go func() {
+		buffer := make([]byte, 1500)
+		count, peer, readErr := destination.ReadFrom(buffer)
+		if readErr != nil {
+			destinationResult <- readErr
+			return
+		}
+		if !bytes.Equal(buffer[:count], payload) {
+			destinationResult <- errors.New("tunnel UDP destination received different payload")
+			return
+		}
+		written, writeErr := destination.WriteTo(buffer[:count], peer)
+		if writeErr == nil && written != count {
+			writeErr = io.ErrShortWrite
+		}
+		destinationResult <- writeErr
+	}()
+
+	fixture := newLiveFirstHopFixture(t, time.Now())
+	sessionFactory, err := NewFirstHopProxySessionFactory(FirstHopProxySessionOptions{
+		ExitPolicy: relay.ExitPolicy{AllowPrivate: true},
+		Dialer:     &net.Dialer{},
+		Resolver:   net.DefaultResolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness := startLiveFirstHopHarnessWithSessionFactory(t, fixture, fixture.newRelayDriver(t), nil, sessionFactory)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	established, err := fixture.newClientDriver(t).Connect(ctx, harness.opener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer established.Close()
+	adapter, err := auroraclient.NewPacketAdapter(established.Application, auroraclient.PacketAdapterOptions{
+		MaxFlows:       1,
+		MaxPacketBytes: 1500,
+		UDPMode:        transport.UDPOverStreamFallback,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := newLiveFirstHopPacketTUNDevice()
+	runtime, err := auroraclient.NewPacketTUNRuntime(adapter, device, auroraclient.PacketTUNRuntimeOptions{ReadBufferBytes: 1500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tunnelResult := make(chan error, 1)
+	go func() { tunnelResult <- runtime.Serve(ctx) }()
+	pumpResult := make(chan error, 1)
+	go func() {
+		pumpResult <- transport.RunPacketDuplex(ctx, established.ReadCarrier, established.WriteCarrier, established.Application, runtime.HandleFrameBlock, 1<<20)
+	}()
+	t.Cleanup(func() {
+		_ = runtime.Close()
+		_ = established.Close()
+		for name, result := range map[string]chan error{"packet device": tunnelResult, "carrier": pumpResult} {
+			select {
+			case resultErr := <-result:
+				if resultErr != nil && !errors.Is(resultErr, context.Canceled) && !errors.Is(resultErr, session.ErrClosed) && !errors.Is(resultErr, net.ErrClosed) && !errors.Is(resultErr, io.ErrClosedPipe) && !errors.Is(resultErr, io.EOF) {
+					t.Errorf("%s stopped unexpectedly: %v", name, resultErr)
+				}
+			case <-time.After(time.Second):
+				t.Errorf("%s did not stop", name)
+			}
+		}
+	})
+
+	source := [4]byte{10, 77, 0, 2}
+	target := destination.LocalAddr().(*net.UDPAddr)
+	targetIP := target.IP.To4()
+	if targetIP == nil {
+		t.Fatal("UDP destination did not bind IPv4")
+	}
+	var targetAddress [4]byte
+	copy(targetAddress[:], targetIP)
+	device.Inject(liveFirstHopPacketTUNUDP(t, source, targetAddress, 50000, uint16(target.Port), payload))
+	response := device.NextWrite(t)
+	if len(response) < 28 || response[0]>>4 != 4 || response[9] != 17 || !bytes.Equal(response[12:16], targetIP) || response[16] != source[0] || response[17] != source[1] || response[18] != source[2] || response[19] != source[3] || binary.BigEndian.Uint16(response[20:22]) != uint16(target.Port) || binary.BigEndian.Uint16(response[22:24]) != 50000 {
+		t.Fatalf("tunnel UDP response header = %x", response)
+	}
+	if responsePayload := liveFirstHopPacketTUNUDPPayload(response); !bytes.Equal(responsePayload, payload) {
+		t.Fatalf("tunnel UDP response payload = %x, want %x", responsePayload, payload)
+	}
+	if err := <-destinationResult; err != nil {
+		t.Fatal(err)
+	}
+}
+
 type liveFirstHopPacketTUNDevice struct {
 	reads     chan []byte
 	writes    chan []byte
@@ -761,6 +859,36 @@ func liveFirstHopPacketTUNSYN(t testing.TB, source, target [4]byte, sourcePort, 
 	return packet
 }
 
+func liveFirstHopPacketTUNUDP(t testing.TB, source, target [4]byte, sourcePort, targetPort uint16, payload []byte) []byte {
+	t.Helper()
+	if len(payload) > 1472 {
+		t.Fatal("live packet TUN UDP payload exceeds test packet limit")
+	}
+	packet := make([]byte, 28+len(payload))
+	packet[0] = 0x45
+	binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
+	packet[8] = 64
+	packet[9] = 17
+	copy(packet[12:16], source[:])
+	copy(packet[16:20], target[:])
+	binary.BigEndian.PutUint16(packet[20:22], sourcePort)
+	binary.BigEndian.PutUint16(packet[22:24], targetPort)
+	binary.BigEndian.PutUint16(packet[24:26], uint16(8+len(payload)))
+	copy(packet[28:], payload)
+	binary.BigEndian.PutUint16(packet[10:12], liveFirstHopPacketTUNChecksum(packet[:20]))
+	pseudo := make([]byte, 12)
+	copy(pseudo[:4], source[:])
+	copy(pseudo[4:8], target[:])
+	pseudo[9] = 17
+	binary.BigEndian.PutUint16(pseudo[10:12], uint16(8+len(payload)))
+	checksum := liveFirstHopPacketTUNChecksum(pseudo, packet[20:])
+	if checksum == 0 {
+		checksum = 0xffff
+	}
+	binary.BigEndian.PutUint16(packet[26:28], checksum)
+	return packet
+}
+
 func liveFirstHopPacketTUNPayload(packet []byte) []byte {
 	if len(packet) < 40 || packet[0]>>4 != 4 {
 		return nil
@@ -771,6 +899,18 @@ func liveFirstHopPacketTUNPayload(packet []byte) []byte {
 		return nil
 	}
 	return append([]byte(nil), packet[ipHeaderBytes+20:totalBytes]...)
+}
+
+func liveFirstHopPacketTUNUDPPayload(packet []byte) []byte {
+	if len(packet) < 28 || packet[0]>>4 != 4 || packet[9] != 17 {
+		return nil
+	}
+	ipHeaderBytes := int(packet[0]&0x0f) * 4
+	totalBytes := int(binary.BigEndian.Uint16(packet[2:4]))
+	if ipHeaderBytes < 20 || totalBytes < ipHeaderBytes+8 || totalBytes > len(packet) || int(binary.BigEndian.Uint16(packet[ipHeaderBytes+4:ipHeaderBytes+6])) != totalBytes-ipHeaderBytes {
+		return nil
+	}
+	return append([]byte(nil), packet[ipHeaderBytes+8:totalBytes]...)
 }
 
 func liveFirstHopPacketTUNChecksum(parts ...[]byte) uint16 {

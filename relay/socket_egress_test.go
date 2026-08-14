@@ -373,6 +373,36 @@ func TestSocketEgressForwardsSVCBDNSMessageThroughConfiguredResolver(t *testing.
 	}
 }
 
+func TestSocketEgressForwardsEDNSSVCBDNSMessageThroughConfiguredResolver(t *testing.T) {
+	query := socketEgressDNSQuery(t, "example.com", socketDNSTypeSVCB)
+	binary.BigEndian.PutUint16(query[10:12], 1)
+	query = append(query, 0, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 0)
+	response := append([]byte(nil), query...)
+	response[2] |= socketDNSFlagResponse >> 8
+	dnsResolver := &recordingDNSMessageResolver{response: response}
+	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink:        &recordingFrameSink{},
+		Dialer:      &recordingContextDialer{},
+		Resolver:    &recordingIPResolver{},
+		DNSResolver: dnsResolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = egress.Close() })
+
+	frames, err := egress.HandleEvent(context.Background(), ExitFrameEvent{Kind: ExitEventDNSMessage, FlowID: 85, Data: query})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 1 || !bytes.Equal(frames[0].Payload, response) {
+		t.Fatalf("forwarded EDNS DNS response = %#v, want %x", frames, response)
+	}
+	if len(dnsResolver.calls) != 1 || !bytes.Equal(dnsResolver.calls[0], query) {
+		t.Fatalf("DNS resolver calls = %#v", dnsResolver.calls)
+	}
+}
+
 func TestSocketEgressRejectsPolicyDeniedSVCBAddressHints(t *testing.T) {
 	query := socketEgressDNSQuery(t, "example.com", socketDNSTypeHTTPS)
 	response := append([]byte(nil), query...)

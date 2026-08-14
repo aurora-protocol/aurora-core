@@ -244,6 +244,47 @@ func TestVerifyReleaseReadinessRejectsDuplicateUpdateTarget(t *testing.T) {
 	}
 }
 
+func TestVerifyReleaseReadinessRejectsDuplicateDeviceProvisioningEvidence(t *testing.T) {
+	bundle, err := ReleaseReadinessHarnessBundle(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.DeviceProvisioning = append(bundle.DeviceProvisioning, bundle.DeviceProvisioning[0])
+
+	report, err := VerifyReleaseReadinessBundle(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatalf("release with duplicate device provisioning evidence passed: %+v", report)
+	}
+	if !hasFinding(report, "device provisioning evidence names are duplicated") {
+		t.Fatalf("report missing duplicate device provisioning finding: %+v", report.Findings)
+	}
+}
+
+func TestVerifyReleaseReadinessRejectsUnknownDeviceProvisioningEvidence(t *testing.T) {
+	bundle, err := ReleaseReadinessHarnessBundle(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.DeviceProvisioning = append(bundle.DeviceProvisioning, DeviceProvisioningEvidence{
+		TargetName: "unknown-release",
+		Platform:   platform.KindLinux,
+	})
+
+	report, err := VerifyReleaseReadinessBundle(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatalf("release with unknown device provisioning evidence passed: %+v", report)
+	}
+	if !hasFinding(report, "device provisioning evidence target is unknown") {
+		t.Fatalf("report missing unknown device provisioning finding: %+v", report.Findings)
+	}
+}
+
 func resignUpdatePipeline(t *testing.T, pipeline *SignedUpdatePipeline) {
 	t.Helper()
 	targetDigest, err := updateTargetsPayloadDigest(pipeline.Targets)

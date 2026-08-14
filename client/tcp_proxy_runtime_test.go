@@ -828,6 +828,47 @@ func TestTCPProxyRuntimeBoundsAndClearsHandshakeDeadline(t *testing.T) {
 	}
 }
 
+func TestTCPProxyRuntimeBoundsAggregatePendingWrites(t *testing.T) {
+	clientApplication, relayApplication := tcpProxyRuntimeApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	runtime, err := NewTCPProxyRuntime(clientApplication, TCPProxyRuntimeOptions{MaxFlows: 17, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	for flowID := uint64(1); flowID <= 17; flowID++ {
+		serverConnection, clientConnection := net.Pipe()
+		defer clientConnection.Close()
+		runtime.flows[flowID] = &tcpProxyFlow{id: flowID, conn: serverConnection, writes: make(chan []byte, 1), done: make(chan struct{}), releasePendingBytes: runtime.releasePendingWriteBytes}
+	}
+	payload := bytes.Repeat([]byte{0x71}, 1<<20)
+	for flowID := uint64(1); flowID <= 16; flowID++ {
+		if err := runtime.enqueueLocalWrite(flowID, payload); err != nil {
+			t.Fatalf("enqueue flow %d: %v", flowID, err)
+		}
+	}
+	if err := runtime.enqueueLocalWrite(17, payload); !errors.Is(err, ErrTCPProxyBackpressure) {
+		t.Fatalf("aggregate-cap enqueue error = %v, want backpressure", err)
+	}
+	if err := runtime.flows[1].close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := runtime.pendingWriteBytes.Load(); got != 15<<20 {
+		t.Fatalf("pending write bytes after flow close = %d, want %d", got, 15<<20)
+	}
+	if err := runtime.enqueueLocalWrite(17, payload); err != nil {
+		t.Fatalf("enqueue after releasing aggregate budget: %v", err)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := runtime.pendingWriteBytes.Load(); got != 0 {
+		t.Fatalf("pending write bytes after runtime close = %d, want 0", got)
+	}
+}
+
 type tcpProxyDeadlineRecordingConn struct {
 	net.Conn
 	deadlines []time.Time

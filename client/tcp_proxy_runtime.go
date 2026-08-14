@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/flow"
@@ -21,16 +22,18 @@ import (
 )
 
 const (
-	defaultTCPProxyMaxFlows          = 256
-	maximumTCPProxyMaxFlows          = 4096
-	defaultTCPProxyReadBufferBytes   = 32 << 10
-	minimumTCPProxyReadBufferBytes   = 1024
-	maximumTCPProxyReadBufferBytes   = 1 << 20
-	defaultTCPProxyPendingWriteBytes = 1 << 20
-	maximumTCPProxyPendingWriteBytes = 16 << 20
-	tcpProxyWriteQueueLength         = 16
-	maximumSOCKS5UDPDatagramBytes    = 65535
-	tcpProxyHandshakeTimeout         = 10 * time.Second
+	defaultTCPProxyMaxFlows               = 256
+	maximumTCPProxyMaxFlows               = 4096
+	defaultTCPProxyReadBufferBytes        = 32 << 10
+	minimumTCPProxyReadBufferBytes        = 1024
+	maximumTCPProxyReadBufferBytes        = 1 << 20
+	defaultTCPProxyPendingWriteBytes      = 1 << 20
+	maximumTCPProxyPendingWriteBytes      = 16 << 20
+	defaultTCPProxyTotalPendingWriteBytes = 16 << 20
+	maximumTCPProxyTotalPendingWriteBytes = 64 << 20
+	tcpProxyWriteQueueLength              = 16
+	maximumSOCKS5UDPDatagramBytes         = 65535
+	tcpProxyHandshakeTimeout              = 10 * time.Second
 )
 
 var (
@@ -40,9 +43,10 @@ var (
 )
 
 type TCPProxyRuntimeOptions struct {
-	MaxFlows             int
-	ReadBufferBytes      int
-	MaxPendingWriteBytes int
+	MaxFlows                  int
+	ReadBufferBytes           int
+	MaxPendingWriteBytes      int
+	MaxTotalPendingWriteBytes int
 }
 
 // TCPProxyRuntime maps local HTTP CONNECT and SOCKS5 TCP or UDP associations to one encrypted proxy-flow session.
@@ -51,30 +55,32 @@ type TCPProxyRuntime struct {
 	proxy       *LocalProxy
 	options     TCPProxyRuntimeOptions
 
-	mu         sync.Mutex
-	flows      map[uint64]*tcpProxyFlow
-	udpFlows   map[uint64]*udpProxyFlow
-	udpLinks   map[*udpProxyAssociation]struct{}
-	pending    map[net.Conn]struct{}
-	listeners  map[net.Listener]struct{}
-	nextFlowID uint64
-	closed     bool
-	closeErr   error
-	done       chan struct{}
-	closeOnce  sync.Once
+	mu                sync.Mutex
+	flows             map[uint64]*tcpProxyFlow
+	udpFlows          map[uint64]*udpProxyFlow
+	udpLinks          map[*udpProxyAssociation]struct{}
+	pending           map[net.Conn]struct{}
+	listeners         map[net.Listener]struct{}
+	nextFlowID        uint64
+	pendingWriteBytes atomic.Int64
+	closed            bool
+	closeErr          error
+	done              chan struct{}
+	closeOnce         sync.Once
 }
 
 type tcpProxyFlow struct {
 	id   uint64
 	conn net.Conn
 
-	mu             sync.Mutex
-	writes         chan []byte
-	done           chan struct{}
-	closeOnce      sync.Once
-	pendingWrites  int
-	localCloseSent bool
-	draining       bool
+	mu                  sync.Mutex
+	writes              chan []byte
+	done                chan struct{}
+	closeOnce           sync.Once
+	pendingWrites       int
+	releasePendingBytes func(int)
+	localCloseSent      bool
+	draining            bool
 }
 
 type udpProxyTarget struct {
@@ -146,6 +152,9 @@ func normalizeTCPProxyRuntimeOptions(options TCPProxyRuntimeOptions) (TCPProxyRu
 	if options.MaxPendingWriteBytes == 0 {
 		options.MaxPendingWriteBytes = defaultTCPProxyPendingWriteBytes
 	}
+	if options.MaxTotalPendingWriteBytes == 0 {
+		options.MaxTotalPendingWriteBytes = defaultTCPProxyTotalPendingWriteBytes
+	}
 	if options.MaxFlows < 1 || options.MaxFlows > maximumTCPProxyMaxFlows {
 		return TCPProxyRuntimeOptions{}, fmt.Errorf("client: TCP proxy flow limit is invalid")
 	}
@@ -154,6 +163,9 @@ func normalizeTCPProxyRuntimeOptions(options TCPProxyRuntimeOptions) (TCPProxyRu
 	}
 	if options.MaxPendingWriteBytes < minimumTCPProxyReadBufferBytes || options.MaxPendingWriteBytes > maximumTCPProxyPendingWriteBytes {
 		return TCPProxyRuntimeOptions{}, fmt.Errorf("client: TCP proxy pending write limit is invalid")
+	}
+	if options.MaxTotalPendingWriteBytes < minimumTCPProxyReadBufferBytes || options.MaxTotalPendingWriteBytes > maximumTCPProxyTotalPendingWriteBytes {
+		return TCPProxyRuntimeOptions{}, fmt.Errorf("client: TCP proxy total pending write limit is invalid")
 	}
 	return options, nil
 }
@@ -570,10 +582,11 @@ func (r *TCPProxyRuntime) openFlow(ctx context.Context, connection net.Conn, hos
 		return nil, err
 	}
 	flow := &tcpProxyFlow{
-		id:     flowID,
-		conn:   connection,
-		writes: make(chan []byte, tcpProxyWriteQueueLength),
-		done:   make(chan struct{}),
+		id:                  flowID,
+		conn:                connection,
+		writes:              make(chan []byte, tcpProxyWriteQueueLength),
+		done:                make(chan struct{}),
+		releasePendingBytes: r.releasePendingWriteBytes,
 	}
 	r.flows[flowID] = flow
 	delete(r.pending, connection)
@@ -917,23 +930,29 @@ func (r *TCPProxyRuntime) enqueueLocalWrite(flowID uint64, payload []byte) error
 	if flow == nil {
 		return fmt.Errorf("client: TCP proxy relay data targets an unknown flow")
 	}
+	if !r.reservePendingWriteBytes(len(payload)) {
+		return ErrTCPProxyBackpressure
+	}
 	owned := append([]byte(nil), payload...)
 	flow.mu.Lock()
 	select {
 	case <-flow.done:
 		flow.mu.Unlock()
 		zeroTCPProxyBytes(owned)
+		r.releasePendingWriteBytes(len(owned))
 		return fmt.Errorf("client: TCP proxy flow is closed")
 	default:
 	}
 	if flow.draining {
 		flow.mu.Unlock()
 		zeroTCPProxyBytes(owned)
+		r.releasePendingWriteBytes(len(owned))
 		return fmt.Errorf("client: TCP proxy flow is closed")
 	}
 	if flow.pendingWrites+len(owned) > r.options.MaxPendingWriteBytes {
 		flow.mu.Unlock()
 		zeroTCPProxyBytes(owned)
+		r.releasePendingWriteBytes(len(owned))
 		return ErrTCPProxyBackpressure
 	}
 	select {
@@ -944,7 +963,26 @@ func (r *TCPProxyRuntime) enqueueLocalWrite(flowID uint64, payload []byte) error
 	default:
 		flow.mu.Unlock()
 		zeroTCPProxyBytes(owned)
+		r.releasePendingWriteBytes(len(owned))
 		return ErrTCPProxyBackpressure
+	}
+}
+
+func (r *TCPProxyRuntime) reservePendingWriteBytes(count int) bool {
+	if count <= 0 {
+		return false
+	}
+	total := r.pendingWriteBytes.Add(int64(count))
+	if total <= int64(r.options.MaxTotalPendingWriteBytes) {
+		return true
+	}
+	r.pendingWriteBytes.Add(-int64(count))
+	return false
+}
+
+func (r *TCPProxyRuntime) releasePendingWriteBytes(count int) {
+	if count > 0 {
+		r.pendingWriteBytes.Add(-int64(count))
 	}
 }
 
@@ -957,12 +995,16 @@ func (r *TCPProxyRuntime) runLocalWritePump(flow *tcpProxyFlow) {
 			if payload == nil {
 				continue
 			}
+			payloadBytes := len(payload)
 			_, err := flow.conn.Write(payload)
 			zeroTCPProxyBytes(payload)
 			flow.mu.Lock()
-			flow.pendingWrites -= len(payload)
+			flow.pendingWrites -= payloadBytes
 			drainComplete := flow.draining && flow.pendingWrites == 0
 			flow.mu.Unlock()
+			if flow.releasePendingBytes != nil {
+				flow.releasePendingBytes(payloadBytes)
+			}
 			if err != nil {
 				r.abortFlow(flow.id)
 				return
@@ -1153,7 +1195,11 @@ func (f *tcpProxyFlow) close() error {
 		for {
 			select {
 			case payload := <-f.writes:
+				payloadBytes := len(payload)
 				zeroTCPProxyBytes(payload)
+				if f.releasePendingBytes != nil {
+					f.releasePendingBytes(payloadBytes)
+				}
 			default:
 				return
 			}

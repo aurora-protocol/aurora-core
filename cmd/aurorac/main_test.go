@@ -80,6 +80,21 @@ func TestParseProxyConfigValidatesProvisioningSource(t *testing.T) {
 	}
 }
 
+func TestParseProxyConfigAcceptsAggregatePendingWriteLimit(t *testing.T) {
+	config, err := parseProxyConfig([]string{
+		"--provisioning", "/private/provisioning.bin",
+		"--wallet-state", "/private/wallet-state.bin",
+		"--signed-seed-roots", "/private/roots.bin",
+		"--max-total-pending-write-bytes", "2097152",
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := config.runtimeOptions.MaxTotalPendingWriteBytes; got != 2<<20 {
+		t.Fatalf("aggregate pending write limit = %d, want %d", got, 2<<20)
+	}
+}
+
 func TestTUNRejectsNonLinuxHostBeforeProvisioning(t *testing.T) {
 	restore := setProxyGOOSForTest("darwin")
 	defer restore()

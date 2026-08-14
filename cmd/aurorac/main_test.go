@@ -122,6 +122,29 @@ func TestReadRestrictedProvisioningFileRejectsUnsafeInputs(t *testing.T) {
 	}
 }
 
+func TestZeroProxyProvisioningClearsIssuerMaterial(t *testing.T) {
+	issuerMetadata := []byte("issuer metadata")
+	signedSeed := []byte("signed seed")
+	provisioning := client.NativeProvisioning{
+		IssuerMetadata: issuerMetadata,
+		SignedSeed:     signedSeed,
+	}
+
+	zeroProxyProvisioning(&provisioning)
+
+	for label, value := range map[string][]byte{
+		"issuer metadata": issuerMetadata,
+		"signed seed":     signedSeed,
+	} {
+		if !bytes.Equal(value, make([]byte, len(value))) {
+			t.Fatalf("%s was not cleared: %x", label, value)
+		}
+	}
+	if provisioning.IssuerMetadata != nil || provisioning.SignedSeed != nil {
+		t.Fatalf("provisioning retained issuer material: %+v", provisioning)
+	}
+}
+
 func TestExchangeIssuerWorkPostsOpaqueNoStoreRequest(t *testing.T) {
 	var receivedBody []byte
 	restore := setNewIssuerHTTPClientForTest(func() *http.Client {

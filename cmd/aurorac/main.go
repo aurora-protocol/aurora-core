@@ -864,6 +864,8 @@ func zeroProxyProvisioning(provisioning *client.NativeProvisioning) {
 		return
 	}
 	for _, value := range [][]byte{
+		provisioning.IssuerMetadata,
+		provisioning.SignedSeed,
 		provisioning.Descriptor,
 		provisioning.TrustedDescriptorHash,
 		provisioning.Template,

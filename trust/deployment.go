@@ -34,6 +34,25 @@ type VerifiedRelayDeployment struct {
 	templateHash   []byte
 }
 
+// FirstHopDeploymentMetadata contains scalar bootstrap constraints from a verified deployment.
+type FirstHopDeploymentMetadata struct {
+	DescriptorValidFromUnix     uint64
+	DescriptorValidUntilUnix    uint64
+	EpochValidFromUnix          uint64
+	EpochValidUntilUnix         uint64
+	ReplayEpochValidUntilUnix   uint64
+	TemplateValidFromUnix       uint64
+	TemplateValidUntilUnix      uint64
+	PreludeMaxRequestBodySize   uint64
+	PreludeMaxResponseBodySize  uint64
+	CapsuleMaxBodySize          uint64
+	RequestClassType            uint64
+	RequestClassAllowedMethod   uint64
+	RequestClassMayCarryPrelude bool
+	RequestClassMayCarryCapsule bool
+	SelectedSuiteIsSupported    bool
+}
+
 func VerifyRelayDeployment(in RelayDeploymentVerification) (VerifiedRelayDeployment, error) {
 	descriptor, err := cloneRelayDescriptor(in.Descriptor)
 	if err != nil {
@@ -155,6 +174,30 @@ func (d VerifiedRelayDeployment) Valid() bool {
 func (d VerifiedRelayDeployment) Suite() uint64 { return d.suite }
 
 func (d VerifiedRelayDeployment) Method() uint64 { return d.method }
+
+// FirstHopMetadata returns scalar constraints without copying verified descriptor or template data.
+func (d VerifiedRelayDeployment) FirstHopMetadata(selectedSuite uint64) FirstHopDeploymentMetadata {
+	if selectedSuite == 0 {
+		selectedSuite = d.suite
+	}
+	return FirstHopDeploymentMetadata{
+		DescriptorValidFromUnix:     d.descriptor.ValidFromUnix,
+		DescriptorValidUntilUnix:    d.descriptor.ValidUntilUnix,
+		EpochValidFromUnix:          d.descriptor.EpochValidFromUnix,
+		EpochValidUntilUnix:         d.descriptor.EpochValidUntilUnix,
+		ReplayEpochValidUntilUnix:   d.descriptor.ReplayEpochValidUntilUnix,
+		TemplateValidFromUnix:       d.template.ValidFromUnix,
+		TemplateValidUntilUnix:      d.template.ValidUntilUnix,
+		PreludeMaxRequestBodySize:   d.template.PreludeEnvelope.MaxRequestBodySize,
+		PreludeMaxResponseBodySize:  d.template.PreludeEnvelope.MaxResponseBodySize,
+		CapsuleMaxBodySize:          d.template.CapsuleEnvelope.MaxCapsuleBodySize,
+		RequestClassType:            d.requestClass.ClassType,
+		RequestClassAllowedMethod:   d.requestClass.AllowedMethodFamily,
+		RequestClassMayCarryPrelude: d.requestClass.MayCarryPrelude,
+		RequestClassMayCarryCapsule: d.requestClass.MayCarryCapsule,
+		SelectedSuiteIsSupported:    containsDeploymentID(d.descriptor.SupportedSuiteIDs, selectedSuite),
+	}
+}
 
 func (d VerifiedRelayDeployment) Descriptor() protocol.RelayDescriptor {
 	cloned, _ := cloneRelayDescriptor(d.descriptor)

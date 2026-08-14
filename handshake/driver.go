@@ -297,37 +297,35 @@ func validateDriverDeployment(deployment trust.VerifiedRelayDeployment, suite ui
 		return fmt.Errorf("handshake: relay deployment is not verified")
 	}
 	nowUnix := uint64(now.Unix())
-	descriptor := deployment.Descriptor()
-	template := deployment.Template()
-	class := deployment.RequestClass()
 	selectedSuite := suite
 	if selectedSuite == 0 {
 		selectedSuite = deployment.Suite()
 	}
-	if nowUnix < descriptor.ValidFromUnix || nowUnix >= descriptor.ValidUntilUnix {
+	metadata := deployment.FirstHopMetadata(selectedSuite)
+	if nowUnix < metadata.DescriptorValidFromUnix || nowUnix >= metadata.DescriptorValidUntilUnix {
 		return fmt.Errorf("handshake: relay descriptor outside validity interval")
 	}
-	if nowUnix < descriptor.EpochValidFromUnix || nowUnix >= descriptor.EpochValidUntilUnix {
+	if nowUnix < metadata.EpochValidFromUnix || nowUnix >= metadata.EpochValidUntilUnix {
 		return fmt.Errorf("handshake: relay epoch outside validity interval")
 	}
-	if nowUnix >= descriptor.ReplayEpochValidUntilUnix {
+	if nowUnix >= metadata.ReplayEpochValidUntilUnix {
 		return fmt.Errorf("handshake: relay replay epoch expired")
 	}
-	if nowUnix < template.ValidFromUnix || nowUnix >= template.ValidUntilUnix {
+	if nowUnix < metadata.TemplateValidFromUnix || nowUnix >= metadata.TemplateValidUntilUnix {
 		return fmt.Errorf("handshake: cover template outside validity interval")
 	}
-	if template.PreludeEnvelope.MaxRequestBodySize > uint64(wire.DefaultRecordBodyBytes) ||
-		template.PreludeEnvelope.MaxResponseBodySize > uint64(wire.DefaultRecordBodyBytes) ||
-		template.CapsuleEnvelope.MaxCapsuleBodySize > uint64(wire.DefaultRecordBodyBytes) {
+	if metadata.PreludeMaxRequestBodySize > uint64(wire.DefaultRecordBodyBytes) ||
+		metadata.PreludeMaxResponseBodySize > uint64(wire.DefaultRecordBodyBytes) ||
+		metadata.CapsuleMaxBodySize > uint64(wire.DefaultRecordBodyBytes) {
 		return fmt.Errorf("handshake: bootstrap envelope exceeds record limit")
 	}
-	if deployment.Method() != registry.MethodWebH2Stream || class.ClassType != registry.RequestGatewayOwnedSlot || class.AllowedMethodFamily != deployment.Method() || !class.MayCarryPrelude || !class.MayCarryCapsule {
+	if deployment.Method() != registry.MethodWebH2Stream || metadata.RequestClassType != registry.RequestGatewayOwnedSlot || metadata.RequestClassAllowedMethod != deployment.Method() || !metadata.RequestClassMayCarryPrelude || !metadata.RequestClassMayCarryCapsule {
 		return fmt.Errorf("handshake: verified request class is not an HTTP/2 bootstrap slot")
 	}
-	if selectedSuite != deployment.Suite() || !isDriverProductionSuite(selectedSuite) || !containsDriverID(descriptor.SupportedSuiteIDs, selectedSuite) {
+	if selectedSuite != deployment.Suite() || !isDriverProductionSuite(selectedSuite) || !metadata.SelectedSuiteIsSupported {
 		return fmt.Errorf("handshake: selected suite does not match verified deployment")
 	}
-	if isDriverHybrid1024Suite(selectedSuite) && (template.PreludeEnvelope.MaxRequestBodySize < 2048 || template.PreludeEnvelope.MaxResponseBodySize < 8192) {
+	if isDriverHybrid1024Suite(selectedSuite) && (metadata.PreludeMaxRequestBodySize < 2048 || metadata.PreludeMaxResponseBodySize < 8192) {
 		return fmt.Errorf("handshake: cover prelude envelope is too small for selected suite")
 	}
 	return nil

@@ -27,6 +27,8 @@ type DevicePacketExchanger struct {
 	closeErr   error
 	writeMu    sync.Mutex
 	outboundMu sync.Mutex
+	readErrMu  sync.RWMutex
+	readErr    error
 }
 
 func NewDevicePacketExchanger(device io.ReadWriteCloser, opts DevicePacketExchangerOptions) (*DevicePacketExchanger, error) {
@@ -71,6 +73,9 @@ func (e *DevicePacketExchanger) ExchangePacketBatch(batch PacketBatch) (PacketBa
 	if err := validatePacketBatch(batch); err != nil {
 		return PacketBatch{}, err
 	}
+	if err := e.readError(); err != nil {
+		return PacketBatch{}, fmt.Errorf("server: read packet device: %w", err)
+	}
 
 	e.writeMu.Lock()
 	defer e.writeMu.Unlock()
@@ -78,6 +83,9 @@ func (e *DevicePacketExchanger) ExchangePacketBatch(batch PacketBatch) (PacketBa
 	case <-e.done:
 		return PacketBatch{}, fmt.Errorf("server: packet exchanger is closed")
 	default:
+	}
+	if err := e.readError(); err != nil {
+		return PacketBatch{}, fmt.Errorf("server: read packet device: %w", err)
 	}
 	for _, packet := range batch.Packets {
 		if len(packet) > e.mtu {
@@ -112,6 +120,7 @@ func (e *DevicePacketExchanger) readDevice() {
 	for {
 		n, err := e.device.Read(buffer)
 		if n < 0 || n > len(buffer) {
+			e.setReadError(fmt.Errorf("server: packet device returned invalid read length %d", n))
 			return
 		}
 		if n > 0 {
@@ -119,6 +128,11 @@ func (e *DevicePacketExchanger) readDevice() {
 			zeroDevicePacketBytes(buffer[:n])
 		}
 		if err != nil {
+			e.setReadError(err)
+			return
+		}
+		if n == 0 {
+			e.setReadError(fmt.Errorf("server: packet device returned an empty read"))
 			return
 		}
 		select {
@@ -127,6 +141,33 @@ func (e *DevicePacketExchanger) readDevice() {
 		default:
 		}
 	}
+}
+
+func (e *DevicePacketExchanger) setReadError(err error) {
+	if err == nil {
+		return
+	}
+	select {
+	case <-e.done:
+		return
+	default:
+	}
+	e.readErrMu.Lock()
+	defer e.readErrMu.Unlock()
+	select {
+	case <-e.done:
+		return
+	default:
+	}
+	if e.readErr == nil {
+		e.readErr = err
+	}
+}
+
+func (e *DevicePacketExchanger) readError() error {
+	e.readErrMu.RLock()
+	defer e.readErrMu.RUnlock()
+	return e.readErr
 }
 
 func (e *DevicePacketExchanger) queueOutbound(packet []byte) {

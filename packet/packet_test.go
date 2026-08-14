@@ -459,6 +459,9 @@ func TestProtectorSealAllocationBudget(t *testing.T) {
 		StaticIV:        bytesOf(0x44, 12),
 	}
 	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}
+	if err := protector.Prepare(); err != nil {
+		t.Fatal(err)
+	}
 	allocations := testing.AllocsPerRun(100, func() {
 		protector.NextPacket = 0
 		packet, sealErr := protector.Seal(block)
@@ -468,8 +471,29 @@ func TestProtectorSealAllocationBudget(t *testing.T) {
 		destroyBytes(packet.Ciphertext)
 		destroyBytes(packet.AuthTag)
 	})
-	if allocations > 17 {
-		t.Fatalf("Seal allocations = %.0f, want at most 17", allocations)
+	if allocations > 12 {
+		t.Fatalf("Seal allocations = %.0f, want at most 12", allocations)
+	}
+}
+
+func TestProtectorPrepareCachesSuiteAEAD(t *testing.T) {
+	protector := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 0x42,
+		HopLayer:        1,
+		Direction:       0,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	if err := protector.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	if protector.aead == nil {
+		t.Fatalf("prepared protector did not retain its AEAD")
+	}
+	protector.Destroy()
+	if protector.aead != nil || len(protector.Key) != 0 || len(protector.StaticIV) != 0 {
+		t.Fatalf("destroyed protector retained key material")
 	}
 }
 
@@ -932,6 +956,9 @@ func TestReceiverOpensOldAndNewKeyPhaseOnlyDuringDrain(t *testing.T) {
 	}
 	if _, err := receiver.OpenWithDirectionState(newPacket, &state, registry.SuiteHybrid768AESGCM, now); err != nil {
 		t.Fatalf("new-phase packet rejected during drain: %v", err)
+	}
+	if got := len(receiver.directionProtectors); got != 2 {
+		t.Fatalf("cached direction protectors = %d, want 2", got)
 	}
 	state.DrainUntil = time.Now().Add(-time.Second)
 	if _, err := receiver.OpenWithDirectionState(oldAfterDrain, &state, registry.SuiteHybrid768AESGCM, time.Now()); err == nil {

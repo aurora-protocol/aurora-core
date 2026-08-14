@@ -1,6 +1,7 @@
 package packet
 
 import (
+	"bytes"
 	"fmt"
 	"sync"
 	"time"
@@ -16,12 +17,13 @@ type ReceiverConfig struct {
 }
 
 type Receiver struct {
-	mu         sync.Mutex
-	protector  Protector
-	windowSize uint64
-	seen       map[receiverPacketNumberKey]struct{}
-	highest    map[receiverPacketNumberSpace]uint64
-	havePacket map[receiverPacketNumberSpace]bool
+	mu                  sync.Mutex
+	protector           Protector
+	directionProtectors map[receiverPacketNumberSpace]*Protector
+	windowSize          uint64
+	seen                map[receiverPacketNumberKey]struct{}
+	highest             map[receiverPacketNumberSpace]uint64
+	havePacket          map[receiverPacketNumberSpace]bool
 }
 
 // ReceiverStats reports replay-window memory use.
@@ -81,12 +83,15 @@ func NewReceiver(cfg ReceiverConfig) *Receiver {
 	if windowSize == 0 {
 		windowSize = defaultReceiverWindowSize
 	}
+	protector := cfg.Protector
+	_ = protector.Prepare()
 	return &Receiver{
-		protector:  cfg.Protector,
-		windowSize: windowSize,
-		seen:       make(map[receiverPacketNumberKey]struct{}),
-		highest:    make(map[receiverPacketNumberSpace]uint64),
-		havePacket: make(map[receiverPacketNumberSpace]bool),
+		protector:           protector,
+		directionProtectors: make(map[receiverPacketNumberSpace]*Protector),
+		windowSize:          windowSize,
+		seen:                make(map[receiverPacketNumberKey]struct{}),
+		highest:             make(map[receiverPacketNumberSpace]uint64),
+		havePacket:          make(map[receiverPacketNumberSpace]bool),
 	}
 }
 
@@ -95,6 +100,23 @@ func (r *Receiver) Stats() ReceiverStats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return ReceiverStats{PacketNumberSpaces: len(r.havePacket), SeenPackets: len(r.seen)}
+}
+
+// Destroy releases cached traffic material and replay-window state.
+func (r *Receiver) Destroy() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.protector.Destroy()
+	for _, protector := range r.directionProtectors {
+		protector.Destroy()
+	}
+	r.directionProtectors = nil
+	r.seen = nil
+	r.highest = nil
+	r.havePacket = nil
 }
 
 // ForgetPacketNumberSpace removes replay state for an erased key phase.
@@ -107,6 +129,8 @@ func (r *Receiver) ForgetPacketNumberSpace(routeInstanceID uint64, hopLayer, dir
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// An in-flight open can retain a protector after this cache eviction.
+	delete(r.directionProtectors, space)
 	delete(r.highest, space)
 	delete(r.havePacket, space)
 	for key := range r.seen {
@@ -150,7 +174,7 @@ func (r *Receiver) OpenWithDirectionState(pkt AuroraPacket, state *DirectionStat
 }
 
 func (r *Receiver) PrepareOpen(pkt AuroraPacket) (PreparedOpen, error) {
-	return r.prepareOpenWithProtector(pkt, r.protector)
+	return r.prepareOpenWithProtector(pkt, &r.protector)
 }
 
 // PrepareOpenWithDirectionState authenticates synchronously without retaining
@@ -163,18 +187,17 @@ func (r *Receiver) PrepareOpenWithDirectionState(pkt AuroraPacket, state *Direct
 	if err != nil {
 		return PreparedOpen{}, err
 	}
-	return r.prepareOpenWithProtector(pkt, Protector{
-		Suite:           suite,
-		RouteInstanceID: state.RouteInstanceID,
-		HopLayer:        state.HopLayer,
-		Direction:       state.Direction,
-		KeyPhase:        pkt.KeyPhase,
-		Key:             material.Key,
-		StaticIV:        material.IV,
-	})
+	protector, err := r.directionProtector(pkt, state, suite, material)
+	if err != nil {
+		return PreparedOpen{}, err
+	}
+	return r.prepareOpenWithProtector(pkt, protector)
 }
 
-func (r *Receiver) prepareOpenWithProtector(pkt AuroraPacket, protector Protector) (PreparedOpen, error) {
+func (r *Receiver) prepareOpenWithProtector(pkt AuroraPacket, protector *Protector) (PreparedOpen, error) {
+	if protector == nil {
+		return PreparedOpen{}, fmt.Errorf("packet: missing protector")
+	}
 	r.mu.Lock()
 	if err := r.checkPacketNumberLocked(pkt); err != nil {
 		r.mu.Unlock()
@@ -200,6 +223,21 @@ func (r *Receiver) prepareOpenWithProtector(pkt AuroraPacket, protector Protecto
 		block: block,
 		valid: true,
 	}, nil
+}
+
+func (r *Receiver) directionProtector(pkt AuroraPacket, state *DirectionState, suite uint64, material KeyMaterial) (*Protector, error) {
+	space := packetNumberSpace(pkt)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if protector := r.directionProtectors[space]; protector != nil && protector.Suite == suite && protector.RouteInstanceID == state.RouteInstanceID && protector.HopLayer == state.HopLayer && protector.Direction == state.Direction && protector.KeyPhase == pkt.KeyPhase && bytes.Equal(protector.Key, material.Key) && bytes.Equal(protector.StaticIV, material.IV) {
+		return protector, nil
+	}
+	protector, err := NewProtector(suite, state.RouteInstanceID, state.HopLayer, state.Direction, pkt.KeyPhase, material.Key, material.IV)
+	if err != nil {
+		return nil, err
+	}
+	r.directionProtectors[space] = &protector
+	return &protector, nil
 }
 
 func (r *Receiver) CommitPreparedOpen(prepared *PreparedOpen) error {

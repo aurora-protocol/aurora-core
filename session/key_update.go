@@ -526,17 +526,15 @@ func (a *Application) validateWriteProtectorLocked() error {
 	return nil
 }
 
-func (a *Application) activateWriteStateLocked(now time.Time) {
-	key := append([]byte(nil), a.writeState.Material.Key...)
-	iv := append([]byte(nil), a.writeState.Material.IV...)
-	zeroBytes(a.write.Key)
-	zeroBytes(a.write.StaticIV)
+func (a *Application) activateWriteStateLocked(now time.Time) error {
 	a.write.KeyPhase = a.writeState.KeyPhase
-	a.write.Key = key
-	a.write.StaticIV = iv
+	if err := a.write.ReplaceMaterial(a.writeState.Material.Key, a.writeState.Material.IV); err != nil {
+		return err
+	}
 	a.write.NextPacket = a.writePacketNumbers[a.write.KeyPhase]
 	a.writePhaseBytes = 0
 	a.writePhaseStartedAt = now
+	return nil
 }
 
 func zeroFrameBlock(block protocol.FrameBlock) {

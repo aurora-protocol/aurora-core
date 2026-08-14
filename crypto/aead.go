@@ -9,26 +9,70 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-func SealForSuite(suite uint64, key, nonce, aad, plaintext []byte) ([]byte, error) {
+// SuiteAEAD retains validated AEAD state for one suite and traffic key.
+// Callers must discard it when the corresponding traffic key is retired.
+type SuiteAEAD struct {
+	aead cipher.AEAD
+	name string
+}
+
+// NewSuiteAEAD validates key material and prepares an AEAD for repeated use.
+func NewSuiteAEAD(suite uint64, key []byte) (*SuiteAEAD, error) {
+	var (
+		aead cipher.AEAD
+		err  error
+		name string
+	)
 	switch suite {
 	case registry.SuiteHybrid768AESGCM, registry.SuiteHybrid768P256AESGCM, registry.SuiteHybrid1024AESGCM:
-		return AES256GCMSeal(key, nonce, aad, plaintext)
+		aead, err = aes256gcm(key)
+		name = "AES-GCM"
 	case registry.SuiteHybrid768ChaCha20, registry.SuiteHybrid768P256ChaCha20, registry.SuiteHybrid1024ChaCha20, registry.SuiteLabClassical:
-		return ChaCha20Poly1305Seal(key, nonce, aad, plaintext)
+		aead, err = chacha20poly1305.New(key)
+		name = "ChaCha20-Poly1305"
 	default:
 		return nil, fmt.Errorf("crypto: unsupported AEAD suite 0x%x", suite)
 	}
+	if err != nil {
+		return nil, err
+	}
+	return &SuiteAEAD{aead: aead, name: name}, nil
+}
+
+func (a *SuiteAEAD) Seal(nonce, aad, plaintext []byte) ([]byte, error) {
+	if a == nil || a.aead == nil {
+		return nil, fmt.Errorf("crypto: missing AEAD")
+	}
+	if len(nonce) != a.aead.NonceSize() {
+		return nil, fmt.Errorf("crypto: %s nonce length %d, want %d", a.name, len(nonce), a.aead.NonceSize())
+	}
+	return a.aead.Seal(nil, nonce, plaintext, aad), nil
+}
+
+func (a *SuiteAEAD) Open(nonce, aad, ciphertextAndTag []byte) ([]byte, error) {
+	if a == nil || a.aead == nil {
+		return nil, fmt.Errorf("crypto: missing AEAD")
+	}
+	if len(nonce) != a.aead.NonceSize() {
+		return nil, fmt.Errorf("crypto: %s nonce length %d, want %d", a.name, len(nonce), a.aead.NonceSize())
+	}
+	return a.aead.Open(nil, nonce, ciphertextAndTag, aad)
+}
+
+func SealForSuite(suite uint64, key, nonce, aad, plaintext []byte) ([]byte, error) {
+	aead, err := NewSuiteAEAD(suite, key)
+	if err != nil {
+		return nil, err
+	}
+	return aead.Seal(nonce, aad, plaintext)
 }
 
 func OpenForSuite(suite uint64, key, nonce, aad, ciphertextAndTag []byte) ([]byte, error) {
-	switch suite {
-	case registry.SuiteHybrid768AESGCM, registry.SuiteHybrid768P256AESGCM, registry.SuiteHybrid1024AESGCM:
-		return AES256GCMOpen(key, nonce, aad, ciphertextAndTag)
-	case registry.SuiteHybrid768ChaCha20, registry.SuiteHybrid768P256ChaCha20, registry.SuiteHybrid1024ChaCha20, registry.SuiteLabClassical:
-		return ChaCha20Poly1305Open(key, nonce, aad, ciphertextAndTag)
-	default:
-		return nil, fmt.Errorf("crypto: unsupported AEAD suite 0x%x", suite)
+	aead, err := NewSuiteAEAD(suite, key)
+	if err != nil {
+		return nil, err
 	}
+	return aead.Open(nonce, aad, ciphertextAndTag)
 }
 
 func AES256GCMSeal(key, nonce, aad, plaintext []byte) ([]byte, error) {

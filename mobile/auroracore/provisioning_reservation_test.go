@@ -4,12 +4,86 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/client"
 )
+
+const nativeReservationJSONOperation = 22
+
+func TestNativeProvisioningReservationJSONTraversesCABI(t *testing.T) {
+	caller := newNativeIntegrationCaller(t)
+	fixture := newNativeSessionFixture(t, time.Now())
+	defer fixture.Close(t)
+	encoded, err := client.EncodeNativeProvisioning(fixture.Provisioning(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeBytes(encoded)
+	request, err := encodeNativeProvisioningReservationRequest(encoded, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeBytes(request)
+
+	status, payload := nativeIntegrationCall(t, caller, nativeReservationJSONOperation, request, uint64(time.Now().Unix()))
+	if status != statusOK {
+		t.Fatalf("C ABI JSON reservation status=%d", status)
+	}
+	defer zeroNativeBytes(payload)
+	result := decodeNativeProvisioningReservationJSONForTest(t, payload)
+	defer result.zero()
+	if _, err := client.ParseNativeProvisioningWithTrust(result.provisioning, firstHopNativeProvisioningTrust(t), time.Now()); err != nil {
+		t.Fatalf("C ABI JSON reserved provisioning is invalid: %v", err)
+	}
+}
+
+func TestNativeProvisioningReservationJSONRejectsSingleSourceReuse(t *testing.T) {
+	fixture := newNativeSessionFixture(t, time.Now())
+	defer fixture.Close(t)
+	encoded, err := client.EncodeNativeProvisioning(fixture.Provisioning(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeBytes(encoded)
+	request, err := encodeNativeProvisioningReservationRequest(encoded, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeBytes(request)
+	status, payload := dispatch(nativeReservationJSONOperation, request, uint64(time.Now().Unix()))
+	if status != statusOK {
+		t.Fatalf("JSON reservation status=%d", status)
+	}
+	defer zeroNativeBytes(payload)
+	reservation := decodeNativeProvisioningReservationJSONForTest(t, payload)
+	defer reservation.zero()
+
+	reused, err := encodeNativeProvisioningReservationRequest(encoded, [][]byte{reservation.spentHintKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeBytes(reused)
+	if status, payload := dispatch(nativeReservationJSONOperation, reused, uint64(time.Now().Unix())); status != statusError || len(payload) != 0 {
+		t.Fatalf("JSON single source reuse status=%d payload=%x", status, payload)
+	}
+}
+
+func TestNativeProvisioningReservationJSONRejectsMalformedEnvelope(t *testing.T) {
+	for _, input := range [][]byte{
+		nil,
+		{0, 0, 1},
+		bytes.Repeat([]byte{0}, 32),
+	} {
+		if status, payload := dispatch(nativeReservationJSONOperation, input, uint64(time.Now().Unix())); status != statusError || len(payload) != 0 {
+			t.Fatalf("malformed JSON reservation input status=%d payload=%x", status, payload)
+		}
+	}
+}
 
 func TestNativeProvisioningReservationRejectsSingleSourceReuse(t *testing.T) {
 	fixture := newNativeSessionFixture(t, time.Now())
@@ -171,6 +245,75 @@ func (result *nativeProvisioningReservationTestResult) zero() {
 	zeroNativeBytes(result.spentHintKey)
 	zeroNativeBytes(result.relayBucketID)
 	*result = nativeProvisioningReservationTestResult{}
+}
+
+type nativeProvisioningReservationJSONTestResult struct {
+	provisioning  []byte
+	spentHintKey  []byte
+	relayBucketID []byte
+	expiresAtUnix uint64
+}
+
+func (result *nativeProvisioningReservationJSONTestResult) zero() {
+	if result == nil {
+		return
+	}
+	zeroNativeBytes(result.provisioning)
+	zeroNativeBytes(result.spentHintKey)
+	zeroNativeBytes(result.relayBucketID)
+	*result = nativeProvisioningReservationJSONTestResult{}
+}
+
+func decodeNativeProvisioningReservationJSONForTest(t testing.TB, encoded []byte) nativeProvisioningReservationJSONTestResult {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 4 {
+		t.Fatalf("reservation JSON field count=%d", len(fields))
+	}
+	for _, name := range []string{"provisioning_base64", "spent_hint_key_base64", "relay_bucket_id_base64", "access_hint_expiry_unix"} {
+		if _, ok := fields[name]; !ok {
+			t.Fatalf("reservation JSON is missing %q", name)
+		}
+	}
+	var result struct {
+		ProvisioningBase64   string `json:"provisioning_base64"`
+		SpentHintKeyBase64   string `json:"spent_hint_key_base64"`
+		RelayBucketIDBase64  string `json:"relay_bucket_id_base64"`
+		AccessHintExpiryUnix uint64 `json:"access_hint_expiry_unix"`
+	}
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		t.Fatal(err)
+	}
+	provisioning, err := base64.StdEncoding.DecodeString(result.ProvisioningBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spentHintKey, err := base64.StdEncoding.DecodeString(result.SpentHintKeyBase64)
+	if err != nil {
+		zeroNativeBytes(provisioning)
+		t.Fatal(err)
+	}
+	relayBucketID, err := base64.StdEncoding.DecodeString(result.RelayBucketIDBase64)
+	if err != nil {
+		zeroNativeBytes(provisioning)
+		zeroNativeBytes(spentHintKey)
+		t.Fatal(err)
+	}
+	if len(provisioning) == 0 || len(spentHintKey) != nativeProvisioningReservationSpentHintKeyBytes || len(relayBucketID) != nativeProvisioningReservationRelayBucketBytes || result.AccessHintExpiryUnix == 0 {
+		zeroNativeBytes(provisioning)
+		zeroNativeBytes(spentHintKey)
+		zeroNativeBytes(relayBucketID)
+		t.Fatalf("reservation JSON is incomplete: %+v", result)
+	}
+	return nativeProvisioningReservationJSONTestResult{
+		provisioning:  provisioning,
+		spentHintKey:  spentHintKey,
+		relayBucketID: relayBucketID,
+		expiresAtUnix: result.AccessHintExpiryUnix,
+	}
 }
 
 func reserveNativeProvisioningForTest(t testing.TB, input []byte) nativeProvisioningReservationTestResult {

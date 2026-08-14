@@ -63,6 +63,7 @@ const (
 	opReserveNativeProvisioning        = 19
 	opValidateNativeProvisioningSource = 20
 	opConfigureNativeProvisioningTrust = 21
+	opReserveNativeProvisioningJSON    = 22
 )
 
 // Result status bytes.
@@ -105,6 +106,13 @@ type nativeIssuerWorkJSON struct {
 
 type nativeLocalPacketsJSON struct {
 	PacketsBase64 []string `json:"packets_base64"`
+}
+
+type nativeProvisioningReservationJSON struct {
+	ProvisioningBase64   string `json:"provisioning_base64"`
+	SpentHintKeyBase64   string `json:"spent_hint_key_base64"`
+	RelayBucketIDBase64  string `json:"relay_bucket_id_base64"`
+	AccessHintExpiryUnix uint64 `json:"access_hint_expiry_unix"`
 }
 
 // AuroraCoreCall dispatches a single portable-core operation. in/inLen is the
@@ -402,6 +410,20 @@ func dispatch(op int, in []byte, arg uint64) (byte, []byte) {
 			return statusError, nil
 		}
 		return statusOK, encoded
+	case opReserveNativeProvisioningJSON:
+		if arg == 0 || arg > uint64(^uint64(0)>>1) {
+			return statusError, nil
+		}
+		reservation, err := reserveNativeProvisioning(in, time.Unix(int64(arg), 0).UTC())
+		if err != nil {
+			return statusError, nil
+		}
+		defer reservation.Zero()
+		encoded, err := encodeNativeProvisioningReservationJSON(reservation)
+		if err != nil {
+			return statusError, nil
+		}
+		return statusOK, encoded
 	case opValidateNativeProvisioningSource:
 		if arg == 0 || arg > uint64(^uint64(0)>>1) {
 			return statusError, nil
@@ -496,8 +518,8 @@ func decodeNativeProvisioningReservationRequest(encoded []byte) ([]byte, [][]byt
 }
 
 func encodeNativeProvisioningReservation(reservation client.NativeProvisioningReservation) ([]byte, error) {
-	if len(reservation.SpentHintKey) != nativeProvisioningReservationSpentHintKeyBytes || len(reservation.RelayBucketID) != nativeProvisioningReservationRelayBucketBytes || reservation.AccessHintExpiryUnix == 0 {
-		return nil, fmt.Errorf("auroracore: native provisioning reservation is invalid")
+	if err := validateNativeProvisioningReservation(reservation); err != nil {
+		return nil, err
 	}
 	provisioning, err := client.EncodeNativeProvisioning(reservation.Provisioning)
 	if err != nil {
@@ -517,6 +539,39 @@ func encodeNativeProvisioningReservation(reservation client.NativeProvisioningRe
 	offset += nativeProvisioningReservationRelayBucketBytes
 	binary.BigEndian.PutUint64(encoded[offset:], reservation.AccessHintExpiryUnix)
 	return encoded, nil
+}
+
+func encodeNativeProvisioningReservationJSON(reservation client.NativeProvisioningReservation) ([]byte, error) {
+	if err := validateNativeProvisioningReservation(reservation); err != nil {
+		return nil, err
+	}
+	provisioning, err := client.EncodeNativeProvisioning(reservation.Provisioning)
+	if err != nil {
+		return nil, err
+	}
+	defer zeroNativeBytes(provisioning)
+	encoded, err := json.Marshal(nativeProvisioningReservationJSON{
+		ProvisioningBase64:   base64.StdEncoding.EncodeToString(provisioning),
+		SpentHintKeyBase64:   base64.StdEncoding.EncodeToString(reservation.SpentHintKey),
+		RelayBucketIDBase64:  base64.StdEncoding.EncodeToString(reservation.RelayBucketID),
+		AccessHintExpiryUnix: reservation.AccessHintExpiryUnix,
+	})
+	if err != nil {
+		return nil, err
+	}
+	maximumJSONLength := base64.StdEncoding.EncodedLen(client.MaximumNativeProvisioningWalletBytes) + 384
+	if len(encoded) > maximumJSONLength {
+		zeroNativeBytes(encoded)
+		return nil, fmt.Errorf("auroracore: native provisioning reservation JSON exceeds size limit")
+	}
+	return encoded, nil
+}
+
+func validateNativeProvisioningReservation(reservation client.NativeProvisioningReservation) error {
+	if len(reservation.SpentHintKey) != nativeProvisioningReservationSpentHintKeyBytes || len(reservation.RelayBucketID) != nativeProvisioningReservationRelayBucketBytes || reservation.AccessHintExpiryUnix == 0 {
+		return fmt.Errorf("auroracore: native provisioning reservation is invalid")
+	}
+	return nil
 }
 
 func decodeNativeProvisioningReservation(encoded []byte) (nativeProvisioningReservation, error) {

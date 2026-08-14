@@ -1,11 +1,11 @@
 // Package main builds the Aurora portable-core C archive consumed by the Apple
 // (and other native) thin adapters via an AuroraCore.xcframework.
 //
-// Per Aurora spec Section 35.10, wire encoding, AdmissionProof handling,
-// ReplayProof, and the issuance/cover-carrier codec are portable-core
-// responsibilities that MUST live outside the platform adapter. Native adapters
-// own only network and packet I/O; they call into this archive for every
-// byte-level protocol operation instead of reimplementing it.
+// Wire encoding, AdmissionProof handling, ReplayProof, and the issuance/
+// cover-carrier codec are portable-core responsibilities that MUST live outside
+// the platform adapter. Native adapters own only network and packet I/O; they
+// call into this archive for every byte-level protocol operation instead of
+// reimplementing it.
 //
 // The ABI is a single dispatch entry point plus a free function so the Swift
 // bridging surface stays tiny. All buffers are length-delimited; results are

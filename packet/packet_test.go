@@ -476,6 +476,71 @@ func TestProtectorSealAllocationBudget(t *testing.T) {
 	}
 }
 
+func TestProtectorOpenViewAllocationBudget(t *testing.T) {
+	frame, err := protocol.NewStreamDataFrame(7, bytes.Repeat([]byte{0x5a}, 1200), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protector := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 0x42,
+		HopLayer:        1,
+		Direction:       0,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	if err := protector.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := protector.Seal(protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destroyBytes(sealed.Ciphertext)
+	defer destroyBytes(sealed.AuthTag)
+	encoded, err := protocol.Encode(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destroyBytes(encoded)
+	view, err := DecodeAuroraPacketView(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocations := testing.AllocsPerRun(100, func() {
+		opened, openErr := protector.Open(view)
+		if openErr != nil {
+			panic(openErr)
+		}
+		destroyFrameBlock(&opened)
+	})
+	if allocations > 5 {
+		t.Fatalf("Open view allocations = %.0f, want at most 5", allocations)
+	}
+}
+
+func TestProtectorOpenUsesCurrentPublicPayloadSlices(t *testing.T) {
+	protector := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 0x42,
+		HopLayer:        1,
+		Direction:       0,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	sealed, err := protector.Seal(protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destroyBytes(sealed.Ciphertext)
+	defer destroyBytes(sealed.AuthTag)
+	sealed.Ciphertext = append([]byte(nil), sealed.Ciphertext...)
+	sealed.Ciphertext[0] ^= 0xff
+	if _, err := protector.Open(sealed); err == nil {
+		t.Fatalf("packet with replaced ciphertext slice was accepted")
+	}
+}
+
 func TestProtectorPrepareCachesSuiteAEAD(t *testing.T) {
 	protector := &Protector{
 		Suite:           registry.SuiteHybrid768AESGCM,

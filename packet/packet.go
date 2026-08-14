@@ -21,9 +21,11 @@ type AuroraPacket struct {
 	sealedPayload []byte
 }
 
+const packetAuthTagBytes = 16
+
 // EncodedLen reports the exact serialized packet length when it is valid.
 func (p AuroraPacket) EncodedLen() (int, bool) {
-	if len(p.Ciphertext) > 0xffffff || len(p.AuthTag) != 16 {
+	if len(p.Ciphertext) > 0xffffff || len(p.AuthTag) != packetAuthTagBytes {
 		return 0, false
 	}
 	routeIDLength, err := wire.VarintLen(p.RouteInstanceID)
@@ -52,7 +54,7 @@ func (p AuroraPacket) EncodeTo(e *wire.Encoder) {
 	e.WriteUint8(p.KeyPhase)
 	e.WriteVarint(p.PacketNumber)
 	e.WriteOpaque24(p.Ciphertext)
-	e.WriteOpaqueFixed(p.AuthTag, 16)
+	e.WriteOpaqueFixed(p.AuthTag, packetAuthTagBytes)
 }
 
 func DecodeAuroraPacket(encoded []byte) (AuroraPacket, error) {
@@ -75,10 +77,10 @@ func decodeAuroraPacket(encoded []byte, borrowPayload bool) (AuroraPacket, error
 	}
 	if borrowPayload {
 		p.Ciphertext = r.ReadOpaque24View()
-		p.AuthTag = r.ReadOpaqueFixedView(16)
+		p.AuthTag = r.ReadOpaqueFixedView(packetAuthTagBytes)
 	} else {
 		p.Ciphertext = r.ReadOpaque24()
-		p.AuthTag = r.ReadOpaqueFixed(16)
+		p.AuthTag = r.ReadOpaqueFixed(packetAuthTagBytes)
 	}
 	if r.Err() != nil {
 		return AuroraPacket{}, r.Err()
@@ -173,11 +175,16 @@ func (p *Protector) Seal(block protocol.FrameBlock) (AuroraPacket, error) {
 	if err := protocol.ValidateFrameBlockForDirection(block, p.Direction); err != nil {
 		return AuroraPacket{}, err
 	}
-	plaintext, err := protocol.Encode(block)
+	plaintext, reusable, err := encodeFrameBlockForSeal(block)
 	if err != nil {
 		return AuroraPacket{}, err
 	}
-	defer destroyBytes(plaintext)
+	destroyPlaintext := true
+	defer func() {
+		if destroyPlaintext {
+			destroyBytes(plaintext)
+		}
+	}()
 	packetNumber := p.NextPacket
 	aad, err := auroracrypto.PacketAD(p.Suite, p.RouteInstanceID, p.HopLayer, p.Direction, p.KeyPhase, packetNumber)
 	if err != nil {
@@ -191,16 +198,24 @@ func (p *Protector) Seal(block protocol.FrameBlock) (AuroraPacket, error) {
 	if err != nil {
 		return AuroraPacket{}, err
 	}
-	sealed, err := aead.Seal(nonce, aad, plaintext)
+	var sealed []byte
+	if reusable {
+		sealed, err = aead.SealTo(plaintext[:0], nonce, aad, plaintext)
+		if len(sealed) > 0 && &sealed[0] == &plaintext[0] {
+			destroyPlaintext = false
+		}
+	} else {
+		sealed, err = aead.Seal(nonce, aad, plaintext)
+	}
 	if err != nil {
 		return AuroraPacket{}, err
 	}
-	if len(sealed) < 16 {
+	if len(sealed) < packetAuthTagBytes {
 		destroyBytes(sealed)
 		return AuroraPacket{}, fmt.Errorf("packet: sealed payload too short")
 	}
 	p.NextPacket++
-	ciphertextLength := len(sealed) - 16
+	ciphertextLength := len(sealed) - packetAuthTagBytes
 	return AuroraPacket{
 		RouteInstanceID: p.RouteInstanceID,
 		HopLayer:        p.HopLayer,
@@ -211,6 +226,19 @@ func (p *Protector) Seal(block protocol.FrameBlock) (AuroraPacket, error) {
 		AuthTag:         sealed[ciphertextLength:],
 		sealedPayload:   sealed,
 	}, nil
+}
+
+func encodeFrameBlockForSeal(block protocol.FrameBlock) ([]byte, bool, error) {
+	length, known := block.EncodedLen()
+	if !known || length > int(^uint(0)>>1)-packetAuthTagBytes {
+		plaintext, err := protocol.Encode(block)
+		return plaintext, false, err
+	}
+	plaintext, err := wire.EncodeWithReservedCapacity(block, length, length+packetAuthTagBytes)
+	if err != nil {
+		return nil, false, err
+	}
+	return plaintext, cap(plaintext)-len(plaintext) >= packetAuthTagBytes, nil
 }
 
 func (p Protector) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {

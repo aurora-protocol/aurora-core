@@ -16,18 +16,26 @@ func NewEncoder() *Encoder {
 }
 
 func Encode(v Encodable) ([]byte, error) {
-	return encode(v, -1)
+	return encode(v, -1, 0)
 }
 
 // EncodeWithCapacity uses capacity as a verified expected output length.
 func EncodeWithCapacity(v Encodable, capacity int) ([]byte, error) {
-	return encode(v, capacity)
+	return encode(v, capacity, capacity)
 }
 
-func encode(v Encodable, expectedLength int) ([]byte, error) {
+// EncodeWithReservedCapacity retains capacity beyond the verified encoded length.
+func EncodeWithReservedCapacity(v Encodable, expectedLength, capacity int) ([]byte, error) {
+	if expectedLength < 0 || capacity < expectedLength {
+		return Encode(v)
+	}
+	return encode(v, expectedLength, capacity)
+}
+
+func encode(v Encodable, expectedLength, capacity int) ([]byte, error) {
 	e := NewEncoder()
 	if expectedLength >= 0 {
-		e.buf = make([]byte, 0, expectedLength)
+		e.buf = make([]byte, 0, capacity)
 	}
 	v.EncodeTo(e)
 	if e.err != nil {

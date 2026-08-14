@@ -32,6 +32,20 @@ func TestEncodeWithCapacityAvoidsOutputCopy(t *testing.T) {
 	}
 }
 
+func TestEncodeWithReservedCapacityRetainsRequestedHeadroom(t *testing.T) {
+	payload := sizedPayload{payload: make([]byte, 1200)}
+	encoded, err := EncodeWithReservedCapacity(payload, len(payload.payload), len(payload.payload)+16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(encoded), len(payload.payload); got != want {
+		t.Fatalf("encoded length = %d, want %d", got, want)
+	}
+	if got, want := cap(encoded), len(payload.payload)+16; got != want {
+		t.Fatalf("encoded capacity = %d, want %d", got, want)
+	}
+}
+
 type coincidentalLengthPayload struct {
 	payload []byte
 }

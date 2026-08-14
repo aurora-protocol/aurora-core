@@ -40,13 +40,18 @@ func NewSuiteAEAD(suite uint64, key []byte) (*SuiteAEAD, error) {
 }
 
 func (a *SuiteAEAD) Seal(nonce, aad, plaintext []byte) ([]byte, error) {
+	return a.SealTo(nil, nonce, aad, plaintext)
+}
+
+// SealTo appends an authenticated ciphertext to dst.
+func (a *SuiteAEAD) SealTo(dst, nonce, aad, plaintext []byte) ([]byte, error) {
 	if a == nil || a.aead == nil {
 		return nil, fmt.Errorf("crypto: missing AEAD")
 	}
 	if len(nonce) != a.aead.NonceSize() {
 		return nil, fmt.Errorf("crypto: %s nonce length %d, want %d", a.name, len(nonce), a.aead.NonceSize())
 	}
-	return a.aead.Seal(nil, nonce, plaintext, aad), nil
+	return a.aead.Seal(dst, nonce, plaintext, aad), nil
 }
 
 func (a *SuiteAEAD) Open(nonce, aad, ciphertextAndTag []byte) ([]byte, error) {

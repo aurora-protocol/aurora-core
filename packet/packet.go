@@ -17,6 +17,8 @@ type AuroraPacket struct {
 	PacketNumber    uint64
 	Ciphertext      []byte
 	AuthTag         []byte
+
+	sealedPayload []byte
 }
 
 func (p AuroraPacket) EncodeTo(e *wire.Encoder) {
@@ -59,6 +61,11 @@ func decodeAuroraPacket(encoded []byte, borrowPayload bool) (AuroraPacket, error
 	}
 	if !r.EOF() {
 		return AuroraPacket{}, fmt.Errorf("packet: trailing packet bytes")
+	}
+	if borrowPayload {
+		payloadEnd := len(encoded) - r.Remaining()
+		payloadStart := payloadEnd - len(p.Ciphertext) - len(p.AuthTag)
+		p.sealedPayload = encoded[payloadStart:payloadEnd:payloadEnd]
 	}
 	return p, nil
 }
@@ -178,6 +185,7 @@ func (p *Protector) Seal(block protocol.FrameBlock) (AuroraPacket, error) {
 		PacketNumber:    packetNumber,
 		Ciphertext:      sealed[:ciphertextLength:ciphertextLength],
 		AuthTag:         sealed[ciphertextLength:],
+		sealedPayload:   sealed,
 	}, nil
 }
 
@@ -193,8 +201,10 @@ func (p Protector) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
 	if err != nil {
 		return protocol.FrameBlock{}, err
 	}
-	sealed := append(append([]byte(nil), pkt.Ciphertext...), pkt.AuthTag...)
-	defer destroyBytes(sealed)
+	sealed, ownsSealed := pkt.ciphertextAndTag()
+	if ownsSealed {
+		defer destroyBytes(sealed)
+	}
 	aead, err := p.cachedAEAD()
 	if err != nil {
 		return protocol.FrameBlock{}, err
@@ -213,6 +223,19 @@ func (p Protector) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
 		return protocol.FrameBlock{}, err
 	}
 	return block, nil
+}
+
+func (p AuroraPacket) ciphertextAndTag() ([]byte, bool) {
+	totalLength := len(p.Ciphertext) + len(p.AuthTag)
+	if totalLength > 0 && len(p.sealedPayload) == totalLength && len(p.AuthTag) > 0 {
+		ciphertextMatches := len(p.Ciphertext) == 0 || &p.Ciphertext[0] == &p.sealedPayload[0]
+		tagMatches := &p.AuthTag[0] == &p.sealedPayload[len(p.Ciphertext)]
+		if ciphertextMatches && tagMatches {
+			return p.sealedPayload, false
+		}
+	}
+	sealed := append(append([]byte(nil), p.Ciphertext...), p.AuthTag...)
+	return sealed, true
 }
 
 func (p *Protector) cachedAEAD() (*auroracrypto.SuiteAEAD, error) {

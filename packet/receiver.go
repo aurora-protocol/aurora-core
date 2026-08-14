@@ -174,7 +174,7 @@ func (r *Receiver) OpenWithDirectionState(pkt AuroraPacket, state *DirectionStat
 }
 
 func (r *Receiver) PrepareOpen(pkt AuroraPacket) (PreparedOpen, error) {
-	return r.prepareOpenWithProtector(pkt, &r.protector)
+	return r.prepareOpenWithProtector(pkt, &r.protector, false)
 }
 
 // PrepareOpenWithDirectionState authenticates synchronously without retaining
@@ -191,10 +191,28 @@ func (r *Receiver) PrepareOpenWithDirectionState(pkt AuroraPacket, state *Direct
 	if err != nil {
 		return PreparedOpen{}, err
 	}
-	return r.prepareOpenWithProtector(pkt, protector)
+	return r.prepareOpenWithProtector(pkt, protector, false)
 }
 
-func (r *Receiver) prepareOpenWithProtector(pkt AuroraPacket, protector *Protector) (PreparedOpen, error) {
+// PrepareOpenOwnedWithDirectionState authenticates a packet buffer that is
+// exclusively owned by the caller. The packet payload is consumed and cannot
+// be retried after this call.
+func (r *Receiver) PrepareOpenOwnedWithDirectionState(pkt AuroraPacket, state *DirectionState, suite uint64, now time.Time) (PreparedOpen, error) {
+	if state == nil {
+		return PreparedOpen{}, fmt.Errorf("packet: missing direction state")
+	}
+	material, err := state.materialForPacketView(pkt, now)
+	if err != nil {
+		return PreparedOpen{}, err
+	}
+	protector, err := r.directionProtector(pkt, state, suite, material)
+	if err != nil {
+		return PreparedOpen{}, err
+	}
+	return r.prepareOpenWithProtector(pkt, protector, true)
+}
+
+func (r *Receiver) prepareOpenWithProtector(pkt AuroraPacket, protector *Protector, owned bool) (PreparedOpen, error) {
 	if protector == nil {
 		return PreparedOpen{}, fmt.Errorf("packet: missing protector")
 	}
@@ -205,7 +223,15 @@ func (r *Receiver) prepareOpenWithProtector(pkt AuroraPacket, protector *Protect
 	}
 	r.mu.Unlock()
 
-	block, err := protector.Open(pkt)
+	var (
+		block protocol.FrameBlock
+		err   error
+	)
+	if owned {
+		block, err = protector.OpenOwned(pkt)
+	} else {
+		block, err = protector.Open(pkt)
+	}
 	if err != nil {
 		return PreparedOpen{}, err
 	}

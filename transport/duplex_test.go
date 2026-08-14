@@ -254,6 +254,34 @@ func TestRunPacketDuplexProcessesInboundRecordsInOrder(t *testing.T) {
 	requireDuplexClosedOnce(t, reader.closeCalls.Load(), writer.closeCalls.Load(), endpoint.closeCalls.Load())
 }
 
+func TestRunPacketDuplexUsesOwnedPacketEndpointAndZeroesRecord(t *testing.T) {
+	var encoded bytes.Buffer
+	recordWriter, err := NewRecordWriter(&encoded, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recordWriter.Write([]byte("owned packet")); err != nil {
+		t.Fatal(err)
+	}
+	reader := &countingReadCloser{Reader: bytes.NewReader(encoded.Bytes())}
+	writer := &discardWriteCloser{}
+	endpoint := newOwnedDuplexTestEndpoint()
+
+	err = RunPacketDuplex(context.Background(), reader, writer, endpoint, discardFrameBlock, 64)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("RunPacketDuplex exhausted input error = %v, want io.EOF", err)
+	}
+	if endpoint.publicCalls.Load() != 0 || endpoint.ownedCalls.Load() != 1 {
+		t.Fatalf("packet handler calls = public %d owned %d, want public 0 owned 1", endpoint.publicCalls.Load(), endpoint.ownedCalls.Load())
+	}
+	for _, value := range endpoint.retained {
+		if value != 0 {
+			t.Fatal("duplex retained owned packet bytes")
+		}
+	}
+	requireDuplexClosedOnce(t, reader.closeCalls.Load(), writer.closeCalls.Load(), endpoint.closeCalls.Load())
+}
+
 func TestRunPacketDuplexPreservesCarrierWriteError(t *testing.T) {
 	reader := newBlockingReadCloser()
 	wantErr := errors.New("carrier write failed")
@@ -585,6 +613,28 @@ type duplexTestEndpoint struct {
 	startOnce   sync.Once
 	closeOnce   sync.Once
 	closeCalls  atomic.Int32
+}
+
+type ownedDuplexTestEndpoint struct {
+	*duplexTestEndpoint
+	publicCalls atomic.Int32
+	ownedCalls  atomic.Int32
+	retained    []byte
+}
+
+func newOwnedDuplexTestEndpoint() *ownedDuplexTestEndpoint {
+	return &ownedDuplexTestEndpoint{duplexTestEndpoint: newDuplexTestEndpoint()}
+}
+
+func (e *ownedDuplexTestEndpoint) HandlePacket(context.Context, time.Time, []byte) ([]protocol.FrameBlock, error) {
+	e.publicCalls.Add(1)
+	return nil, errors.New("unexpected public packet handler")
+}
+
+func (e *ownedDuplexTestEndpoint) HandleOwnedPacket(_ context.Context, _ time.Time, packet []byte) ([]protocol.FrameBlock, error) {
+	e.ownedCalls.Add(1)
+	e.retained = packet
+	return nil, nil
 }
 
 func newDuplexTestEndpoint() *duplexTestEndpoint {

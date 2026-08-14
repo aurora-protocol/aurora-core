@@ -43,6 +43,40 @@ func BenchmarkProtectorOpen1200(b *testing.B) {
 	}
 }
 
+func BenchmarkProtectorOpenOwned1200(b *testing.B) {
+	protector, block := benchmarkProtectorAndBlock(b)
+	sealed, err := protector.Seal(block)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer destroyBytes(sealed.Ciphertext)
+	defer destroyBytes(sealed.AuthTag)
+	encoded, err := protocol.Encode(sealed)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer destroyBytes(encoded)
+	original := append([]byte(nil), encoded...)
+	defer destroyBytes(original)
+	view, err := DecodeAuroraPacketView(encoded)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		copy(view.sealedPayload, original[len(original)-len(view.sealedPayload):])
+		opened, err := protector.OpenOwned(view)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(opened.Frames) != 1 || len(opened.Frames[0].Payload) != 1200 {
+			b.Fatal("packet owned open failed")
+		}
+		destroyFrameBlock(&opened)
+	}
+}
+
 func benchmarkProtectorAndBlock(b *testing.B) (*Protector, protocol.FrameBlock) {
 	b.Helper()
 	frame, err := protocol.NewStreamDataFrame(7, bytes.Repeat([]byte{0x5a}, 1200), 0)

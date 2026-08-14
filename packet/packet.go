@@ -242,9 +242,32 @@ func encodeFrameBlockForSeal(block protocol.FrameBlock) ([]byte, bool, error) {
 }
 
 func (p Protector) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
-	if pkt.RouteInstanceID != p.RouteInstanceID || pkt.HopLayer != p.HopLayer || pkt.Direction != p.Direction || pkt.KeyPhase != p.KeyPhase {
-		return protocol.FrameBlock{}, fmt.Errorf("packet: packet metadata does not match protector")
+	if err := p.validatePacketMetadata(pkt); err != nil {
+		return protocol.FrameBlock{}, err
 	}
+	sealed, ownsSealed := pkt.ciphertextAndTag()
+	if ownsSealed {
+		defer destroyBytes(sealed)
+	}
+	return p.open(pkt, sealed, false)
+}
+
+// OpenOwned authenticates a packet whose contiguous payload storage is
+// exclusively owned by the caller. It consumes and zeroes that payload, even
+// when authentication fails. Open remains the immutable-input API.
+func (p Protector) OpenOwned(pkt AuroraPacket) (protocol.FrameBlock, error) {
+	sealed, ok := pkt.borrowedCiphertextAndTag()
+	if !ok {
+		return protocol.FrameBlock{}, fmt.Errorf("packet: owned open requires a borrowed contiguous payload")
+	}
+	defer destroyBytes(sealed)
+	if err := p.validatePacketMetadata(pkt); err != nil {
+		return protocol.FrameBlock{}, err
+	}
+	return p.open(pkt, sealed, true)
+}
+
+func (p Protector) open(pkt AuroraPacket, sealed []byte, owned bool) (protocol.FrameBlock, error) {
 	aad, err := auroracrypto.PacketAD(p.Suite, pkt.RouteInstanceID, pkt.HopLayer, pkt.Direction, pkt.KeyPhase, pkt.PacketNumber)
 	if err != nil {
 		return protocol.FrameBlock{}, err
@@ -253,15 +276,16 @@ func (p Protector) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
 	if err != nil {
 		return protocol.FrameBlock{}, err
 	}
-	sealed, ownsSealed := pkt.ciphertextAndTag()
-	if ownsSealed {
-		defer destroyBytes(sealed)
-	}
 	aead, err := p.cachedAEAD()
 	if err != nil {
 		return protocol.FrameBlock{}, err
 	}
-	plaintext, err := aead.Open(nonce, aad, sealed)
+	var plaintext []byte
+	if owned {
+		plaintext, err = aead.OpenTo(sealed[:0], nonce, aad, sealed)
+	} else {
+		plaintext, err = aead.Open(nonce, aad, sealed)
+	}
 	if err != nil {
 		return protocol.FrameBlock{}, err
 	}
@@ -277,6 +301,13 @@ func (p Protector) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
 	return block, nil
 }
 
+func (p Protector) validatePacketMetadata(pkt AuroraPacket) error {
+	if pkt.RouteInstanceID != p.RouteInstanceID || pkt.HopLayer != p.HopLayer || pkt.Direction != p.Direction || pkt.KeyPhase != p.KeyPhase {
+		return fmt.Errorf("packet: packet metadata does not match protector")
+	}
+	return nil
+}
+
 func (p AuroraPacket) ciphertextAndTag() ([]byte, bool) {
 	totalLength := len(p.Ciphertext) + len(p.AuthTag)
 	if totalLength > 0 && len(p.sealedPayload) == totalLength && len(p.AuthTag) > 0 {
@@ -288,6 +319,19 @@ func (p AuroraPacket) ciphertextAndTag() ([]byte, bool) {
 	}
 	sealed := append(append([]byte(nil), p.Ciphertext...), p.AuthTag...)
 	return sealed, true
+}
+
+func (p AuroraPacket) borrowedCiphertextAndTag() ([]byte, bool) {
+	totalLength := len(p.Ciphertext) + len(p.AuthTag)
+	if totalLength == 0 || len(p.sealedPayload) != totalLength || len(p.AuthTag) == 0 {
+		return nil, false
+	}
+	ciphertextMatches := len(p.Ciphertext) == 0 || &p.Ciphertext[0] == &p.sealedPayload[0]
+	tagMatches := &p.AuthTag[0] == &p.sealedPayload[len(p.Ciphertext)]
+	if !ciphertextMatches || !tagMatches {
+		return nil, false
+	}
+	return p.sealedPayload, true
 }
 
 func (p *Protector) cachedAEAD() (*auroracrypto.SuiteAEAD, error) {

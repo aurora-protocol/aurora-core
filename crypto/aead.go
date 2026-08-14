@@ -55,13 +55,22 @@ func (a *SuiteAEAD) SealTo(dst, nonce, aad, plaintext []byte) ([]byte, error) {
 }
 
 func (a *SuiteAEAD) Open(nonce, aad, ciphertextAndTag []byte) ([]byte, error) {
+	return a.OpenTo(nil, nonce, aad, ciphertextAndTag)
+}
+
+// OpenTo appends an authenticated plaintext to dst.
+//
+// To reuse ciphertextAndTag's storage, pass ciphertextAndTag[:0] as dst.
+// Callers must exclusively own that storage because Open may overwrite dst
+// even when authentication fails. dst must not overlap aad.
+func (a *SuiteAEAD) OpenTo(dst, nonce, aad, ciphertextAndTag []byte) ([]byte, error) {
 	if a == nil || a.aead == nil {
 		return nil, fmt.Errorf("crypto: missing AEAD")
 	}
 	if len(nonce) != a.aead.NonceSize() {
 		return nil, fmt.Errorf("crypto: %s nonce length %d, want %d", a.name, len(nonce), a.aead.NonceSize())
 	}
-	return a.aead.Open(nil, nonce, ciphertextAndTag, aad)
+	return a.aead.Open(dst, nonce, ciphertextAndTag, aad)
 }
 
 func SealForSuite(suite uint64, key, nonce, aad, plaintext []byte) ([]byte, error) {

@@ -33,6 +33,13 @@ type PacketEndpoint interface {
 	Close() error
 }
 
+// ownedPacketEndpoint can consume a record buffer that RunPacketDuplex owns
+// for the duration of HandleOwnedPacket. It is intentionally optional so
+// existing endpoints retain the immutable HandlePacket contract.
+type ownedPacketEndpoint interface {
+	HandleOwnedPacket(context.Context, time.Time, []byte) ([]protocol.FrameBlock, error)
+}
+
 // FrameBlockHandler must honor context cancellation and copy retained payloads.
 type FrameBlockHandler func(context.Context, protocol.FrameBlock) error
 
@@ -127,7 +134,15 @@ func handlePacketRecord(ctx context.Context, endpoint PacketEndpoint, handler Fr
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	blocks, err := endpoint.HandlePacket(ctx, time.Now(), packet)
+	var (
+		blocks []protocol.FrameBlock
+		err    error
+	)
+	if owned, ok := endpoint.(ownedPacketEndpoint); ok {
+		blocks, err = owned.HandleOwnedPacket(ctx, time.Now(), packet)
+	} else {
+		blocks, err = endpoint.HandlePacket(ctx, time.Now(), packet)
+	}
 	if err != nil {
 		destroyDuplexFrameBlocks(blocks)
 		return err

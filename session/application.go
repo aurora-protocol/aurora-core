@@ -334,6 +334,17 @@ func (a *Application) nextQueuedPacketIndexLocked() int {
 }
 
 func (a *Application) HandlePacket(ctx context.Context, now time.Time, encoded []byte) ([]protocol.FrameBlock, error) {
+	return a.handlePacket(ctx, now, encoded, false)
+}
+
+// HandleOwnedPacket authenticates a packet buffer owned exclusively by the
+// caller. It may overwrite the encrypted payload, so callers must not retain
+// or retry encoded after this method returns.
+func (a *Application) HandleOwnedPacket(ctx context.Context, now time.Time, encoded []byte) ([]protocol.FrameBlock, error) {
+	return a.handlePacket(ctx, now, encoded, true)
+}
+
+func (a *Application) handlePacket(ctx context.Context, now time.Time, encoded []byte, owned bool) ([]protocol.FrameBlock, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("session: nil context")
 	}
@@ -364,7 +375,12 @@ func (a *Application) HandlePacket(ctx context.Context, now time.Time, encoded [
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	preparedOpen, err := a.receiver.PrepareOpenWithDirectionState(pkt, &a.readState, a.suite, now)
+	var preparedOpen packet.PreparedOpen
+	if owned {
+		preparedOpen, err = a.receiver.PrepareOpenOwnedWithDirectionState(pkt, &a.readState, a.suite, now)
+	} else {
+		preparedOpen, err = a.receiver.PrepareOpenWithDirectionState(pkt, &a.readState, a.suite, now)
+	}
 	if err != nil {
 		return nil, err
 	}

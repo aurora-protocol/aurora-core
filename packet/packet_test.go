@@ -519,6 +519,153 @@ func TestProtectorOpenViewAllocationBudget(t *testing.T) {
 	}
 }
 
+func TestProtectorOpenOwnedReusesBorrowedPayload(t *testing.T) {
+	frame, err := protocol.NewStreamDataFrame(7, bytes.Repeat([]byte{0x5a}, 1200), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protector := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 0x42,
+		HopLayer:        1,
+		Direction:       0,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	if err := protector.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := protector.Seal(protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destroyBytes(sealed.Ciphertext)
+	defer destroyBytes(sealed.AuthTag)
+	encoded, err := protocol.Encode(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destroyBytes(encoded)
+	original := append([]byte(nil), encoded...)
+	defer destroyBytes(original)
+
+	view, err := DecodeAuroraPacketView(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocations := testing.AllocsPerRun(100, func() {
+		copy(view.sealedPayload, original[len(original)-len(view.sealedPayload):])
+		opened, openErr := protector.OpenOwned(view)
+		if openErr != nil {
+			panic(openErr)
+		}
+		destroyFrameBlock(&opened)
+	})
+	if allocations > 4 {
+		t.Fatalf("Open owned allocations = %.0f, want at most 4", allocations)
+	}
+}
+
+func TestProtectorOpenOwnedRejectsCopiedPayload(t *testing.T) {
+	protector := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 0x42,
+		HopLayer:        1,
+		Direction:       0,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	sealed, err := protector.Seal(protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destroyBytes(sealed.Ciphertext)
+	defer destroyBytes(sealed.AuthTag)
+	encoded, err := protocol.Encode(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destroyBytes(encoded)
+	copied, err := DecodeAuroraPacket(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destroyBytes(copied.Ciphertext)
+	defer destroyBytes(copied.AuthTag)
+	if _, err := protector.OpenOwned(copied); err == nil {
+		t.Fatal("OpenOwned accepted a copied packet payload")
+	}
+}
+
+func TestProtectorOpenOwnedZeroesPayloadAfterAuthenticationFailure(t *testing.T) {
+	protector := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 0x42,
+		HopLayer:        1,
+		Direction:       0,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	sealed, err := protector.Seal(protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destroyBytes(sealed.Ciphertext)
+	defer destroyBytes(sealed.AuthTag)
+	encoded, err := protocol.Encode(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destroyBytes(encoded)
+	view, err := DecodeAuroraPacketView(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.Ciphertext[0] ^= 0xff
+	if _, err := protector.OpenOwned(view); err == nil {
+		t.Fatal("OpenOwned accepted a modified packet")
+	}
+	for _, value := range view.sealedPayload {
+		if value != 0 {
+			t.Fatal("OpenOwned retained packet payload after authentication failure")
+		}
+	}
+}
+
+func TestProtectorOpenOwnedUsesChaChaSuiteAEAD(t *testing.T) {
+	protector := &Protector{
+		Suite:           registry.SuiteHybrid768ChaCha20,
+		RouteInstanceID: 0x43,
+		HopLayer:        1,
+		Direction:       0,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	sealed, err := protector.Seal(protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destroyBytes(sealed.Ciphertext)
+	defer destroyBytes(sealed.AuthTag)
+	encoded, err := protocol.Encode(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destroyBytes(encoded)
+	view, err := DecodeAuroraPacketView(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := protector.OpenOwned(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destroyFrameBlock(&opened)
+	if len(opened.Frames) != 1 || opened.Frames[0].FrameType != registry.FramePadding {
+		t.Fatalf("OpenOwned ChaCha block = %#v", opened)
+	}
+}
+
 func TestProtectorOpenUsesCurrentPublicPayloadSlices(t *testing.T) {
 	protector := &Protector{
 		Suite:           registry.SuiteHybrid768AESGCM,

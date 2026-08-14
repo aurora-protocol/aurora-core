@@ -234,6 +234,50 @@ func TestApplicationRoundTripOwnsFrameInput(t *testing.T) {
 	}
 }
 
+func TestApplicationHandleOwnedPacketConsumesPayloadAndPublicPathIsImmutable(t *testing.T) {
+	publicClient, publicRelay := newApplicationPair(t)
+	defer publicClient.Close()
+	defer publicRelay.Close()
+	publicPacket, want := nextEncodedTestPacket(t, publicClient, 31)
+	publicBefore := append([]byte(nil), publicPacket...)
+	publicBlocks, err := publicRelay.HandlePacket(context.Background(), time.Now(), publicPacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(publicBlocks, []protocol.FrameBlock{want}) {
+		t.Fatalf("public blocks = %#v, want %#v", publicBlocks, []protocol.FrameBlock{want})
+	}
+	if !bytes.Equal(publicPacket, publicBefore) {
+		t.Fatal("HandlePacket mutated its caller-owned packet")
+	}
+
+	ownedClient, ownedRelay := newApplicationPair(t)
+	defer ownedClient.Close()
+	defer ownedRelay.Close()
+	ownedPacket, want := nextEncodedTestPacket(t, ownedClient, 32)
+	ownedView, err := packet.DecodeAuroraPacketView(ownedPacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownedBlocks, err := ownedRelay.HandleOwnedPacket(context.Background(), time.Now(), ownedPacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(ownedBlocks, []protocol.FrameBlock{want}) {
+		t.Fatalf("owned blocks = %#v, want %#v", ownedBlocks, []protocol.FrameBlock{want})
+	}
+	for _, value := range ownedView.Ciphertext {
+		if value != 0 {
+			t.Fatal("HandleOwnedPacket retained decrypted packet bytes")
+		}
+	}
+	for _, value := range ownedView.AuthTag {
+		if value != 0 {
+			t.Fatal("HandleOwnedPacket retained packet authentication tag")
+		}
+	}
+}
+
 func TestApplicationRejectsReplayAndMetadataMismatch(t *testing.T) {
 	metadata := []struct {
 		name   string

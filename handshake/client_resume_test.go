@@ -1,9 +1,12 @@
 package handshake
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
+
+	"github.com/aurora-protocol/aurora-core/protocol"
 )
 
 func TestClientHandshakeDefersCapsuleUntilProofsArrive(t *testing.T) {
@@ -77,6 +80,85 @@ func TestClientHandshakeCloseCancelsPendingProofRequest(t *testing.T) {
 	if opener.lastCarrier() != carrier {
 		t.Fatal("client reopened a carrier after exhausting the access hint")
 	}
+}
+
+func TestDeferredClientProofProviderCloseRejectsLateProofs(t *testing.T) {
+	proof, replay := deferredClientProofs(t)
+	defer zeroAdmissionProof(&proof)
+	defer zeroReplayProof(&replay)
+	queued := &deferredClientProofProvider{
+		requests: make(chan ClientProofRequest, 1),
+		results:  make(chan clientProofResult, 1),
+		closed:   make(chan struct{}),
+	}
+	if err := queued.complete(proof, replay); err != nil {
+		t.Fatalf("queue deferred proofs: %v", err)
+	}
+	queued.close()
+	select {
+	case <-queued.results:
+		t.Fatal("closing deferred proof provider retained queued proofs")
+	default:
+	}
+	for attempt := 0; attempt < 64; attempt++ {
+		provider := &deferredClientProofProvider{
+			requests: make(chan ClientProofRequest, 1),
+			results:  make(chan clientProofResult, 1),
+			closed:   make(chan struct{}),
+		}
+		provider.close()
+		if err := provider.complete(proof, replay); err == nil {
+			t.Fatal("closed deferred proof provider accepted late proofs")
+		}
+		select {
+		case <-provider.results:
+			t.Fatal("closed deferred proof provider retained late proofs")
+		default:
+		}
+	}
+}
+
+func TestDeferredClientProofProviderCloseRacesProofDeliveryWithoutRetention(t *testing.T) {
+	proof, replay := deferredClientProofs(t)
+	defer zeroAdmissionProof(&proof)
+	defer zeroReplayProof(&replay)
+	for attempt := 0; attempt < 128; attempt++ {
+		provider := &deferredClientProofProvider{
+			requests: make(chan ClientProofRequest, 1),
+			results:  make(chan clientProofResult, 1),
+			closed:   make(chan struct{}),
+		}
+		completed := make(chan error, 1)
+		go func() { completed <- provider.complete(proof, replay) }()
+		provider.close()
+		<-completed
+		select {
+		case <-provider.results:
+			t.Fatal("concurrent close retained deferred proofs")
+		default:
+		}
+	}
+}
+
+func deferredClientProofs(t testing.TB) (protocol.AdmissionProof, protocol.ReplayProof) {
+	t.Helper()
+	now := time.Now()
+	proofSource := &productionClientProofProvider{
+		issuerID:      bytes.Repeat([]byte{0x31}, 16),
+		relayBucketID: bytes.Repeat([]byte{0x32}, 16),
+	}
+	proof, replay, err := proofSource.BuildProofs(context.Background(), ClientProofRequest{
+		AdmissionContextHash:    bytes.Repeat([]byte{0x41}, 48),
+		HandshakeBindingContext: bytes.Repeat([]byte{0x42}, 48),
+		RouteInstanceID:         7,
+		ReplayEpochID:           9,
+		ReplayEpochValidUntil:   uint64(now.Add(time.Minute).Unix()),
+		ReplayWindowID:          bytes.Repeat([]byte{0x43}, 16),
+	})
+	if err != nil {
+		t.Fatalf("build valid deferred proofs: %v", err)
+	}
+	return proof, replay
 }
 
 func TestClientHandshakeRejectsSecondCompletionWithoutAnotherCapsule(t *testing.T) {

@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -82,6 +83,18 @@ func TestNewProductionIssuerHTTPServerSetsResourceBounds(t *testing.T) {
 	}
 }
 
+func TestCloseProductionIssuerRuntimeReportsDurableCacheFailure(t *testing.T) {
+	closeErr := errors.New("spent-token cache close failed")
+	var stderr bytes.Buffer
+	err := closeProductionIssuerRuntime(productionCloseRecorder{err: closeErr}, &stderr)
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("close error = %v, want %v", err, closeErr)
+	}
+	if output := stderr.String(); !strings.Contains(output, "spent-token cache close failed") {
+		t.Fatalf("close failure output = %q", output)
+	}
+}
+
 func TestRunIssuerStartsAndStopsProductionService(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("production serving requires Linux")
@@ -113,6 +126,49 @@ func TestRunIssuerStartsAndStopsProductionService(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "production issuer started") {
 		t.Fatalf("issuer startup output = %s", stdout.String())
+	}
+}
+
+func TestRunProductionIssuerFailsWhenDurableCacheCannotClose(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("production serving requires Linux")
+	}
+	config := newProductionIssuerCommandFixture(t)
+	issuerRuntime, err := newProductionIssuerService(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := issuerRuntime.cache
+	issuerRuntime.cache = productionCloseRecorder{err: errors.New("spent-token cache close failed")}
+	if err := cache.Close(); err != nil {
+		t.Fatalf("close fixture cache: %v", err)
+	}
+	ready := make(chan struct{})
+	restoreListen := setProductionListenForTest(func(string) (net.Listener, error) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err == nil {
+			close(ready)
+		}
+		return listener, err
+	})
+	defer restoreListen()
+	restoreSignals := setProductionSignalContextForTest(func() (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			<-ready
+			time.Sleep(10 * time.Millisecond)
+			cancel()
+		}()
+		return ctx, cancel
+	})
+	defer restoreSignals()
+
+	var stdout, stderr bytes.Buffer
+	if code := runProductionIssuer(issuerRuntime, config.listenAddress, &stdout, &stderr); code != 1 {
+		t.Fatalf("run issuer close failure code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if output := stderr.String(); !strings.Contains(output, "spent-token cache close failed") {
+		t.Fatalf("close failure output = %q", output)
 	}
 }
 

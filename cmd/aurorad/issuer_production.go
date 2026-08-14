@@ -99,8 +99,23 @@ func runIssuer(args []string, stdout, stderr io.Writer) int {
 }
 
 func parseProductionIssuerConfig(args []string, stderr io.Writer) (issuerProductionConfig, error) {
+	configPath, hasConfigFile, err := productionArgumentsFilePath("issuer", args)
+	if err != nil {
+		return issuerProductionConfig{}, err
+	}
+	if hasConfigFile {
+		args, err = readProductionArgumentsFile("issuer", configPath)
+		if err != nil {
+			return issuerProductionConfig{}, err
+		}
+	}
+	return parseProductionIssuerConfigArguments(args, stderr)
+}
+
+func parseProductionIssuerConfigArguments(args []string, stderr io.Writer) (issuerProductionConfig, error) {
 	flags := flag.NewFlagSet("aurorad issuer", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	setProductionArgumentsFileUsage(flags)
 	config := issuerProductionConfig{}
 	var relayBucketID string
 	flags.StringVar(&config.listenAddress, "listen", "", "public TLS listen address")

@@ -10,7 +10,9 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/asn1"
+	"encoding/json"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -111,6 +113,81 @@ func TestRunServeStartsAndStopsProductionService(t *testing.T) {
 	}
 	if !bytes.Contains(stdout.Bytes(), []byte("production server started")) {
 		t.Fatalf("production start output = %s", stdout.String())
+	}
+}
+
+func TestParseProductionConfigLoadsOwnerOnlyArgumentsFile(t *testing.T) {
+	config := newProductionCommandFixture(t)
+	encoded, err := json.Marshal(struct {
+		Arguments []string `json:"arguments"`
+	}{Arguments: productionCommandArguments(config)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "aurorad.json")
+	writeProductionCommandFile(t, path, encoded, 0o600)
+
+	parsed, err := parseProductionConfig([]string{"--config", path}, io.Discard)
+	if err != nil {
+		t.Fatalf("parse production configuration file: %v", err)
+	}
+	if parsed != config {
+		t.Fatalf("parsed production configuration = %+v, want %+v", parsed, config)
+	}
+}
+
+func TestParseProductionConfigRejectsArgumentsFileCombinedWithCLIOptions(t *testing.T) {
+	config := newProductionCommandFixture(t)
+	encoded, err := json.Marshal(struct {
+		Arguments []string `json:"arguments"`
+	}{Arguments: productionCommandArguments(config)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "aurorad.json")
+	writeProductionCommandFile(t, path, encoded, 0o600)
+
+	_, err = parseProductionConfig([]string{"--config", path, "--max-sessions", "2"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("configuration file combined with CLI options error = %v, want rejection", err)
+	}
+}
+
+func TestParseProductionConfigRejectsArgumentsFilePrecededByCLIOptions(t *testing.T) {
+	config := newProductionCommandFixture(t)
+	encoded, err := json.Marshal(struct {
+		Arguments []string `json:"arguments"`
+	}{Arguments: productionCommandArguments(config)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "aurorad.json")
+	writeProductionCommandFile(t, path, encoded, 0o600)
+
+	_, err = parseProductionConfig([]string{"--max-sessions", "2", "--config", path}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("CLI options preceding configuration file error = %v, want rejection", err)
+	}
+}
+
+func TestParseProductionConfigRejectsUnknownArgumentsFileFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "aurorad.json")
+	writeProductionCommandFile(t, path, []byte(`{"arguments": [], "unexpected": true}`), 0o600)
+
+	_, err := parseProductionConfig([]string{"--config", path}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "decode production configuration file") {
+		t.Fatalf("unknown configuration file field error = %v, want strict decoding rejection", err)
+	}
+}
+
+func TestParseProductionConfigHelpDescribesArgumentsFile(t *testing.T) {
+	var stderr bytes.Buffer
+	_, err := parseProductionConfig([]string{"--help"}, &stderr)
+	if err == nil {
+		t.Fatal("production help did not stop parsing")
+	}
+	if !strings.Contains(stderr.String(), "--config") {
+		t.Fatalf("production help does not describe configuration file mode: %s", stderr.String())
 	}
 }
 

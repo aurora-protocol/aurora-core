@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -110,8 +111,23 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 }
 
 func parseProductionConfig(args []string, stderr io.Writer) (productionConfig, error) {
+	configPath, hasConfigFile, err := productionArgumentsFilePath("server", args)
+	if err != nil {
+		return productionConfig{}, err
+	}
+	if hasConfigFile {
+		args, err = readProductionArgumentsFile("server", configPath)
+		if err != nil {
+			return productionConfig{}, err
+		}
+	}
+	return parseProductionConfigArguments(args, stderr)
+}
+
+func parseProductionConfigArguments(args []string, stderr io.Writer) (productionConfig, error) {
 	flags := flag.NewFlagSet("aurorad serve", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	setProductionArgumentsFileUsage(flags)
 	config := productionConfig{}
 	flags.StringVar(&config.listenAddress, "listen", "", "public listen address")
 	flags.StringVar(&config.authority, "authority", "", "carrier authority")
@@ -168,6 +184,79 @@ func parseProductionConfig(args []string, stderr io.Writer) (productionConfig, e
 		return productionConfig{}, err
 	}
 	return config, nil
+}
+
+func setProductionArgumentsFileUsage(flags *flag.FlagSet) {
+	flags.Usage = func() {
+		fmt.Fprintf(flags.Output(), "Usage of %s:\n", flags.Name())
+		flags.PrintDefaults()
+		fmt.Fprintln(flags.Output(), "  --config path")
+		fmt.Fprintln(flags.Output(), "    owner-only JSON argument file; cannot be combined with command-line options")
+	}
+}
+
+func productionArgumentsFilePath(component string, args []string) (string, bool, error) {
+	var path string
+	for index := 0; index < len(args); index++ {
+		configArgumentIndex := index
+		argument := args[index]
+		switch {
+		case argument == "--config" || argument == "-config":
+			if index+1 >= len(args) {
+				return "", true, fmt.Errorf("%s: production configuration file path is required", component)
+			}
+			path = args[index+1]
+			index++
+		case strings.HasPrefix(argument, "--config="):
+			path = strings.TrimPrefix(argument, "--config=")
+		case strings.HasPrefix(argument, "-config="):
+			path = strings.TrimPrefix(argument, "-config=")
+		default:
+			continue
+		}
+		if strings.TrimSpace(path) == "" || strings.TrimSpace(path) != path {
+			return "", true, fmt.Errorf("%s: production configuration file path is required", component)
+		}
+		if configArgumentIndex != 0 || index+1 != len(args) {
+			return "", true, fmt.Errorf("%s: production configuration file cannot be combined with command-line options", component)
+		}
+		return path, true, nil
+	}
+	return "", false, nil
+}
+
+func readProductionArgumentsFile(component, path string) ([]string, error) {
+	encoded, err := readRestrictedProductionFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("%s: read production configuration file: %w", component, err)
+	}
+	defer zeroProductionBytes(encoded)
+	var file struct {
+		Arguments []string `json:"arguments"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&file); err != nil {
+		return nil, fmt.Errorf("%s: decode production configuration file: %w", component, err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("%s: production configuration file must contain one JSON object", component)
+		}
+		return nil, fmt.Errorf("%s: decode production configuration file: %w", component, err)
+	}
+	if len(file.Arguments) == 0 {
+		return nil, fmt.Errorf("%s: production configuration file arguments are required", component)
+	}
+	for _, argument := range file.Arguments {
+		if strings.TrimSpace(argument) == "" {
+			return nil, fmt.Errorf("%s: production configuration file arguments must not be empty", component)
+		}
+		if argument == "--config" || argument == "-config" || strings.HasPrefix(argument, "--config=") || strings.HasPrefix(argument, "-config=") {
+			return nil, fmt.Errorf("%s: production configuration file cannot select another configuration file", component)
+		}
+	}
+	return file.Arguments, nil
 }
 
 func (c productionConfig) validate() error {

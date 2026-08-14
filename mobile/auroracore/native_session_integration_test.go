@@ -73,6 +73,20 @@ func TestNativeSessionFFIExchangesDNSThroughProductionFirstHop(t *testing.T) {
 	}
 }
 
+func TestNativeSessionFFIRejectsUnconfiguredProvisioningTrust(t *testing.T) {
+	caller := newNativeIntegrationCallerWithoutTrust(t)
+	fixture := newNativeSessionFixture(t, time.Now())
+	defer fixture.Close(t)
+	encoded, err := client.EncodeNativeProvisioning(fixture.Provisioning(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeBytes(encoded)
+	if status, payload := nativeIntegrationCall(t, caller, opBeginNativeSessionJSON, encoded, 0); status != statusError || len(payload) != 0 {
+		t.Fatalf("unconfigured C ABI native session = status %d payload %x", status, payload)
+	}
+}
+
 func TestNativeSessionFFIExchangesSVCBDNSThroughProductionFirstHop(t *testing.T) {
 	caller := newNativeIntegrationCaller(t)
 	fixture := newNativeSessionFixture(t, time.Now())

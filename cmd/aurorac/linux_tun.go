@@ -34,6 +34,7 @@ type tunConfig struct {
 	provisioningPath       string
 	provisioningWalletPath string
 	walletStatePath        string
+	signedSeedTrustPath    string
 	devicePath             string
 	interfaceName          string
 	mtu                    int
@@ -96,6 +97,7 @@ func parseTUNConfig(arguments []string, stderr io.Writer) (tunConfig, error) {
 	flags.StringVar(&config.provisioningPath, "provisioning", "", "owner-only one-time native provisioning file")
 	flags.StringVar(&config.provisioningWalletPath, "provisioning-wallet", "", "owner-only native provisioning wallet file")
 	flags.StringVar(&config.walletStatePath, "wallet-state", "", "owner-only local wallet reservation state file")
+	flags.StringVar(&config.signedSeedTrustPath, "signed-seed-roots", "", "owner-only signed-seed root configuration")
 	flags.StringVar(&config.devicePath, "tun-device", defaults.DevicePath, "Linux TUN device path")
 	flags.StringVar(&config.interfaceName, "tun-iface", defaults.InterfaceName, "Linux TUN interface name")
 	flags.IntVar(&config.mtu, "tun-mtu", defaults.MTU, "Linux TUN MTU")
@@ -108,7 +110,7 @@ func parseTUNConfig(arguments []string, stderr io.Writer) (tunConfig, error) {
 	if flags.NArg() != 0 {
 		return tunConfig{}, fmt.Errorf("client: unexpected tunnel command arguments")
 	}
-	if err := validateProvisioningSource(config.provisioningPath, config.provisioningWalletPath, config.walletStatePath); err != nil {
+	if err := validateProvisioningSource(config.provisioningPath, config.provisioningWalletPath, config.walletStatePath, config.signedSeedTrustPath); err != nil {
 		return tunConfig{}, err
 	}
 	if !validLinuxInterfaceName(config.interfaceName) {

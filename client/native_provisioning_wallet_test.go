@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/admission"
+	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
@@ -19,7 +20,7 @@ func TestNativeProvisioningWalletCanonicalRoundTripAndReservation(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	wallet, err := ParseNativeProvisioningWallet(encoded, now)
+	wallet, err := ParseNativeProvisioningWalletWithTrust(encoded, nativeProvisioningTrustFor(t, first, second), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +98,7 @@ func TestNativeProvisioningWalletRejectsDuplicateAndNonCanonicalEntries(t *testi
 		t.Fatal(err)
 	}
 	defer zeroNativeProvisioningBytes(nonCanonical)
-	if _, err := ParseNativeProvisioningWallet(nonCanonical, now); err == nil {
+	if _, err := ParseNativeProvisioningWalletWithTrust(nonCanonical, nativeProvisioningTrustFor(t, first, second), now); err == nil {
 		t.Fatal("wallet accepted non-canonical entry ordering")
 	}
 }
@@ -151,7 +152,7 @@ func TestNativeProvisioningWalletChecksOrderAcrossExpiredEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer zeroNativeProvisioningBytes(nonCanonical)
-	if _, err := ParseNativeProvisioningWallet(nonCanonical, now); err == nil {
+	if _, err := ParseNativeProvisioningWalletWithTrust(nonCanonical, nativeProvisioningTrustFor(t, valid, expired), now); err == nil {
 		t.Fatal("wallet accepted non-canonical ordering after expired entry")
 	}
 }
@@ -175,6 +176,7 @@ func TestNativeProvisioningWalletFiltersExpiredEntriesAndReportsRefillNeed(t *te
 		t.Fatal(err)
 	}
 	entries = append(entries, expired)
+	walletTrust := nativeProvisioningTrustFor(t, entries...)
 
 	encoded, err := EncodeNativeProvisioningWallet(entries)
 	if err != nil {
@@ -184,7 +186,7 @@ func TestNativeProvisioningWalletFiltersExpiredEntriesAndReportsRefillNeed(t *te
 		zeroNativeProvisioning(&entries[index])
 	}
 	zeroNativeProvisioning(&expired)
-	wallet, err := ParseNativeProvisioningWallet(encoded, now)
+	wallet, err := ParseNativeProvisioningWalletWithTrust(encoded, walletTrust, now)
 	zeroNativeProvisioningBytes(encoded)
 	if err != nil {
 		t.Fatal(err)
@@ -228,7 +230,7 @@ func TestNativeProvisioningWalletFiltersExpiredEntriesAndReportsRefillNeed(t *te
 		t.Fatal(err)
 	}
 	defer zeroNativeProvisioningBytes(malformedEncoded)
-	if _, err := ParseNativeProvisioningWallet(malformedEncoded, now); err == nil {
+	if _, err := ParseNativeProvisioningWalletWithTrust(malformedEncoded, malformedExpired.signedSeedTrust, now); err == nil {
 		t.Fatal("wallet accepted malformed expired provisioning")
 	}
 	zeroNativeProvisioning(&malformedExpired)
@@ -243,12 +245,12 @@ func TestReserveNativeProvisioningSupportsSingleAndWalletSources(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer zeroNativeProvisioningBytes(firstEncoded)
-	firstReservation, err := ReserveNativeProvisioning(firstEncoded, nil, now)
+	firstReservation, err := ReserveNativeProvisioningWithTrust(firstEncoded, first.signedSeedTrust, nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer firstReservation.Zero()
-	if _, err := ReserveNativeProvisioning(firstEncoded, func(key []byte) bool {
+	if _, err := ReserveNativeProvisioningWithTrust(firstEncoded, first.signedSeedTrust, func(key []byte) bool {
 		return bytes.Equal(key, firstReservation.SpentHintKey)
 	}, now); !errors.Is(err, ErrNoUsableNativeProvisioning) {
 		t.Fatalf("single provisioning reuse error = %v, want no usable provisioning", err)
@@ -259,12 +261,13 @@ func TestReserveNativeProvisioningSupportsSingleAndWalletSources(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer zeroNativeProvisioningBytes(walletEncoded)
-	walletFirst, err := ReserveNativeProvisioning(walletEncoded, nil, now)
+	walletTrust := nativeProvisioningTrustFor(t, first, second)
+	walletFirst, err := ReserveNativeProvisioningWithTrust(walletEncoded, walletTrust, nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer walletFirst.Zero()
-	walletSecond, err := ReserveNativeProvisioning(walletEncoded, func(key []byte) bool {
+	walletSecond, err := ReserveNativeProvisioningWithTrust(walletEncoded, walletTrust, func(key []byte) bool {
 		return bytes.Equal(key, walletFirst.SpentHintKey)
 	}, now)
 	if err != nil {
@@ -286,10 +289,10 @@ func TestValidateNativeProvisioningSourceAcceptsSingleAndWalletWithoutReservatio
 		t.Fatal(err)
 	}
 	defer zeroNativeProvisioningBytes(single)
-	if err := ValidateNativeProvisioningSource(single, now); err != nil {
+	if err := ValidateNativeProvisioningSourceWithTrust(single, first.signedSeedTrust, now); err != nil {
 		t.Fatalf("validate single provisioning: %v", err)
 	}
-	singleReservation, err := ReserveNativeProvisioning(single, nil, now)
+	singleReservation, err := ReserveNativeProvisioningWithTrust(single, first.signedSeedTrust, nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,15 +303,16 @@ func TestValidateNativeProvisioningSourceAcceptsSingleAndWalletWithoutReservatio
 		t.Fatal(err)
 	}
 	defer zeroNativeProvisioningBytes(wallet)
-	expectedReservation, err := ReserveNativeProvisioning(wallet, nil, now)
+	walletTrust := nativeProvisioningTrustFor(t, first, second)
+	expectedReservation, err := ReserveNativeProvisioningWithTrust(wallet, walletTrust, nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer expectedReservation.Zero()
-	if err := ValidateNativeProvisioningSource(wallet, now); err != nil {
+	if err := ValidateNativeProvisioningSourceWithTrust(wallet, walletTrust, now); err != nil {
 		t.Fatalf("validate wallet provisioning: %v", err)
 	}
-	actualReservation, err := ReserveNativeProvisioning(wallet, nil, now)
+	actualReservation, err := ReserveNativeProvisioningWithTrust(wallet, walletTrust, nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +324,8 @@ func TestValidateNativeProvisioningSourceAcceptsSingleAndWalletWithoutReservatio
 
 func TestValidateNativeProvisioningSourceRejectsMalformedAndExpiredInput(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	if err := ValidateNativeProvisioningSource([]byte{byte(nativeProvisioningWalletFormat)}, now); err == nil {
+	trust := validNativeProvisioning(t, now).signedSeedTrust
+	if err := ValidateNativeProvisioningSourceWithTrust([]byte{byte(nativeProvisioningWalletFormat)}, trust, now); err == nil {
 		t.Fatal("malformed native provisioning source was accepted")
 	}
 
@@ -341,7 +346,7 @@ func TestValidateNativeProvisioningSourceRejectsMalformedAndExpiredInput(t *test
 		t.Fatal(err)
 	}
 	defer zeroNativeProvisioningBytes(encoded)
-	if err := ValidateNativeProvisioningSource(encoded, now); err == nil {
+	if err := ValidateNativeProvisioningSourceWithTrust(encoded, expired.signedSeedTrust, now); err == nil {
 		t.Fatal("expired native provisioning wallet was accepted")
 	}
 }
@@ -376,9 +381,35 @@ func nativeProvisioningSpentHintKey(t testing.TB, provisioning NativeProvisionin
 	return key
 }
 
+func nativeProvisioningTrustFor(t testing.TB, provisioning ...NativeProvisioning) NativeProvisioningTrust {
+	t.Helper()
+	roots := make([]protocol.AuthorityKeyRecord, 0, len(provisioning))
+	seen := make(map[string]struct{})
+	for _, value := range provisioning {
+		for _, root := range value.signedSeedTrust.roots {
+			encoded, err := protocol.Encode(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := seen[string(encoded)]; !exists {
+				seen[string(encoded)] = struct{}{}
+				roots = append(roots, cloneNativeProvisioningAuthorityKeys([]protocol.AuthorityKeyRecord{root})[0])
+			}
+			zeroNativeProvisioningBytes(encoded)
+		}
+	}
+	trusted, err := NewNativeProvisioningTrust(roots)
+	zeroNativeProvisioningAuthorityKeys(roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return trusted
+}
+
 func FuzzParseNativeProvisioningWallet(f *testing.F) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	provisioning := validNativeProvisioning(f, now)
+	trusted := provisioning.signedSeedTrust
 	encoded, err := EncodeNativeProvisioningWallet([]NativeProvisioning{provisioning})
 	zeroNativeProvisioning(&provisioning)
 	if err != nil {
@@ -386,7 +417,7 @@ func FuzzParseNativeProvisioningWallet(f *testing.F) {
 	}
 	f.Add(encoded)
 	f.Fuzz(func(t *testing.T, encoded []byte) {
-		wallet, _ := ParseNativeProvisioningWallet(encoded, now)
+		wallet, _ := ParseNativeProvisioningWalletWithTrust(encoded, trusted, now)
 		if wallet != nil {
 			wallet.Zero()
 		}

@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aurora-protocol/aurora-core/client"
 )
 
 const (
@@ -151,11 +153,36 @@ func TestNativeIntegrationCABIRejectsOversizedLengthBeforeRead(t *testing.T) {
 
 func newNativeIntegrationCaller(t testing.TB) nativeIntegrationCaller {
 	t.Helper()
+	caller := newNativeIntegrationCallerWithoutTrust(t)
+	configureNativeIntegrationProvisioningTrust(t, caller)
+	return caller
+}
+
+func newNativeIntegrationCallerWithoutTrust(t testing.TB) nativeIntegrationCaller {
+	t.Helper()
+	var caller nativeIntegrationCaller
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Logf("native archive process test is unsupported on %s; using the dispatcher fallback", runtime.GOOS)
-		return nativeIntegrationDispatchCaller{}
+		caller = nativeIntegrationDispatchCaller{}
+	} else {
+		caller = newNativeIntegrationCABICaller(t)
 	}
-	return newNativeIntegrationCABICaller(t)
+	return caller
+}
+
+func configureNativeIntegrationProvisioningTrust(t testing.TB, caller nativeIntegrationCaller) {
+	t.Helper()
+	trusted := firstHopNativeProvisioningTrust(t)
+	encoded, err := client.EncodeNativeProvisioningTrust(trusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeBytes(encoded)
+	status, payload, err := caller.call(opConfigureNativeProvisioningTrust, encoded, 0)
+	zeroNativeBytes(payload)
+	if err != nil || status != statusOK {
+		t.Fatalf("configure native provisioning trust: status=%d err=%v", status, err)
+	}
 }
 
 func newNativeIntegrationCABICaller(t testing.TB) *nativeIntegrationCABICaller {

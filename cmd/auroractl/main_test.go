@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,10 +19,93 @@ import (
 	"testing"
 	"time"
 
+	auroraclient "github.com/aurora-protocol/aurora-core/client"
 	auroraperf "github.com/aurora-protocol/aurora-core/perf"
 	auroraplatform "github.com/aurora-protocol/aurora-core/platform"
+	"github.com/aurora-protocol/aurora-core/protocol"
+	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/server"
+	"github.com/aurora-protocol/aurora-core/trust"
 )
+
+func TestCheckNativeProvisioningTrustAcceptsCanonicalRoots(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "AuroraSignedSeedRoots.bin")
+	encoded := nativeProvisioningTrustEncodingForTest(t)
+	defer clear(encoded)
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := checkNativeProvisioningTrust(path, &out); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := out.String(), "native_provisioning_trust_check passed=true\n"; got != want {
+		t.Fatalf("native provisioning trust output = %q, want %q", got, want)
+	}
+}
+
+func TestCheckNativeProvisioningTrustRejectsMalformedAndNonCanonicalInput(t *testing.T) {
+	for _, encoded := range [][]byte{
+		nil,
+		{0x01, 0x00},
+		append(nativeProvisioningTrustEncodingForTest(t), 0x00),
+	} {
+		path := filepath.Join(t.TempDir(), "AuroraSignedSeedRoots.bin")
+		if err := os.WriteFile(path, encoded, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := checkNativeProvisioningTrust(path, &out); err == nil {
+			t.Fatalf("native provisioning trust checker accepted %x", encoded)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("native provisioning trust checker wrote output for invalid input: %q", out.String())
+		}
+		clear(encoded)
+	}
+}
+
+func nativeProvisioningTrustEncodingForTest(t testing.TB) []byte {
+	t.Helper()
+	curve := elliptic.P256()
+	privateKey := &ecdsa.PrivateKey{
+		PublicKey: ecdsa.PublicKey{Curve: curve, X: curve.Params().Gx, Y: curve.Params().Gy},
+		D:         big.NewInt(1),
+	}
+	publicKey, err := privateKey.PublicKey.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicRecord := protocol.PublicKeyRecord{
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+		PublicKey:       publicKey,
+	}
+	encodedPublicKey, err := protocol.Encode(publicRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(encodedPublicKey)
+	trusted, err := auroraclient.NewNativeProvisioningTrust([]protocol.AuthorityKeyRecord{{
+		AuthorityID:    bytes.Repeat([]byte{0x91}, 16),
+		AuthorityKeyID: trust.AuthorityKeyID(encodedPublicKey),
+		AuthorityRole:  1,
+		PublicKey:      publicRecord,
+		ValidFromUnix:  1,
+		ValidUntilUnix: 4_102_444_800,
+		KeyStatus:      registry.AuthorityActive,
+		UsageFlags:     registry.UsageMaySignSignedSeedRecord,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := auroraclient.EncodeNativeProvisioningTrust(trusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
 
 func TestLoadCheckCommandEmitsPassingJSON(t *testing.T) {
 	harness, err := server.NewHarnessHandler(server.HarnessOptions{NowUnix: 1_700_000_000})

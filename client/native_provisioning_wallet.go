@@ -33,6 +33,7 @@ var ErrNoUsableNativeProvisioning = errors.New("client: native provisioning wall
 type NativeProvisioningWallet struct {
 	mu      sync.Mutex
 	entries []nativeProvisioningWalletEntry
+	trust   NativeProvisioningTrust
 }
 
 type nativeProvisioningWalletEntry struct {
@@ -107,6 +108,15 @@ func EncodeNativeProvisioningWallet(provisioning []NativeProvisioning) ([]byte, 
 // ParseNativeProvisioningWallet validates and loads a canonical wallet. Expired
 // entries are discarded; malformed or unauthenticated entries reject the wallet.
 func ParseNativeProvisioningWallet(encoded []byte, now time.Time) (*NativeProvisioningWallet, error) {
+	return nil, ErrNativeProvisioningTrustRequired
+}
+
+// ParseNativeProvisioningWalletWithTrust validates and loads a canonical
+// wallet using roots supplied independently from wallet contents.
+func ParseNativeProvisioningWalletWithTrust(encoded []byte, signedSeedTrust NativeProvisioningTrust, now time.Time) (*NativeProvisioningWallet, error) {
+	if err := signedSeedTrust.validate(); err != nil {
+		return nil, fmt.Errorf("client: native provisioning wallet trust: %w", err)
+	}
 	if len(encoded) == 0 || len(encoded) > MaximumNativeProvisioningWalletBytes {
 		return nil, fmt.Errorf("client: native provisioning wallet size is invalid")
 	}
@@ -121,7 +131,7 @@ func ParseNativeProvisioningWallet(encoded []byte, now time.Time) (*NativeProvis
 	if reader.Err() != nil || count == 0 || count > maximumNativeProvisioningWalletEntries {
 		return nil, fmt.Errorf("client: native provisioning wallet entry count is invalid")
 	}
-	wallet := &NativeProvisioningWallet{entries: make([]nativeProvisioningWalletEntry, 0, count)}
+	wallet := &NativeProvisioningWallet{entries: make([]nativeProvisioningWalletEntry, 0, count), trust: signedSeedTrust}
 	defer func() {
 		if wallet != nil {
 			wallet.Zero()
@@ -140,6 +150,7 @@ func ParseNativeProvisioningWallet(encoded []byte, now time.Time) (*NativeProvis
 			zeroNativeProvisioningBytes(entryEncoded)
 			return nil, fmt.Errorf("client: parse native provisioning wallet entry: %w", err)
 		}
+		provisioning.signedSeedTrust = signedSeedTrust
 		entry, err := nativeProvisioningWalletEntryFor(provisioning, entryEncoded)
 		if err != nil {
 			zeroNativeProvisioning(&provisioning)
@@ -180,11 +191,17 @@ func ParseNativeProvisioningWallet(encoded []byte, now time.Time) (*NativeProvis
 // bundle or canonical wallet without reserving an entry or returning any
 // credential material.
 func ValidateNativeProvisioningSource(encoded []byte, now time.Time) error {
-	if wallet, err := ParseNativeProvisioningWallet(encoded, now); err == nil {
+	return ErrNativeProvisioningTrustRequired
+}
+
+// ValidateNativeProvisioningSourceWithTrust verifies a complete single
+// provisioning bundle or canonical wallet using independently supplied roots.
+func ValidateNativeProvisioningSourceWithTrust(encoded []byte, signedSeedTrust NativeProvisioningTrust, now time.Time) error {
+	if wallet, err := ParseNativeProvisioningWalletWithTrust(encoded, signedSeedTrust, now); err == nil {
 		wallet.Zero()
 		return nil
 	}
-	provisioning, err := ParseNativeProvisioning(encoded, now)
+	provisioning, err := ParseNativeProvisioningWithTrust(encoded, signedSeedTrust, now)
 	if err == nil {
 		zeroNativeProvisioning(&provisioning)
 		return nil
@@ -196,12 +213,18 @@ func ValidateNativeProvisioningSource(encoded []byte, now time.Time) error {
 // canonical wallet or a single native provisioning bundle. The returned entry
 // is consumed regardless of subsequent session setup outcome.
 func ReserveNativeProvisioning(encoded []byte, alreadyReserved func([]byte) bool, now time.Time) (NativeProvisioningReservation, error) {
-	wallet, walletErr := ParseNativeProvisioningWallet(encoded, now)
+	return NativeProvisioningReservation{}, ErrNativeProvisioningTrustRequired
+}
+
+// ReserveNativeProvisioningWithTrust validates and reserves one entry from a
+// single bundle or canonical wallet using independently supplied roots.
+func ReserveNativeProvisioningWithTrust(encoded []byte, signedSeedTrust NativeProvisioningTrust, alreadyReserved func([]byte) bool, now time.Time) (NativeProvisioningReservation, error) {
+	wallet, walletErr := ParseNativeProvisioningWalletWithTrust(encoded, signedSeedTrust, now)
 	if walletErr == nil {
 		defer wallet.Zero()
 		return wallet.Reserve(alreadyReserved, now)
 	}
-	provisioning, err := ParseNativeProvisioning(encoded, now)
+	provisioning, err := ParseNativeProvisioningWithTrust(encoded, signedSeedTrust, now)
 	if err != nil {
 		return NativeProvisioningReservation{}, fmt.Errorf("client: parse native provisioning reservation source: %w", walletErr)
 	}
@@ -247,7 +270,7 @@ func (w *NativeProvisioningWallet) Reserve(alreadyReserved func([]byte) bool, no
 			entry.zero()
 			continue
 		}
-		provisioning, err := ParseNativeProvisioning(entry.encoded, now)
+		provisioning, err := ParseNativeProvisioningWithTrust(entry.encoded, w.trust, now)
 		if err != nil {
 			entry.zero()
 			continue
@@ -345,24 +368,8 @@ func nativeProvisioningWalletEntryFor(provisioning NativeProvisioning, encoded [
 }
 
 func validateNativeProvisioningWalletEntryAt(provisioning NativeProvisioning, now time.Time) error {
-	if err := provisioning.validateContainer(); err != nil {
-		return err
-	}
-	if now.IsZero() || now.Unix() < 0 {
-		return fmt.Errorf("client: native provisioning wallet requires a valid time")
-	}
-	objects, err := provisioning.decodeObjects()
-	if err != nil {
-		return err
-	}
-	defer zeroNativeAccessHintCredential(&objects.accessHint)
-	if err := validateNativePolicy(objects.policyOffer, objects.transportHints, provisioning.Suite); err != nil {
-		return err
-	}
-	if _, err := provisioning.verifyDeployment(now, objects); err != nil {
-		return fmt.Errorf("client: native provisioning relay deployment: %w", err)
-	}
-	return nil
+	_, _, err := provisioning.validatedObjectsAndDeploymentAt(now, false)
+	return err
 }
 
 func (entry *nativeProvisioningWalletEntry) zero() {
@@ -411,11 +418,6 @@ func zeroNativeProvisioning(provisioning *NativeProvisioning) {
 		provisioning.RelayTrustRoots,
 	} {
 		zeroNativeProvisioningBytes(field)
-	}
-	for index := range provisioning.SignedSeedRoots {
-		zeroNativeProvisioningBytes(provisioning.SignedSeedRoots[index].AuthorityID)
-		zeroNativeProvisioningBytes(provisioning.SignedSeedRoots[index].AuthorityKeyID)
-		zeroNativeProvisioningBytes(provisioning.SignedSeedRoots[index].PublicKey.PublicKey)
 	}
 	*provisioning = NativeProvisioning{}
 }

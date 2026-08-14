@@ -114,7 +114,7 @@ func TestNativeProvisioningReservationTraversesCABI(t *testing.T) {
 	defer zeroNativeBytes(reservation.Provisioning)
 	defer zeroNativeBytes(reservation.SpentHintKey)
 	defer zeroNativeBytes(reservation.RelayBucketID)
-	if _, err := client.ParseNativeProvisioning(reservation.Provisioning, time.Now()); err != nil {
+	if _, err := client.ParseNativeProvisioningWithTrust(reservation.Provisioning, firstHopNativeProvisioningTrust(t), time.Now()); err != nil {
 		t.Fatalf("C ABI reserved provisioning is invalid: %v", err)
 	}
 }
@@ -187,7 +187,7 @@ func reserveNativeProvisioningForTest(t testing.TB, input []byte) nativeProvisio
 	if len(reservation.Provisioning) == 0 || len(reservation.SpentHintKey) != 48 || len(reservation.RelayBucketID) != 16 || reservation.AccessHintExpiryUnix == 0 {
 		t.Fatalf("reservation JSON is incomplete: %+v", reservation)
 	}
-	if _, err := client.ParseNativeProvisioning(reservation.Provisioning, time.Now()); err != nil {
+	if _, err := client.ParseNativeProvisioningWithTrust(reservation.Provisioning, firstHopNativeProvisioningTrust(t), time.Now()); err != nil {
 		t.Fatalf("reserved provisioning is invalid: %v", err)
 	}
 	return nativeProvisioningReservationTestResult{

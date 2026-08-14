@@ -54,7 +54,7 @@ type issuerProductionConfig struct {
 type productionIssuerService struct {
 	service   *issuerd.Service
 	tlsConfig *tls.Config
-	cache     *admission.RetentionFileReplayCache
+	cache     io.Closer
 }
 
 func (s *productionIssuerService) Close() error {
@@ -64,7 +64,7 @@ func (s *productionIssuerService) Close() error {
 	return s.cache.Close()
 }
 
-func runIssuer(args []string, stdout, stderr io.Writer) int {
+func runIssuer(args []string, stdout, stderr io.Writer) (exitCode int) {
 	config, err := parseProductionIssuerConfig(args, stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -81,8 +81,16 @@ func runIssuer(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	defer issuerRuntime.Close()
-	listener, err := productionListen(config.listenAddress)
+	return runProductionIssuer(issuerRuntime, config.listenAddress, stdout, stderr)
+}
+
+func runProductionIssuer(issuerRuntime *productionIssuerService, listenAddress string, stdout, stderr io.Writer) (exitCode int) {
+	defer func() {
+		if err := closeProductionIssuerRuntime(issuerRuntime, stderr); err != nil {
+			exitCode = 1
+		}
+	}()
+	listener, err := productionListen(listenAddress)
 	if err != nil {
 		fmt.Fprintf(stderr, "issuer: listen: %v\n", err)
 		return 1
@@ -225,13 +233,11 @@ func newProductionIssuerService(config issuerProductionConfig) (*productionIssue
 		},
 	})
 	if err != nil {
-		_ = cache.Close()
-		return nil, err
+		return nil, errors.Join(err, cache.Close())
 	}
 	tlsConfig, err := loadProductionTLSConfig(config.tlsCertificatePath, config.tlsPrivateKeyPath)
 	if err != nil {
-		_ = cache.Close()
-		return nil, err
+		return nil, errors.Join(err, cache.Close())
 	}
 	tlsConfig.MinVersion = tls.VersionTLS13
 	return &productionIssuerService{service: service, tlsConfig: tlsConfig, cache: cache}, nil
@@ -310,10 +316,20 @@ func openProductionIssuerSpentTokenCache(path string, nowUnix uint64) (*admissio
 	}
 	cache, err := admission.NewRetentionFileReplayCacheAt(directory, filepath.Base(clean), nowUnix)
 	if err != nil {
-		_ = directory.Close()
-		return nil, fmt.Errorf("issuer: open durable spent-token cache: %w", err)
+		return nil, fmt.Errorf("issuer: open durable spent-token cache: %w", errors.Join(err, directory.Close()))
 	}
 	return cache, nil
+}
+
+func closeProductionIssuerRuntime(runtime io.Closer, stderr io.Writer) error {
+	if runtime == nil {
+		return nil
+	}
+	err := runtime.Close()
+	if err != nil {
+		fmt.Fprintf(stderr, "issuer: close durable spent-token cache: %v\n", err)
+	}
+	return err
 }
 
 func serveProductionIssuer(ctx context.Context, runtime *productionIssuerService, listener net.Listener) error {

@@ -12,6 +12,7 @@ import (
 	"encoding/asn1"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -61,6 +62,39 @@ func TestNewProductionServiceUsesRetentionReplayCaches(t *testing.T) {
 			t.Fatalf("production cache %d type = %T, want retention cache", index, cache)
 		}
 	}
+}
+
+func TestCloseProductionCachesReportsEveryFailure(t *testing.T) {
+	firstErr := errors.New("first durable cache close failed")
+	secondErr := errors.New("second durable cache close failed")
+	var closed []string
+	var stderr bytes.Buffer
+	err := closeProductionCachesAndReport([]io.Closer{
+		productionCloseRecorder{name: "first", err: firstErr, closed: &closed},
+		productionCloseRecorder{name: "second", err: secondErr, closed: &closed},
+	}, &stderr)
+	if !errors.Is(err, firstErr) || !errors.Is(err, secondErr) {
+		t.Fatalf("close error = %v, want both close failures", err)
+	}
+	if got, want := strings.Join(closed, ","), "second,first"; got != want {
+		t.Fatalf("cache close order = %q, want %q", got, want)
+	}
+	if output := stderr.String(); !strings.Contains(output, "first durable cache close failed") || !strings.Contains(output, "second durable cache close failed") {
+		t.Fatalf("close failure output = %q", output)
+	}
+}
+
+type productionCloseRecorder struct {
+	name   string
+	err    error
+	closed *[]string
+}
+
+func (c productionCloseRecorder) Close() error {
+	if c.closed != nil {
+		*c.closed = append(*c.closed, c.name)
+	}
+	return c.err
 }
 
 func TestZeroMLDSA65PrivateKeyClearsPrivateMaterial(t *testing.T) {
@@ -113,6 +147,48 @@ func TestRunServeStartsAndStopsProductionService(t *testing.T) {
 	}
 	if !bytes.Contains(stdout.Bytes(), []byte("production server started")) {
 		t.Fatalf("production start output = %s", stdout.String())
+	}
+}
+
+func TestRunProductionServiceFailsWhenDurableCacheCannotClose(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("production serving requires Linux")
+	}
+	config := newProductionCommandFixture(t)
+	service, caches, err := newProductionService(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closeProductionCaches(caches); err != nil {
+		t.Fatalf("close fixture caches: %v", err)
+	}
+	closeErr := errors.New("replay cache close failed")
+	ready := make(chan struct{})
+	restoreListen := setProductionListenForTest(func(string) (net.Listener, error) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err == nil {
+			close(ready)
+		}
+		return listener, err
+	})
+	defer restoreListen()
+	restoreSignals := setProductionSignalContextForTest(func() (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			<-ready
+			time.Sleep(10 * time.Millisecond)
+			cancel()
+		}()
+		return ctx, cancel
+	})
+	defer restoreSignals()
+
+	var stdout, stderr bytes.Buffer
+	if code := runProductionService(service, []io.Closer{productionCloseRecorder{err: closeErr}}, config.listenAddress, &stdout, &stderr); code != 1 {
+		t.Fatalf("run service close failure code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if output := stderr.String(); !strings.Contains(output, "replay cache close failed") {
+		t.Fatalf("close failure output = %q", output)
 	}
 }
 

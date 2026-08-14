@@ -76,7 +76,7 @@ type productionConfig struct {
 	maxTemplateFutureSkew     uint64
 }
 
-func runServe(args []string, stdout, stderr io.Writer) int {
+func runServe(args []string, stdout, stderr io.Writer) (exitCode int) {
 	config, err := parseProductionConfig(args, stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -93,8 +93,16 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	defer closeProductionCaches(caches)
-	listener, err := productionListen(config.listenAddress)
+	return runProductionService(service, caches, config.listenAddress, stdout, stderr)
+}
+
+func runProductionService(service *server.ProductionFirstHopServer, caches []io.Closer, listenAddress string, stdout, stderr io.Writer) (exitCode int) {
+	defer func() {
+		if err := closeProductionCachesAndReport(caches, stderr); err != nil {
+			exitCode = 1
+		}
+	}()
+	listener, err := productionListen(listenAddress)
 	if err != nil {
 		fmt.Fprintf(stderr, "server: listen: %v\n", err)
 		return 1
@@ -378,13 +386,11 @@ func newProductionService(config productionConfig) (*server.ProductionFirstHopSe
 	})
 	zeroProductionBytes(tokenVerificationKey)
 	if err != nil {
-		closeProductionCaches(caches)
-		return nil, nil, err
+		return nil, nil, errors.Join(err, closeProductionCaches(caches))
 	}
 	coverOrigin, err := newProductionCoverOrigin(config.coverOriginURL)
 	if err != nil {
-		closeProductionCaches(caches)
-		return nil, nil, err
+		return nil, nil, errors.Join(err, closeProductionCaches(caches))
 	}
 	service, err := server.NewProductionFirstHopServer(server.ProductionFirstHopOptions{
 		Deployment:    deployment,
@@ -408,8 +414,7 @@ func newProductionService(config productionConfig) (*server.ProductionFirstHopSe
 		MaxConcurrentSessions: config.maxConcurrentSessions,
 	})
 	if err != nil {
-		closeProductionCaches(caches)
-		return nil, nil, err
+		return nil, nil, errors.Join(err, closeProductionCaches(caches))
 	}
 	return service, caches, nil
 }
@@ -519,14 +524,11 @@ func openProductionCaches(config productionConfig) ([]io.Closer, error) {
 		clean := filepath.Clean(path)
 		directory, err := openProductionCacheDirectory(filepath.Dir(clean))
 		if err != nil {
-			closeProductionCaches(caches)
-			return nil, err
+			return nil, errors.Join(err, closeProductionCaches(caches))
 		}
 		cache, err := admission.NewRetentionFileReplayCacheAt(directory, filepath.Base(clean), uint64(nowUnix))
 		if err != nil {
-			_ = directory.Close()
-			closeProductionCaches(caches)
-			return nil, fmt.Errorf("server: open durable replay cache: %w", err)
+			return nil, fmt.Errorf("server: open durable replay cache: %w", errors.Join(err, directory.Close(), closeProductionCaches(caches)))
 		}
 		caches = append(caches, cache)
 	}
@@ -599,24 +601,36 @@ func openProductionCacheDirectory(path string) (*os.File, error) {
 	}
 	openedInfo, err := directory.Stat()
 	if err != nil {
-		_ = directory.Close()
-		return nil, fmt.Errorf("server: inspect opened durable replay cache directory: %w", err)
+		return nil, fmt.Errorf("server: inspect opened durable replay cache directory: %w", errors.Join(err, directory.Close()))
 	}
 	if !openedInfo.IsDir() || !os.SameFile(info, openedInfo) {
-		_ = directory.Close()
-		return nil, fmt.Errorf("server: durable replay cache directory changed while opening")
+		return nil, errors.Join(fmt.Errorf("server: durable replay cache directory changed while opening"), directory.Close())
 	}
 	if err := validateProductionCacheDirectoryInfo(openedInfo); err != nil {
-		_ = directory.Close()
-		return nil, err
+		return nil, errors.Join(err, directory.Close())
 	}
 	return directory, nil
 }
 
-func closeProductionCaches(caches []io.Closer) {
+func closeProductionCaches(caches []io.Closer) error {
+	var closeErrs []error
 	for index := len(caches) - 1; index >= 0; index-- {
-		_ = caches[index].Close()
+		if caches[index] == nil {
+			continue
+		}
+		if err := caches[index].Close(); err != nil {
+			closeErrs = append(closeErrs, err)
+		}
 	}
+	return errors.Join(closeErrs...)
+}
+
+func closeProductionCachesAndReport(caches []io.Closer, stderr io.Writer) error {
+	err := closeProductionCaches(caches)
+	if err != nil {
+		fmt.Fprintf(stderr, "server: close durable replay caches: %v\n", err)
+	}
+	return err
 }
 
 func newProductionCoverOrigin(raw string) (server.ProductionCoverOrigin, error) {

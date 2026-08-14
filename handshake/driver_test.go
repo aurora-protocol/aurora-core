@@ -150,6 +150,21 @@ func TestRelayDriverDeploymentReturnsBoundVerifiedDeployment(t *testing.T) {
 	}
 }
 
+func TestValidateDriverDeploymentAvoidsVerifiedDeploymentCopies(t *testing.T) {
+	now := time.Now()
+	deployment := testVerifiedDeployment(t, now)
+	var runErr error
+	allocations := testing.AllocsPerRun(100, func() {
+		runErr = validateDriverDeployment(deployment, deployment.Suite(), now)
+	})
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if allocations != 0 {
+		t.Fatalf("driver deployment validation allocations = %.2f, want 0", allocations)
+	}
+}
+
 func TestStaticAccessHintResolverOwnsAndMatchesCredentials(t *testing.T) {
 	credential := validClientDriverConfig(t, time.Now()).AccessHint
 	issuerID := append([]byte(nil), credential.HintIssuerID...)

@@ -18,9 +18,13 @@ import (
 	"github.com/aurora-protocol/aurora-core/handshake"
 	"github.com/aurora-protocol/aurora-core/relay"
 	"github.com/aurora-protocol/aurora-core/trust"
+	"golang.org/x/net/netutil"
 )
 
-const maximumProductionFirstHopSessions = 4096
+const (
+	maximumProductionFirstHopSessions    = 4096
+	productionFirstHopConnectionHeadroom = 64
+)
 
 var ErrProductionFirstHopSessionLimit = errors.New("server: production first-hop session limit reached")
 
@@ -41,8 +45,9 @@ type ProductionFirstHopOptions struct {
 
 // ProductionFirstHopServer owns a TLS-only, HTTP/2-only first-hop server.
 type ProductionFirstHopServer struct {
-	handler *FirstHopHandler
-	server  *http.Server
+	handler         *FirstHopHandler
+	server          *http.Server
+	connectionLimit int
 }
 
 // NewProductionFirstHopServer constructs a server from immutable, production-safe dependencies.
@@ -84,7 +89,11 @@ func NewProductionFirstHopServer(options ProductionFirstHopOptions) (*Production
 		return nil, err
 	}
 	httpServer.ErrorLog = log.New(io.Discard, "", 0)
-	return &ProductionFirstHopServer{handler: handler, server: httpServer}, nil
+	return &ProductionFirstHopServer{
+		handler:         handler,
+		server:          httpServer,
+		connectionLimit: options.MaxConcurrentSessions + productionFirstHopConnectionHeadroom,
+	}, nil
 }
 
 // Serve accepts TLS connections from listener until Shutdown is called or serving fails.
@@ -95,7 +104,11 @@ func (s *ProductionFirstHopServer) Serve(listener net.Listener) error {
 	if isNilFirstHopInterface(listener) {
 		return fmt.Errorf("server: production first-hop listener is required")
 	}
-	err := s.server.Serve(tls.NewListener(listener, s.server.TLSConfig))
+	if s.connectionLimit <= 0 {
+		return fmt.Errorf("server: production first-hop connection limit is invalid")
+	}
+	limitedListener := netutil.LimitListener(listener, s.connectionLimit)
+	err := s.server.Serve(tls.NewListener(limitedListener, s.server.TLSConfig))
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}

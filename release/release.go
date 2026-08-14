@@ -142,9 +142,18 @@ func VerifyReleaseReadinessBundle(bundle Bundle) (ReadinessReport, error) {
 	}
 	report := ReadinessReport{}
 	targets := releasePackagingTargets()
+	targetsByName := make(map[string]platform.PackagingTarget, len(targets))
+	for _, target := range targets {
+		targetsByName[target.Name] = target
+	}
 	artifactsByName := map[string]Artifact{}
 	duplicateArtifactNames := false
+	unknownArtifacts := false
 	for _, artifact := range bundle.Artifacts {
+		if _, known := targetsByName[artifact.Name]; !known {
+			report.addFinding("release artifact target is unknown")
+			unknownArtifacts = true
+		}
 		if _, exists := artifactsByName[artifact.Name]; exists {
 			report.addFinding("release artifact names are duplicated")
 			duplicateArtifactNames = true
@@ -158,7 +167,7 @@ func VerifyReleaseReadinessBundle(bundle Bundle) (ReadinessReport, error) {
 	report.ArtifactSignatures = verifyArtifactSignatures(bundle.Artifacts, &report)
 	report.Provenance = verifyArtifactProvenance(bundle.Artifacts, &report)
 	report.ReproducibleBuilds = verifyReproducibleBuilds(bundle.Artifacts, &report)
-	if duplicateArtifactNames {
+	if duplicateArtifactNames || unknownArtifacts {
 		report.ArtifactSignatures = false
 		report.Provenance = false
 		report.ReproducibleBuilds = false
@@ -341,8 +350,19 @@ func verifyRequiredReleaseArtifacts(targets []platform.PackagingTarget, artifact
 
 func verifySignedUpdatePipeline(update SignedUpdatePipeline, artifactsByName map[string]Artifact, nowUnix uint64, report *ReadinessReport) bool {
 	passed := true
+	knownRoles := map[string]struct{}{
+		RoleRoot:      {},
+		RoleTargets:   {},
+		RoleSnapshot:  {},
+		RoleTimestamp: {},
+	}
 	roles := map[string]UpdateRole{}
 	for _, role := range update.Roles {
+		if _, known := knownRoles[role.Name]; !known {
+			report.addFinding("signed update role is unknown")
+			passed = false
+			continue
+		}
 		if _, exists := roles[role.Name]; exists {
 			report.addFinding("signed update role names are duplicated")
 			passed = false

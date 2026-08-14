@@ -285,6 +285,72 @@ func TestVerifyReleaseReadinessRejectsUnknownDeviceProvisioningEvidence(t *testi
 	}
 }
 
+func TestVerifyReleaseReadinessRejectsUnknownArtifact(t *testing.T) {
+	bundle, err := ReleaseReadinessHarnessBundle(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := bundle.Artifacts[0]
+	artifact.Name = "unknown-release"
+	artifact.Provenance.SubjectName = artifact.Name
+	resignArtifact(t, &artifact)
+	bundle.Artifacts = append(bundle.Artifacts, artifact)
+	bundle.UpdatePipeline, err = signedUpdatePipeline(bundle.Artifacts, bundle.NowUnix)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := VerifyReleaseReadinessBundle(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatalf("release with unknown artifact passed: %+v", report)
+	}
+	if !hasFinding(report, "release artifact target is unknown") {
+		t.Fatalf("report missing unknown artifact finding: %+v", report.Findings)
+	}
+}
+
+func TestVerifyReleaseReadinessRejectsUnknownUpdateRole(t *testing.T) {
+	bundle, err := ReleaseReadinessHarnessBundle(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	role := bundle.UpdatePipeline.Roles[0]
+	role.Name = "unknown"
+	resignUpdateRole(t, &role)
+	bundle.UpdatePipeline.Roles = append(bundle.UpdatePipeline.Roles, role)
+
+	report, err := VerifyReleaseReadinessBundle(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatalf("release with unknown update role passed: %+v", report)
+	}
+	if !hasFinding(report, "signed update role is unknown") {
+		t.Fatalf("report missing unknown update role finding: %+v", report.Findings)
+	}
+}
+
+func resignArtifact(t *testing.T, artifact *Artifact) {
+	t.Helper()
+	input, err := artifactSignatureInput(*artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := newSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := signer.sign(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact.Signatures = []SignatureRecord{signature}
+}
+
 func resignUpdatePipeline(t *testing.T, pipeline *SignedUpdatePipeline) {
 	t.Helper()
 	targetDigest, err := updateTargetsPayloadDigest(pipeline.Targets)
@@ -303,20 +369,25 @@ func resignUpdatePipeline(t *testing.T, pipeline *SignedUpdatePipeline) {
 		case RoleTimestamp:
 			role.PayloadDigest = roleLinkPayloadDigest(RoleTimestamp, roleLinkPayloadDigest(RoleSnapshot, targetDigest))
 		}
-		signer, err := newSigner()
-		if err != nil {
-			t.Fatal(err)
-		}
-		input, err := updateRoleSignatureInput(*role)
-		if err != nil {
-			t.Fatal(err)
-		}
-		signature, err := signer.sign(input)
-		if err != nil {
-			t.Fatal(err)
-		}
-		role.Signatures = []SignatureRecord{signature}
+		resignUpdateRole(t, role)
 	}
+}
+
+func resignUpdateRole(t *testing.T, role *UpdateRole) {
+	t.Helper()
+	signer, err := newSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := updateRoleSignatureInput(*role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := signer.sign(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	role.Signatures = []SignatureRecord{signature}
 }
 
 func hasFinding(report ReadinessReport, want string) bool {

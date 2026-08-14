@@ -361,6 +361,19 @@ func TestRunWithCarrierRecoveryTreatsAttemptCancellationAsCleanShutdown(t *testi
 	}
 }
 
+func TestRunWithCarrierRecoveryReturnsCleanupFailureAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	closeErr := errors.New("proxy listener close failed")
+	err := runWithCarrierRecovery(ctx, carrierRecoveryPolicy{}, func(context.Context) (bool, error) {
+		cancel()
+		return false, closeErr
+	})
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("recovery error = %v, want cleanup failure", err)
+	}
+}
+
 func TestRunWithProvisioningWalletReservesFreshEntryForEachRecoveryAttempt(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	reserves := 0
@@ -566,6 +579,59 @@ func TestRunProxyComponentsStopsOnCancellation(t *testing.T) {
 			t.Fatalf("listener remained reachable after cancellation: %s", address)
 		}
 	}
+}
+
+func TestRunProxyComponentsReturnsCloseFailureOnCancellation(t *testing.T) {
+	application, err := session.NewApplication(session.Config{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		Write:           session.DirectionConfig{Direction: 0, Secret: bytes.Repeat([]byte{0x11}, 48), Key: bytes.Repeat([]byte{0x12}, 32), IV: bytes.Repeat([]byte{0x13}, 12)},
+		Read:            session.DirectionConfig{Direction: 1, Secret: bytes.Repeat([]byte{0x21}, 48), Key: bytes.Repeat([]byte{0x22}, 32), IV: bytes.Repeat([]byte{0x23}, 12)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	carrier, peer := net.Pipe()
+	t.Cleanup(func() { _ = peer.Close() })
+	established := &handshake.EstablishedSession{Application: application, ReadCarrier: carrier, WriteCarrier: carrier}
+	runtime, err := client.NewTCPProxyRuntime(application, client.TCPProxyRuntimeOptions{MaxFlows: 1, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	socksListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		_ = httpListener.Close()
+		t.Fatal(err)
+	}
+	closeErr := errors.New("HTTP listener close failed")
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- runProxyComponents(ctx, established, runtime, proxyCloseErrorListener{Listener: httpListener, err: closeErr}, socksListener)
+	}()
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, closeErr) {
+			t.Fatalf("proxy shutdown error = %v, want close failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("proxy components did not stop after cancellation")
+	}
+}
+
+type proxyCloseErrorListener struct {
+	net.Listener
+	err error
+}
+
+func (l proxyCloseErrorListener) Close() error {
+	_ = l.Listener.Close()
+	return l.err
 }
 
 func TestRunTUNComponentsCleansRoutesBeforeClosingDevice(t *testing.T) {

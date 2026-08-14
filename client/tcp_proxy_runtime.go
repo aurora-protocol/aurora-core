@@ -447,12 +447,14 @@ func readTCPProxyHeader(reader *bufio.Reader, maximum int) ([]byte, error) {
 	for {
 		line, err := reader.ReadSlice('\n')
 		if err != nil {
+			zeroTCPProxyBytes(raw)
 			if errors.Is(err, bufio.ErrBufferFull) {
 				return nil, fmt.Errorf("client: TCP proxy request header exceeds limit")
 			}
 			return nil, err
 		}
 		if len(raw)+len(line) > maximum {
+			zeroTCPProxyBytes(raw)
 			return nil, fmt.Errorf("client: TCP proxy request header exceeds limit")
 		}
 		raw = append(raw, line...)
@@ -464,6 +466,7 @@ func readTCPProxyHeader(reader *bufio.Reader, maximum int) ([]byte, error) {
 
 func readTCPProxySOCKS5Request(reader *bufio.Reader, connection net.Conn) (localProxyRequest, error) {
 	greetingPrefix := make([]byte, 2)
+	defer zeroTCPProxyBytes(greetingPrefix)
 	if _, err := io.ReadFull(reader, greetingPrefix); err != nil {
 		return localProxyRequest{}, err
 	}
@@ -474,6 +477,7 @@ func readTCPProxySOCKS5Request(reader *bufio.Reader, connection net.Conn) (local
 	}
 	methods := make([]byte, int(greetingPrefix[1]))
 	if _, err := io.ReadFull(reader, methods); err != nil {
+		zeroTCPProxyBytes(methods)
 		return localProxyRequest{}, err
 	}
 	greeting = append(greeting, methods...)
@@ -489,6 +493,7 @@ func readTCPProxySOCKS5Request(reader *bufio.Reader, connection net.Conn) (local
 	}
 
 	requestPrefix := make([]byte, 4)
+	defer zeroTCPProxyBytes(requestPrefix)
 	if _, err := io.ReadFull(reader, requestPrefix); err != nil {
 		return localProxyRequest{}, err
 	}
@@ -545,7 +550,9 @@ func tcpProxySOCKS5AddressBytes(reader *bufio.Reader, addressType byte) ([]byte,
 		if err != nil {
 			return nil, err
 		}
-		return append([]byte{length}, remaining...), nil
+		address := append([]byte{length}, remaining...)
+		zeroTCPProxyBytes(remaining)
+		return address, nil
 	default:
 		return nil, fmt.Errorf("client: unsupported SOCKS5 address type 0x%x", addressType)
 	}

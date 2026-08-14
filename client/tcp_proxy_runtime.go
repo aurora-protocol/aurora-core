@@ -30,6 +30,7 @@ const (
 	maximumTCPProxyPendingWriteBytes = 16 << 20
 	tcpProxyWriteQueueLength         = 16
 	maximumSOCKS5UDPDatagramBytes    = 65535
+	tcpProxyHandshakeTimeout         = 10 * time.Second
 )
 
 var (
@@ -330,10 +331,18 @@ func (r *TCPProxyRuntime) serveConnection(ctx context.Context, connection net.Co
 		_ = connection.Close()
 		return err
 	}
+	if err := connection.SetDeadline(time.Now().Add(tcpProxyHandshakeTimeout)); err != nil {
+		r.removePending(connection)
+		_ = connection.Close()
+		return fmt.Errorf("client: set local proxy handshake deadline: %w", err)
+	}
+	pending := true
 	flowOpened := false
 	defer func() {
-		if !flowOpened || err != nil {
+		if pending {
 			r.removePending(connection)
+		}
+		if !flowOpened || err != nil {
 			_ = connection.Close()
 		}
 	}()
@@ -352,6 +361,8 @@ func (r *TCPProxyRuntime) serveConnection(ctx context.Context, connection net.Co
 		}
 		return err
 	}
+	r.removePending(connection)
+	pending = false
 	if request.command == socksCommandUDP {
 		return r.serveSOCKS5UDPAssociation(ctx, reader, connection, request.host, request.port)
 	}
@@ -361,6 +372,10 @@ func (r *TCPProxyRuntime) serveConnection(ctx context.Context, connection net.Co
 	}
 	flowOpened = true
 	if _, err := connection.Write(request.response); err != nil {
+		r.abortFlow(flow.id)
+		return err
+	}
+	if err := clearTCPProxyHandshakeDeadline(connection); err != nil {
 		r.abortFlow(flow.id)
 		return err
 	}
@@ -648,10 +663,13 @@ func (r *TCPProxyRuntime) serveSOCKS5UDPAssociation(ctx context.Context, reader 
 	if err != nil {
 		return err
 	}
+	defer zeroTCPProxyBytes(response)
 	if _, err := control.Write(response); err != nil {
 		return err
 	}
-	zeroTCPProxyBytes(response)
+	if err := clearTCPProxyHandshakeDeadline(control); err != nil {
+		return err
+	}
 
 	result := make(chan error, 1)
 	go func() { result <- r.readSOCKS5UDPAssociation(ctx, association) }()
@@ -1170,8 +1188,19 @@ func (r *TCPProxyRuntime) addPending(connection net.Conn) error {
 	if r.closed {
 		return ErrTCPProxyClosed
 	}
+	if len(r.pending) >= r.options.MaxFlows {
+		return ErrTCPProxyFlowLimit
+	}
 	r.pending[connection] = struct{}{}
 	return nil
+}
+
+func clearTCPProxyHandshakeDeadline(connection net.Conn) error {
+	err := connection.SetDeadline(time.Time{})
+	if err == nil || errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+		return nil
+	}
+	return fmt.Errorf("client: clear local proxy handshake deadline: %w", err)
 }
 
 func (r *TCPProxyRuntime) removePending(connection net.Conn) {

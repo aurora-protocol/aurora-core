@@ -750,6 +750,102 @@ func TestTCPProxyFlowCloseZerosQueuedWrites(t *testing.T) {
 	}
 }
 
+func TestTCPProxyRuntimeRejectsExcessPendingConnections(t *testing.T) {
+	clientApplication, relayApplication := tcpProxyRuntimeApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	runtime, err := NewTCPProxyRuntime(clientApplication, TCPProxyRuntimeOptions{MaxFlows: 1, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	firstServer, firstClient := net.Pipe()
+	defer firstClient.Close()
+	if err := runtime.addPending(firstServer); err != nil {
+		t.Fatalf("add first pending connection: %v", err)
+	}
+	defer runtime.removePending(firstServer)
+	defer firstServer.Close()
+
+	secondServer, secondClient := net.Pipe()
+	defer secondClient.Close()
+	result := make(chan error, 1)
+	go func() { result <- runtime.serveConnection(context.Background(), secondServer) }()
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrTCPProxyFlowLimit) {
+			t.Fatalf("second pending connection error = %v, want flow limit", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("excess pending connection was not rejected")
+	}
+}
+
+func TestTCPProxyRuntimeBoundsAndClearsHandshakeDeadline(t *testing.T) {
+	clientApplication, relayApplication := tcpProxyRuntimeApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	runtime, err := NewTCPProxyRuntime(clientApplication, TCPProxyRuntimeOptions{MaxFlows: 1, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	serverConnection, clientConnection := net.Pipe()
+	defer clientConnection.Close()
+	recordingConnection := &tcpProxyDeadlineRecordingConn{Conn: serverConnection, cleared: make(chan struct{}, 1)}
+	result := make(chan error, 1)
+	go func() { result <- runtime.serveConnection(context.Background(), recordingConnection) }()
+
+	writeResult := make(chan error, 1)
+	go func() {
+		_, err := io.WriteString(clientConnection, "CONNECT target.example:443 HTTP/1.1\r\nHost: target.example:443\r\n\r\n")
+		writeResult <- err
+	}()
+	if response := tcpProxyRuntimeReadExactly(t, clientConnection, len(httpConnectEstablished)); !bytes.Equal(response, httpConnectEstablished) {
+		t.Fatalf("CONNECT response = %q, want %q", response, httpConnectEstablished)
+	}
+	if err := <-writeResult; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-recordingConnection.cleared:
+	case <-time.After(time.Second):
+		t.Fatal("proxy connection did not clear the handshake deadline")
+	}
+	_ = clientConnection.Close()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("proxy connection did not stop after local close")
+	}
+	if len(recordingConnection.deadlines) < 2 || recordingConnection.deadlines[0].IsZero() || !recordingConnection.deadlines[len(recordingConnection.deadlines)-1].IsZero() {
+		t.Fatalf("handshake deadlines = %v, want bounded then cleared", recordingConnection.deadlines)
+	}
+}
+
+type tcpProxyDeadlineRecordingConn struct {
+	net.Conn
+	deadlines []time.Time
+	cleared   chan struct{}
+}
+
+func (c *tcpProxyDeadlineRecordingConn) SetDeadline(deadline time.Time) error {
+	c.deadlines = append(c.deadlines, deadline)
+	err := c.Conn.SetDeadline(deadline)
+	if err == nil && deadline.IsZero() {
+		select {
+		case c.cleared <- struct{}{}:
+		default:
+		}
+	}
+	return err
+}
+
 func tcpProxyRuntimeApplications(t testing.TB) (*session.Application, *session.Application) {
 	t.Helper()
 	clientApplication, err := session.NewApplication(session.Config{

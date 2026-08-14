@@ -1,6 +1,6 @@
 module github.com/aurora-protocol/aurora-core
 
-go 1.25.13
+go 1.26.6
 
 require (
 	github.com/cloudflare/circl v1.6.3

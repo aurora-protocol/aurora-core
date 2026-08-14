@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/protocol"
+	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/session"
 )
 
@@ -34,6 +35,23 @@ type recordingFrameSink struct {
 	err       error
 	calls     int
 }
+
+type immediateResponseEgress struct {
+	sink FrameSink
+}
+
+func (e *immediateResponseEgress) HandleEvent(ctx context.Context, event ExitFrameEvent) ([]protocol.AuroraFrame, error) {
+	if event.Kind != ExitEventStreamData && event.Kind != ExitEventDatagramData {
+		return nil, nil
+	}
+	frame, err := protocol.NewDatagramDataFrame(event.FlowID, []byte("echo"), 0)
+	if err != nil {
+		return nil, err
+	}
+	return nil, e.sink.QueueFrames(ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}})
+}
+
+func (*immediateResponseEgress) Close() error { return nil }
 
 type blockingBackpressureSink struct {
 	called chan struct{}
@@ -104,6 +122,33 @@ func TestExitSessionRetriesQueueBackpressure(t *testing.T) {
 	}
 	if len(sink.blocks) != 1 || len(sink.blocks[0].Frames) != 1 {
 		t.Fatalf("queued blocks = %#v, want one UDP confirmation", sink.blocks)
+	}
+}
+
+func TestExitSessionQueuesUDPConfirmBeforeImmediateResponse(t *testing.T) {
+	sink := &recordingFrameSink{}
+	exitSession, err := NewExitSession(&immediateResponseEgress{sink: sink}, sink, ExitSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = exitSession.Close() })
+
+	open := relayUDPFlowOpen(62, []byte{93, 184, 216, 34})
+	data, err := protocol.NewStreamDataFrame(open.FlowID, []byte("ping"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exitSession.HandleFrameBlock(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{flowOpenFrame(t, open), data}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.blocks) != 2 {
+		t.Fatalf("queued blocks = %#v, want target confirmation then response", sink.blocks)
+	}
+	if len(sink.blocks[0].Frames) != 1 || sink.blocks[0].Frames[0].FrameType != registry.FrameUDPTargetConfirm {
+		t.Fatalf("first queued block = %#v, want UDP target confirmation", sink.blocks[0])
+	}
+	if len(sink.blocks[1].Frames) != 1 || sink.blocks[1].Frames[0].FrameType != registry.FrameDatagramData {
+		t.Fatalf("second queued block = %#v, want UDP response", sink.blocks[1])
 	}
 }
 
@@ -279,12 +324,11 @@ func TestExitSessionPreservesImmediateResponseOrder(t *testing.T) {
 	if err := exitSession.HandleFrameBlock(context.Background(), block); err != nil {
 		t.Fatalf("HandleFrameBlock failed: %v", err)
 	}
-	if len(sink.blocks) != 1 || len(sink.blocks[0].Frames) != 2 {
-		t.Fatalf("queued blocks = %#v, want one two-frame block", sink.blocks)
+	if len(sink.blocks) != 2 || len(sink.blocks[0].Frames) != 1 || len(sink.blocks[1].Frames) != 1 {
+		t.Fatalf("queued blocks = %#v, want two ordered one-frame blocks", sink.blocks)
 	}
-	got := sink.blocks[0].Frames
-	if got[0].FlowID != 51 || got[1].FlowID != 52 {
-		t.Fatalf("response flow order = [%d %d], want [51 52]", got[0].FlowID, got[1].FlowID)
+	if sink.blocks[0].Frames[0].FlowID != 51 || sink.blocks[1].Frames[0].FlowID != 52 {
+		t.Fatalf("response flow order = [%d %d], want [51 52]", sink.blocks[0].Frames[0].FlowID, sink.blocks[1].Frames[0].FlowID)
 	}
 }
 

@@ -186,6 +186,98 @@ func TestVerifyReleaseReadinessRejectsMissingReleaseTarget(t *testing.T) {
 	}
 }
 
+func TestVerifyReleaseReadinessRejectsDuplicateArtifactName(t *testing.T) {
+	bundle, err := ReleaseReadinessHarnessBundle(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.Artifacts = append(bundle.Artifacts, bundle.Artifacts[0])
+
+	report, err := VerifyReleaseReadinessBundle(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatalf("release with duplicate artifact name passed: %+v", report)
+	}
+	if !hasFinding(report, "release artifact names are duplicated") {
+		t.Fatalf("report missing duplicate artifact finding: %+v", report.Findings)
+	}
+}
+
+func TestVerifyReleaseReadinessRejectsDuplicateUpdateRole(t *testing.T) {
+	bundle, err := ReleaseReadinessHarnessBundle(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.UpdatePipeline.Roles = append(bundle.UpdatePipeline.Roles, bundle.UpdatePipeline.Roles[0])
+
+	report, err := VerifyReleaseReadinessBundle(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatalf("release with duplicate update role passed: %+v", report)
+	}
+	if !hasFinding(report, "signed update role names are duplicated") {
+		t.Fatalf("report missing duplicate role finding: %+v", report.Findings)
+	}
+}
+
+func TestVerifyReleaseReadinessRejectsDuplicateUpdateTarget(t *testing.T) {
+	bundle, err := ReleaseReadinessHarnessBundle(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.UpdatePipeline.Targets = append(bundle.UpdatePipeline.Targets, bundle.UpdatePipeline.Targets[0])
+	resignUpdatePipeline(t, &bundle.UpdatePipeline)
+
+	report, err := VerifyReleaseReadinessBundle(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatalf("release with duplicate update target passed: %+v", report)
+	}
+	if !hasFinding(report, "signed update target names are duplicated") {
+		t.Fatalf("report missing duplicate target finding: %+v", report.Findings)
+	}
+}
+
+func resignUpdatePipeline(t *testing.T, pipeline *SignedUpdatePipeline) {
+	t.Helper()
+	targetDigest, err := updateTargetsPayloadDigest(pipeline.Targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range pipeline.Roles {
+		role := &pipeline.Roles[index]
+		switch role.Name {
+		case RoleRoot:
+			role.PayloadDigest = roleLinkPayloadDigest(RoleRoot, targetDigest)
+		case RoleTargets:
+			role.PayloadDigest = append(role.PayloadDigest[:0], targetDigest...)
+		case RoleSnapshot:
+			role.PayloadDigest = roleLinkPayloadDigest(RoleSnapshot, targetDigest)
+		case RoleTimestamp:
+			role.PayloadDigest = roleLinkPayloadDigest(RoleTimestamp, roleLinkPayloadDigest(RoleSnapshot, targetDigest))
+		}
+		signer, err := newSigner()
+		if err != nil {
+			t.Fatal(err)
+		}
+		input, err := updateRoleSignatureInput(*role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signature, err := signer.sign(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		role.Signatures = []SignatureRecord{signature}
+	}
+}
+
 func hasFinding(report ReadinessReport, want string) bool {
 	for _, finding := range report.Findings {
 		if finding == want {

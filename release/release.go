@@ -143,7 +143,13 @@ func VerifyReleaseReadinessBundle(bundle Bundle) (ReadinessReport, error) {
 	report := ReadinessReport{}
 	targets := releasePackagingTargets()
 	artifactsByName := map[string]Artifact{}
+	duplicateArtifactNames := false
 	for _, artifact := range bundle.Artifacts {
+		if _, exists := artifactsByName[artifact.Name]; exists {
+			report.addFinding("release artifact names are duplicated")
+			duplicateArtifactNames = true
+			continue
+		}
 		artifactsByName[artifact.Name] = artifact
 	}
 	report.ReleaseArtifacts = len(bundle.Artifacts)
@@ -152,6 +158,11 @@ func VerifyReleaseReadinessBundle(bundle Bundle) (ReadinessReport, error) {
 	report.ArtifactSignatures = verifyArtifactSignatures(bundle.Artifacts, &report)
 	report.Provenance = verifyArtifactProvenance(bundle.Artifacts, &report)
 	report.ReproducibleBuilds = verifyReproducibleBuilds(bundle.Artifacts, &report)
+	if duplicateArtifactNames {
+		report.ArtifactSignatures = false
+		report.Provenance = false
+		report.ReproducibleBuilds = false
+	}
 	if !verifyRequiredReleaseArtifacts(targets, artifactsByName, &report) {
 		report.ArtifactSignatures = false
 		report.Provenance = false
@@ -332,6 +343,11 @@ func verifySignedUpdatePipeline(update SignedUpdatePipeline, artifactsByName map
 	passed := true
 	roles := map[string]UpdateRole{}
 	for _, role := range update.Roles {
+		if _, exists := roles[role.Name]; exists {
+			report.addFinding("signed update role names are duplicated")
+			passed = false
+			continue
+		}
 		roles[role.Name] = role
 	}
 	for _, name := range []string{RoleRoot, RoleTargets, RoleSnapshot, RoleTimestamp} {
@@ -384,7 +400,14 @@ func verifySignedUpdatePipeline(update SignedUpdatePipeline, artifactsByName map
 			passed = false
 		}
 	}
+	targetNames := map[string]struct{}{}
 	for _, target := range update.Targets {
+		if _, exists := targetNames[target.ArtifactName]; exists {
+			report.addFinding("signed update target names are duplicated")
+			passed = false
+			continue
+		}
+		targetNames[target.ArtifactName] = struct{}{}
 		artifact, ok := artifactsByName[target.ArtifactName]
 		if !ok {
 			report.addFinding("signed update target references unknown artifact")

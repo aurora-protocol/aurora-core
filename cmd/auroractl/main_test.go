@@ -66,6 +66,23 @@ func TestCheckNativeProvisioningTrustRejectsMalformedAndNonCanonicalInput(t *tes
 	}
 }
 
+func TestCheckNativeProvisioningTrustRejectsOversizedInputBeforeParsing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "AuroraSignedSeedRoots.bin")
+	encoded := bytes.Repeat([]byte{0xff}, auroraclient.MaximumNativeProvisioningTrustBytes+1)
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := checkNativeProvisioningTrust(path, &out)
+	if err == nil || !strings.Contains(err.Error(), "trust input exceeds size limit") {
+		t.Fatalf("oversized trust check error = %v, want bounded input rejection", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("native provisioning trust checker wrote output for oversized input: %q", out.String())
+	}
+}
+
 func nativeProvisioningTrustEncodingForTest(t testing.TB) []byte {
 	t.Helper()
 	curve := elliptic.P256()

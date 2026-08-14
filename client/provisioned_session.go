@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -113,6 +114,9 @@ func newProvisionedSession(ctx context.Context, provisioning NativeProvisioning,
 	}
 	if err != nil {
 		cancel()
+		if deferred != nil {
+			err = errors.Join(err, deferred.Close())
+		}
 		zeroProvisionedProofRequest(&request)
 		return nil, IssuerWork{}, err
 	}

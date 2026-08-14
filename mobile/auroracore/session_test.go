@@ -56,6 +56,24 @@ func TestNativeSessionHandleRejectsUnknownAndClosedValues(t *testing.T) {
 	}
 }
 
+func TestNativeSessionBeginClosesDeferredHandshakeReturnedWithError(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	stub := &nativeTestHandshake{}
+	registry := newNativeSessionRegistry(nativeSessionRegistryOptions{
+		now:    func() time.Time { return now },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x45}, 64)),
+		start: func(context.Context, client.NativeProvisioning, time.Time) (nativeSessionHandshake, handshake.ClientProofRequest, error) {
+			return stub, nativeTestProofRequest(now), errors.New("starter failed after opening handshake")
+		},
+	})
+	if _, err := registry.begin(client.NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"}); err == nil {
+		t.Fatal("native session accepted a failing starter")
+	}
+	if !stub.closedValue() {
+		t.Fatal("failing native session starter left its handshake open")
+	}
+}
+
 func TestNativeSessionBeginReturnsIssuerRequestOnlyAfterPrelude1(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	request := nativeTestProofRequest(now)

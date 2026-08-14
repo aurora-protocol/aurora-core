@@ -25,7 +25,7 @@ type ImpairmentReport struct {
 	Passed    bool
 	Scenarios []ScenarioResult
 
-	// Acceptance criteria (spec 35.11.12).
+	// Acceptance criteria.
 	InteractivePrioritized        bool
 	UDPStalePolicy                bool
 	DowngradeNoReconnectStorm     bool
@@ -147,7 +147,7 @@ func RunImpairmentHarness() (ImpairmentReport, error) {
 	report.scenario("carrier-path-cache", cached.Score(now) > noAffinity.Score(now),
 		fmt.Sprintf("cached_score=%.3f cold_score=%.3f", cached.Score(now), noAffinity.Score(now)))
 
-	// --- Acceptance criteria (spec 35.11.12) ---
+	// --- Acceptance criteria ---
 
 	report.InteractivePrioritized = checkInteractivePriority()
 	report.require(report.InteractivePrioritized, "interactive TCP was not prioritized over bulk")

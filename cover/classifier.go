@@ -138,7 +138,7 @@ type ProductionCandidateDecision struct {
 // EvaluateProductionCandidate computes the measured classifier advantage from a
 // baseline report (the fraction of Aurora/ordinary feature comparisons a
 // classifier can separate) and decides whether the template clears the
-// operator's deployment threshold (spec 35.11.11).
+// operator's deployment threshold.
 func EvaluateProductionCandidate(report ClassifierReport, threshold float64) ProductionCandidateDecision {
 	comparisons := len(report.Samples) * report.FeatureCount
 	advantage := 0.0

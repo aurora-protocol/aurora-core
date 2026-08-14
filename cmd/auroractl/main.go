@@ -1060,8 +1060,8 @@ func routeCheck(w io.Writer) error {
 }
 
 // releaseGateCheck implements the Milestone P11 prototype-interop release-gate
-// checklist (spec 35.11.13). Each item is backed by a concrete check; the build
-// clears the gate only if every item passes.
+// checklist. Each item is backed by a concrete check; the build clears the gate
+// only if every item passes.
 func releaseGateCheck(w io.Writer) error {
 	items := []struct {
 		name string

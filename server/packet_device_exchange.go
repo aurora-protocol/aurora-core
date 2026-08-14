@@ -23,9 +23,10 @@ type DevicePacketExchanger struct {
 	done     chan struct{}
 	readDone chan struct{}
 
-	closeOnce sync.Once
-	closeErr  error
-	writeMu   sync.Mutex
+	closeOnce  sync.Once
+	closeErr   error
+	writeMu    sync.Mutex
+	outboundMu sync.Mutex
 }
 
 func NewDevicePacketExchanger(device io.ReadWriteCloser, opts DevicePacketExchangerOptions) (*DevicePacketExchanger, error) {
@@ -97,6 +98,9 @@ func (e *DevicePacketExchanger) Close() error {
 	e.closeOnce.Do(func() {
 		close(e.done)
 		e.closeErr = e.device.Close()
+		e.outboundMu.Lock()
+		e.zeroQueuedOutbound()
+		e.outboundMu.Unlock()
 	})
 	return e.closeErr
 }
@@ -104,10 +108,15 @@ func (e *DevicePacketExchanger) Close() error {
 func (e *DevicePacketExchanger) readDevice() {
 	defer close(e.readDone)
 	buffer := make([]byte, e.mtu)
+	defer zeroDevicePacketBytes(buffer)
 	for {
 		n, err := e.device.Read(buffer)
+		if n < 0 || n > len(buffer) {
+			return
+		}
 		if n > 0 {
 			e.queueOutbound(buffer[:n])
+			zeroDevicePacketBytes(buffer[:n])
 		}
 		if err != nil {
 			return
@@ -122,25 +131,35 @@ func (e *DevicePacketExchanger) readDevice() {
 
 func (e *DevicePacketExchanger) queueOutbound(packet []byte) {
 	copied := append([]byte(nil), packet...)
+	e.outboundMu.Lock()
+	defer e.outboundMu.Unlock()
 	select {
-	case e.outbound <- copied:
-		return
 	case <-e.done:
+		zeroDevicePacketBytes(copied)
 		return
 	default:
 	}
 	select {
-	case <-e.outbound:
+	case e.outbound <- copied:
+		return
+	default:
+	}
+	select {
+	case evicted := <-e.outbound:
+		zeroDevicePacketBytes(evicted)
 	default:
 	}
 	select {
 	case e.outbound <- copied:
-	case <-e.done:
+		return
 	default:
+		zeroDevicePacketBytes(copied)
 	}
 }
 
 func (e *DevicePacketExchanger) drainOutbound() PacketBatch {
+	e.outboundMu.Lock()
+	defer e.outboundMu.Unlock()
 	outbound := PacketBatch{
 		Packets:         make([][]byte, 0),
 		ProtocolNumbers: make([]uint16, 0),
@@ -148,7 +167,7 @@ func (e *DevicePacketExchanger) drainOutbound() PacketBatch {
 	for len(outbound.Packets) < maxPacketBatchPackets {
 		select {
 		case packet := <-e.outbound:
-			outbound.Packets = append(outbound.Packets, append([]byte(nil), packet...))
+			outbound.Packets = append(outbound.Packets, packet)
 			outbound.ProtocolNumbers = append(outbound.ProtocolNumbers, packetProtocolNumber(packet))
 		default:
 			return outbound
@@ -157,9 +176,29 @@ func (e *DevicePacketExchanger) drainOutbound() PacketBatch {
 	return outbound
 }
 
+func (e *DevicePacketExchanger) zeroQueuedOutbound() {
+	for {
+		select {
+		case packet := <-e.outbound:
+			zeroDevicePacketBytes(packet)
+		default:
+			return
+		}
+	}
+}
+
+func zeroDevicePacketBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
+}
+
 func writeFullPacket(w io.Writer, packet []byte) error {
 	for len(packet) > 0 {
 		n, err := w.Write(packet)
+		if n < 0 || n > len(packet) {
+			return fmt.Errorf("server: packet device returned invalid write length %d", n)
+		}
 		if n > 0 {
 			packet = packet[n:]
 		}

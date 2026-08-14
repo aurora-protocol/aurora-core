@@ -413,6 +413,98 @@ func TestDevicePacketExchangerDrainsOutboundDevicePackets(t *testing.T) {
 	}
 }
 
+func TestDevicePacketExchangerZeroesEvictedOutboundPacket(t *testing.T) {
+	exchanger := &DevicePacketExchanger{
+		outbound: make(chan []byte, 1),
+		done:     make(chan struct{}),
+	}
+	evicted := []byte{0x45, 0x11, 0x22, 0x33}
+	exchanger.outbound <- evicted
+
+	exchanger.queueOutbound([]byte{0x45, 0x44, 0x55, 0x66})
+
+	if !bytes.Equal(evicted, make([]byte, len(evicted))) {
+		t.Fatalf("evicted outbound packet was retained: %x", evicted)
+	}
+	queued := <-exchanger.outbound
+	for index := range queued {
+		queued[index] = 0
+	}
+}
+
+func TestDevicePacketExchangerCloseZeroesQueuedOutboundPackets(t *testing.T) {
+	device := newScriptedPacketDevice()
+	exchanger, err := NewDevicePacketExchanger(device, DevicePacketExchangerOptions{
+		MTU:          1280,
+		QueuePackets: 1,
+	})
+	if err != nil {
+		t.Fatalf("NewDevicePacketExchanger failed: %v", err)
+	}
+	queued := []byte{0x45, 0x11, 0x22, 0x33}
+	exchanger.outbound <- queued
+
+	if err := exchanger.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if !bytes.Equal(queued, make([]byte, len(queued))) {
+		t.Fatalf("queued outbound packet was retained after close: %x", queued)
+	}
+}
+
+func TestDevicePacketExchangerDrainTransfersOutboundPacket(t *testing.T) {
+	exchanger := &DevicePacketExchanger{
+		outbound: make(chan []byte, 1),
+		done:     make(chan struct{}),
+	}
+	queued := []byte{0x45, 0x11, 0x22, 0x33}
+	exchanger.outbound <- queued
+
+	outbound := exchanger.drainOutbound()
+	if len(outbound.Packets) != 1 {
+		t.Fatalf("outbound packets = %d, want 1", len(outbound.Packets))
+	}
+	outbound.Packets[0][1] = 0x7f
+	if queued[1] != 0x7f {
+		t.Fatal("drained outbound packet was copied instead of transferred")
+	}
+	for index := range queued {
+		queued[index] = 0
+	}
+}
+
+func TestDevicePacketExchangerStopsOnInvalidReadLength(t *testing.T) {
+	exchanger := &DevicePacketExchanger{
+		device:   invalidReadPacketDevice{},
+		mtu:      1280,
+		outbound: make(chan []byte, 1),
+		done:     make(chan struct{}),
+		readDone: make(chan struct{}),
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("readDevice panicked on invalid read length: %v", recovered)
+		}
+	}()
+
+	exchanger.readDevice()
+
+	select {
+	case <-exchanger.readDone:
+	default:
+		t.Fatal("readDevice did not terminate after an invalid read length")
+	}
+}
+
+func TestWriteFullPacketRejectsInvalidWriteLength(t *testing.T) {
+	err := writeFullPacket(packetWriteFunc(func(packet []byte) (int, error) {
+		return len(packet) + 1, nil
+	}), []byte{0x45, 0x11, 0x22, 0x33})
+	if err == nil {
+		t.Fatal("writeFullPacket accepted an invalid write length")
+	}
+}
+
 func TestDevicePacketExchangerCloseUnblocksWrite(t *testing.T) {
 	device := newBlockingPacketDevice()
 	exchanger, err := NewDevicePacketExchanger(device, DevicePacketExchangerOptions{
@@ -582,6 +674,12 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
+type packetWriteFunc func([]byte) (int, error)
+
+func (f packetWriteFunc) Write(packet []byte) (int, error) {
+	return f(packet)
+}
+
 func waitForDeviceOutbound(t *testing.T, exchanger PacketExchanger) PacketBatch {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
@@ -657,6 +755,20 @@ type closeErrorPacketDevice struct {
 func (d *closeErrorPacketDevice) Close() error {
 	_ = d.scriptedPacketDevice.Close()
 	return d.err
+}
+
+type invalidReadPacketDevice struct{}
+
+func (invalidReadPacketDevice) Read(packet []byte) (int, error) {
+	return len(packet) + 1, nil
+}
+
+func (invalidReadPacketDevice) Write(packet []byte) (int, error) {
+	return len(packet), nil
+}
+
+func (invalidReadPacketDevice) Close() error {
+	return nil
 }
 
 type blockingPacketDevice struct {

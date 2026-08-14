@@ -2,6 +2,8 @@ package config
 
 import (
 	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -9,6 +11,10 @@ import (
 	"github.com/aurora-protocol/aurora-core/policy"
 	"github.com/aurora-protocol/aurora-core/registry"
 )
+
+const MaxConfigBytes = 64 * 1024
+
+var ErrInputTooLarge = errors.New("config: input exceeds maximum size")
 
 type Config struct {
 	Version                     string
@@ -44,8 +50,17 @@ func Default() Config {
 }
 
 func Parse(r io.Reader) (Config, error) {
+	input, err := io.ReadAll(io.LimitReader(r, MaxConfigBytes+1))
+	if err != nil {
+		return Config{}, err
+	}
+	if len(input) > MaxConfigBytes {
+		return Config{}, ErrInputTooLarge
+	}
+
 	cfg := Default()
-	scanner := bufio.NewScanner(r)
+	scanner := bufio.NewScanner(bytes.NewReader(input))
+	scanner.Buffer(make([]byte, 4096), MaxConfigBytes+1)
 	section := ""
 	lineNo := 0
 	for scanner.Scan() {

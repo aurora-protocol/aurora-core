@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -69,6 +70,23 @@ replay_cache = "sqlite"
 	}
 	if cfg.ReplayCache != "sqlite" {
 		t.Fatalf("storage floor not parsed: %+v", cfg)
+	}
+}
+
+func TestParseRejectsConfigLargerThan64KiB(t *testing.T) {
+	_, err := Parse(strings.NewReader(strings.Repeat("#\n", (64*1024/2)+1)))
+	if !errors.Is(err, ErrInputTooLarge) {
+		t.Fatalf("Parse error = %v, want oversized-input error", err)
+	}
+}
+
+func TestParseAcceptsConfigAt64KiB(t *testing.T) {
+	cfg, err := Parse(strings.NewReader(strings.Repeat("#\n", 64*1024/2)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg != Default() {
+		t.Fatalf("config = %+v, want defaults", cfg)
 	}
 }
 

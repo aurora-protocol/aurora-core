@@ -33,7 +33,11 @@ func TestUDPDNSMessageResolverExchangesBoundedMessage(t *testing.T) {
 		_, writeErr := server.WriteToUDP(response, peer)
 		served <- writeErr
 	}()
-	resolver, err := NewUDPDNSMessageResolver(server.LocalAddr().String())
+	_, portText, err := net.SplitHostPort(server.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewUDPDNSMessageResolver(net.JoinHostPort("::ffff:127.0.0.1", portText))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,5 +58,18 @@ func TestUDPDNSMessageResolverExchangesBoundedMessage(t *testing.T) {
 func TestUDPDNSMessageResolverRejectsNonNumericEndpoint(t *testing.T) {
 	if _, err := NewUDPDNSMessageResolver("resolver.example:53"); err == nil {
 		t.Fatal("hostname DNS upstream was accepted")
+	}
+}
+
+func TestUDPDNSMessageResolverNormalizesIPv4MappedAddress(t *testing.T) {
+	resolver, err := NewUDPDNSMessageResolver("[::ffff:192.0.2.1]:53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolver.network != "udp4" {
+		t.Fatalf("resolver network = %q, want udp4", resolver.network)
+	}
+	if resolver.address != "192.0.2.1:53" {
+		t.Fatalf("resolver address = %q, want 192.0.2.1:53", resolver.address)
 	}
 }

@@ -30,6 +30,7 @@ func NewUDPDNSMessageResolver(address string) (*UDPDNSMessageResolver, error) {
 	if err != nil || endpoint.Zone() != "" {
 		return nil, fmt.Errorf("relay: DNS upstream host must be an IP address")
 	}
+	endpoint = endpoint.Unmap()
 	port, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil || port == 0 {
 		return nil, fmt.Errorf("relay: DNS upstream port is invalid")

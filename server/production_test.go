@@ -73,6 +73,9 @@ func TestNewProductionFirstHopServerBuildsBoundedOwnedServer(t *testing.T) {
 	if server.handler == nil || server.server == nil || server.server.Handler != server.handler || server.server.TLSConfig == options.TLSConfig || server.server.ErrorLog == nil {
 		t.Fatalf("production first-hop ownership is incomplete: %+v", server)
 	}
+	if server.connectionLimit != options.MaxConcurrentSessions+productionFirstHopConnectionHeadroom {
+		t.Fatalf("production first-hop connection limit = %d, want %d", server.connectionLimit, options.MaxConcurrentSessions+productionFirstHopConnectionHeadroom)
+	}
 	if server.server.TLSConfig.MinVersion != tls.VersionTLS13 || server.server.TLSConfig.MaxVersion != tls.VersionTLS13 || len(server.server.TLSConfig.NextProtos) != 1 || server.server.TLSConfig.NextProtos[0] != "h2" {
 		t.Fatalf("production TLS configuration is not fixed to TLS 1.3 HTTP/2: %+v", server.server.TLSConfig)
 	}

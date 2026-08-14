@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"runtime"
 	"testing"
 	"time"
 
@@ -74,7 +75,10 @@ func TestNativeSessionFFIExchangesDNSThroughProductionFirstHop(t *testing.T) {
 }
 
 func TestNativeSessionFFIRejectsUnconfiguredProvisioningTrust(t *testing.T) {
-	caller := newNativeIntegrationCallerWithoutTrust(t)
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skipf("native archive process test is unsupported on %s", runtime.GOOS)
+	}
+	caller := newNativeIntegrationCABICaller(t)
 	fixture := newNativeSessionFixture(t, time.Now())
 	defer fixture.Close(t)
 	encoded, err := client.EncodeNativeProvisioning(fixture.Provisioning(t))

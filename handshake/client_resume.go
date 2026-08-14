@@ -33,6 +33,8 @@ type clientProofResult struct {
 }
 
 type deferredClientProofProvider struct {
+	stateMu   sync.Mutex
+	shutdown  bool
 	requests  chan ClientProofRequest
 	results   chan clientProofResult
 	closed    chan struct{}
@@ -227,13 +229,21 @@ func (p *deferredClientProofProvider) complete(admissionProof protocol.Admission
 		zeroAdmissionProof(&admission)
 		return fmt.Errorf("handshake: clone supplied replay proof: %w", err)
 	}
-	select {
-	case p.results <- clientProofResult{admission: admission, replay: replay}:
-		return nil
-	case <-p.closed:
-		zeroAdmissionProof(&admission)
-		zeroReplayProof(&replay)
+	result := clientProofResult{admission: admission, replay: replay}
+	p.stateMu.Lock()
+	if p.shutdown {
+		p.stateMu.Unlock()
+		zeroClientProofResult(&result)
 		return fmt.Errorf("handshake: client handshake is closed")
+	}
+	select {
+	case p.results <- result:
+		p.stateMu.Unlock()
+		return nil
+	default:
+		p.stateMu.Unlock()
+		zeroClientProofResult(&result)
+		return fmt.Errorf("handshake: client proof result is already pending")
 	}
 }
 
@@ -241,5 +251,24 @@ func (p *deferredClientProofProvider) close() {
 	if p == nil {
 		return
 	}
-	p.closeOnce.Do(func() { close(p.closed) })
+	p.closeOnce.Do(func() {
+		p.stateMu.Lock()
+		p.shutdown = true
+		close(p.closed)
+		select {
+		case result := <-p.results:
+			zeroClientProofResult(&result)
+		default:
+		}
+		p.stateMu.Unlock()
+	})
+}
+
+func zeroClientProofResult(value *clientProofResult) {
+	if value == nil {
+		return
+	}
+	zeroAdmissionProof(&value.admission)
+	zeroReplayProof(&value.replay)
+	*value = clientProofResult{}
 }

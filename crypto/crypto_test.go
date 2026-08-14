@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/aurora-protocol/aurora-core/registry"
+	"github.com/aurora-protocol/aurora-core/wire"
 )
 
 func mustHex(t *testing.T, s string) []byte {
@@ -106,6 +107,58 @@ func TestControlAADRejectsReservedOrMismatchedDirection(t *testing.T) {
 func TestPacketADRejectsReservedDirection(t *testing.T) {
 	if _, err := PacketAD(registry.SuiteHybrid768AESGCM, 1, 0, 2, 0, 0); err == nil {
 		t.Fatalf("reserved packet direction accepted")
+	}
+}
+
+func TestPacketADUsesOnlyResultAllocation(t *testing.T) {
+	var callErr error
+	var aad []byte
+	allocations := testing.AllocsPerRun(1_000, func() {
+		aad, callErr = PacketAD(registry.SuiteHybrid768AESGCM, 0x1234, 1, 0, 2, 0x12345678)
+	})
+	if callErr != nil {
+		t.Fatal(callErr)
+	}
+	if len(aad) != 48 {
+		t.Fatalf("packet associated data length = %d, want 48", len(aad))
+	}
+	if allocations > 1 {
+		t.Fatalf("packet associated data allocations = %.2f, want <= 1", allocations)
+	}
+}
+
+func TestPacketADMatchesCanonicalWirePreimage(t *testing.T) {
+	for _, values := range []struct {
+		routeInstanceID uint64
+		packetNumber    uint64
+	}{
+		{routeInstanceID: 63, packetNumber: 63},
+		{routeInstanceID: 64, packetNumber: 16_383},
+		{routeInstanceID: 16_384, packetNumber: 1_073_741_823},
+		{routeInstanceID: 1_073_741_824, packetNumber: wire.MaxVarint},
+	} {
+		e := wire.NewEncoder()
+		e.WriteBytes([]byte(packetADLabel))
+		e.WriteVarint(values.routeInstanceID)
+		e.WriteUint8(1)
+		e.WriteUint8(0)
+		e.WriteUint8(2)
+		e.WriteVarint(values.packetNumber)
+		preimage, err := e.Bytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := SuiteHash(registry.SuiteHybrid768AESGCM, preimage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := PacketAD(registry.SuiteHybrid768AESGCM, values.routeInstanceID, 1, 0, 2, values.packetNumber)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("packet associated data = %x, want %x", got, want)
+		}
 	}
 }
 

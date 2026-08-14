@@ -8,6 +8,11 @@ import (
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
+const (
+	packetADLabel                = "aurora v2.0 packet"
+	packetADPreimageMaximumBytes = len(packetADLabel) + 8 + 3 + 8
+)
+
 type ControlAADInput struct {
 	SelectedVersion                 uint64
 	SelectedSuite                   uint64
@@ -82,14 +87,15 @@ func PacketAD(selectedSuite uint64, routeInstanceID uint64, hopLayer, direction,
 	if direction > 1 {
 		return nil, fmt.Errorf("crypto: reserved packet direction 0x%x", direction)
 	}
-	e := wire.NewEncoder()
-	e.WriteBytes([]byte("aurora v2.0 packet"))
-	e.WriteVarint(routeInstanceID)
-	e.WriteUint8(hopLayer)
-	e.WriteUint8(direction)
-	e.WriteUint8(keyPhase)
-	e.WriteVarint(packetNumber)
-	preimage, err := e.Bytes()
+	var storage [packetADPreimageMaximumBytes]byte
+	preimage := append(storage[:0], packetADLabel...)
+	var err error
+	preimage, err = wire.AppendVarint(preimage, routeInstanceID)
+	if err != nil {
+		return nil, err
+	}
+	preimage = append(preimage, hopLayer, direction, keyPhase)
+	preimage, err = wire.AppendVarint(preimage, packetNumber)
 	if err != nil {
 		return nil, err
 	}

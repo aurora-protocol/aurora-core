@@ -52,6 +52,17 @@ func TestVarintRejectsNonMinimal(t *testing.T) {
 	}
 }
 
+func TestAppendVarintRetainsDestinationOnError(t *testing.T) {
+	destination := []byte{0xaa}
+	got, err := AppendVarint(destination, MaxVarint+1)
+	if err == nil {
+		t.Fatal("out-of-range varint accepted")
+	}
+	if !bytes.Equal(got, destination) {
+		t.Fatalf("destination after rejected append = %x, want %x", got, destination)
+	}
+}
+
 func TestOpaqueAndScalars(t *testing.T) {
 	e := NewEncoder()
 	e.WriteUint16(0x1234)

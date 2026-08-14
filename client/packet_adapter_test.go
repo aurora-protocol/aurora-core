@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"io"
 	"net/netip"
 	"testing"
 	"time"
@@ -15,6 +16,16 @@ import (
 	"github.com/aurora-protocol/aurora-core/transport"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
+
+type packetAdapterPartialRandomReader struct {
+	data     []byte
+	retained []byte
+}
+
+func (r *packetAdapterPartialRandomReader) Read(p []byte) (int, error) {
+	r.retained = p
+	return copy(p, r.data), io.ErrUnexpectedEOF
+}
 
 func TestPacketAdapterOpensTCPAndForwardsStreamData(t *testing.T) {
 	clientApplication, relayApplication := packetAdapterApplications(t)
@@ -97,6 +108,28 @@ func TestPacketAdapterOpensTCPAndForwardsStreamData(t *testing.T) {
 	localData := packetAdapterParseTCPv4(t, localPackets[0])
 	if localData.flags != tcpFlagACK|tcpFlagPSH || localData.sourcePort != 443 || localData.destinationPort != 50000 || !bytes.Equal(localData.payload, response) {
 		t.Fatalf("unexpected relay TCP packet: %+v", localData)
+	}
+}
+
+func TestPacketAdapterZeroesPartialFlowIDSeed(t *testing.T) {
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	random := &packetAdapterPartialRandomReader{data: []byte{0x51, 0x52, 0x53, 0x54}}
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{
+		MaxFlows:       8,
+		MaxPacketBytes: 1500,
+		Random:         random,
+	})
+	if err == nil || adapter != nil {
+		t.Fatalf("NewPacketAdapter() = %v, %v; want nil adapter and error", adapter, err)
+	}
+	if len(random.retained) != 8 {
+		t.Fatalf("retained seed length = %d, want 8", len(random.retained))
+	}
+	for _, value := range random.retained {
+		if value != 0 {
+			t.Fatal("NewPacketAdapter retained partial flow-ID seed bytes")
+		}
 	}
 }
 

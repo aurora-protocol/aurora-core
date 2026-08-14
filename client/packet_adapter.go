@@ -213,6 +213,7 @@ func NewPacketAdapter(application *session.Application, options PacketAdapterOpt
 	}
 	prefix := make([]byte, 8)
 	if _, err := io.ReadFull(randomSource, prefix); err != nil {
+		zeroPacketAdapterBytes(prefix)
 		return nil, fmt.Errorf("client: initialize packet adapter flow IDs: %w", err)
 	}
 	nextFlowID := binary.BigEndian.Uint64(prefix)

@@ -99,7 +99,6 @@ func (s *ExitSession) HandleFrameBlock(ctx context.Context, block protocol.Frame
 	if err != nil {
 		return err
 	}
-	var outbound []protocol.AuroraFrame
 	for _, event := range result.Events {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -108,13 +107,15 @@ func (s *ExitSession) HandleFrameBlock(ctx context.Context, block protocol.Frame
 		if err != nil {
 			return err
 		}
-		outbound = appendAuroraFrames(outbound, event.immediateFrames)
+		outbound := appendAuroraFrames(nil, event.immediateFrames)
 		outbound = appendAuroraFrames(outbound, frames)
+		if len(outbound) != 0 {
+			if err := s.queueFrames(ctx, protocol.FrameBlock{Frames: outbound}); err != nil {
+				return err
+			}
+		}
 	}
-	if len(outbound) == 0 {
-		return nil
-	}
-	return s.queueFrames(ctx, protocol.FrameBlock{Frames: outbound})
+	return nil
 }
 
 func (s *ExitSession) queueFrames(ctx context.Context, block protocol.FrameBlock) error {

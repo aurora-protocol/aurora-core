@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -42,6 +43,18 @@ import (
 	"github.com/aurora-protocol/aurora-core/wire"
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 )
+
+type liveFirstHopStaticIPResolver struct {
+	host   string
+	answer netip.Addr
+}
+
+func (r liveFirstHopStaticIPResolver) LookupNetIP(_ context.Context, network, host string) ([]netip.Addr, error) {
+	if network != "ip" || host != r.host {
+		return nil, fmt.Errorf("unexpected lookup %q for %q", network, host)
+	}
+	return []netip.Addr{r.answer}, nil
+}
 
 func TestLiveFirstHopRandomizedApplicationRoundTrip(t *testing.T) {
 	fixture := newLiveFirstHopFixture(t, time.Now())
@@ -449,6 +462,141 @@ func TestLiveFirstHopTCPProxyRuntimeEgress(t *testing.T) {
 		t.Fatalf("proxy response = %q, want %q", responsePayload, payload)
 	}
 	if err := <-echoResult; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLiveFirstHopTCPProxyRuntimeSOCKS5UDPDomainEgress(t *testing.T) {
+	payload := randomLiveFirstHopBytes(t, 4<<10)
+	domain := "udp.example"
+	destination, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = destination.Close() })
+	destinationResult := make(chan error, 1)
+	go func() {
+		buffer := make([]byte, len(payload))
+		count, peer, readErr := destination.ReadFromUDP(buffer)
+		if readErr != nil {
+			destinationResult <- readErr
+			return
+		}
+		if !bytes.Equal(buffer[:count], payload) {
+			destinationResult <- errors.New("SOCKS5 UDP destination received different payload")
+			return
+		}
+		written, writeErr := destination.WriteToUDP(buffer[:count], peer)
+		if writeErr == nil && written != count {
+			writeErr = io.ErrShortWrite
+		}
+		destinationResult <- writeErr
+	}()
+
+	fixture := newLiveFirstHopFixture(t, time.Now())
+	sessionFactory, err := NewFirstHopProxySessionFactory(FirstHopProxySessionOptions{
+		ExitPolicy: relay.ExitPolicy{AllowPrivate: true},
+		Dialer:     &net.Dialer{},
+		Resolver:   liveFirstHopStaticIPResolver{host: domain, answer: netip.MustParseAddr("127.0.0.1")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness := startLiveFirstHopHarnessWithSessionFactory(t, fixture, fixture.newRelayDriver(t), nil, sessionFactory)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	established, err := fixture.newClientDriver(t).Connect(ctx, harness.opener)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	runtime, err := auroraclient.NewTCPProxyRuntime(established.Application, auroraclient.TCPProxyRuntimeOptions{MaxFlows: 2, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1024})
+	if err != nil {
+		cancel()
+		_ = established.Close()
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		cancel()
+		_ = runtime.Close()
+		_ = established.Close()
+		t.Fatal(err)
+	}
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- runtime.Serve(ctx, listener) }()
+	pumpResult := make(chan error, 1)
+	go func() {
+		pumpResult <- transport.RunPacketDuplex(ctx, established.ReadCarrier, established.WriteCarrier, established.Application, runtime.HandleFrameBlock, 1<<20)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = runtime.Close()
+		_ = established.Close()
+		for name, result := range map[string]chan error{"SOCKS5 listener": serveResult, "carrier": pumpResult} {
+			select {
+			case resultErr := <-result:
+				if resultErr != nil && !errors.Is(resultErr, context.Canceled) && !errors.Is(resultErr, session.ErrClosed) && !errors.Is(resultErr, net.ErrClosed) && !errors.Is(resultErr, io.ErrClosedPipe) && !errors.Is(resultErr, io.EOF) {
+					t.Errorf("%s stopped unexpectedly: %v", name, resultErr)
+				}
+			case <-time.After(time.Second):
+				t.Errorf("%s did not stop", name)
+			}
+		}
+	})
+
+	control, err := net.DialTimeout("tcp4", listener.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	if err := control.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		t.Fatal(err)
+	}
+	greeting := make([]byte, 2)
+	if _, err := io.ReadFull(control, greeting); err != nil || !bytes.Equal(greeting, []byte{0x05, 0x00}) {
+		t.Fatalf("SOCKS5 greeting = %x err=%v", greeting, err)
+	}
+	if _, err := control.Write([]byte{0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	associate := make([]byte, 10)
+	if _, err := io.ReadFull(control, associate); err != nil {
+		t.Fatal(err)
+	}
+	if associate[0] != 0x05 || associate[1] != 0 || associate[2] != 0 || associate[3] != 0x01 {
+		t.Fatalf("SOCKS5 UDP association = %x", associate)
+	}
+	association := &net.UDPAddr{IP: net.IPv4(associate[4], associate[5], associate[6], associate[7]), Port: int(associate[8])<<8 | int(associate[9])}
+	udpClient, err := net.DialUDP("udp4", nil, association)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udpClient.Close()
+	if err := udpClient.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	target := destination.LocalAddr().(*net.UDPAddr)
+	targetIP := target.IP.To4()
+	request := append([]byte{0, 0, 0, 0x03, byte(len(domain))}, []byte(domain)...)
+	request = append(request, byte(target.Port>>8), byte(target.Port))
+	request = append(request, payload...)
+	if _, err := udpClient.Write(request); err != nil {
+		t.Fatal(err)
+	}
+	wantResponse := append([]byte{0, 0, 0, 0x01}, targetIP...)
+	wantResponse = append(wantResponse, byte(target.Port>>8), byte(target.Port))
+	wantResponse = append(wantResponse, payload...)
+	response := make([]byte, len(wantResponse))
+	if _, err := io.ReadFull(udpClient, response); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(response, wantResponse) {
+		t.Fatalf("SOCKS5 UDP response = %x, want %x", response, wantResponse)
+	}
+	if err := <-destinationResult; err != nil {
 		t.Fatal(err)
 	}
 }

@@ -2132,6 +2132,32 @@ func TestAuroraPacketEncodeDecode(t *testing.T) {
 	}
 }
 
+func TestEncodeAuroraPacketUsesExactOutputLength(t *testing.T) {
+	pkt := AuroraPacket{
+		RouteInstanceID: 64,
+		HopLayer:        1,
+		Direction:       0,
+		KeyPhase:        2,
+		PacketNumber:    16384,
+		Ciphertext:      bytesOf(0x5a, 1200),
+		AuthTag:         bytesOf(0xee, 16),
+	}
+	encoded, err := EncodeAuroraPacket(pkt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	length, known := pkt.EncodedLen()
+	if !known {
+		t.Fatal("encoded length is unknown")
+	}
+	if got, want := len(encoded), length; got != want {
+		t.Fatalf("encoded length = %d, want %d", got, want)
+	}
+	if got, want := cap(encoded), len(encoded); got != want {
+		t.Fatalf("encoded capacity = %d, want %d", got, want)
+	}
+}
+
 func TestDecodeAuroraPacketViewBorrowsPayloadWhileOwnedDecoderCopies(t *testing.T) {
 	pkt := AuroraPacket{
 		RouteInstanceID: 9,

@@ -21,6 +21,30 @@ type AuroraPacket struct {
 	sealedPayload []byte
 }
 
+// EncodedLen reports the exact serialized packet length when it is valid.
+func (p AuroraPacket) EncodedLen() (int, bool) {
+	if len(p.Ciphertext) > 0xffffff || len(p.AuthTag) != 16 {
+		return 0, false
+	}
+	routeIDLength, err := wire.VarintLen(p.RouteInstanceID)
+	if err != nil {
+		return 0, false
+	}
+	packetNumberLength, err := wire.VarintLen(p.PacketNumber)
+	if err != nil {
+		return 0, false
+	}
+	return routeIDLength + 3 + packetNumberLength + 3 + len(p.Ciphertext) + len(p.AuthTag), true
+}
+
+// EncodeAuroraPacket serializes p with one exact-capacity output buffer when valid.
+func EncodeAuroraPacket(p AuroraPacket) ([]byte, error) {
+	if length, known := p.EncodedLen(); known {
+		return wire.EncodeWithCapacity(p, length)
+	}
+	return wire.Encode(p)
+}
+
 func (p AuroraPacket) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(p.RouteInstanceID)
 	e.WriteUint8(p.HopLayer)

@@ -508,7 +508,7 @@ func (a *Application) sealCurrentWriteBlockLocked(block protocol.FrameBlock) ([]
 		return nil, 0, 0, 0, err
 	}
 	sealedNext := a.write.NextPacket
-	encoded, err := protocol.Encode(pkt)
+	encoded, err := packet.EncodeAuroraPacket(pkt)
 	if err != nil {
 		a.write.NextPacket = nextPacket
 		return nil, 0, 0, 0, err

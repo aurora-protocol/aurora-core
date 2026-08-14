@@ -1445,9 +1445,19 @@ func checkConfig(path string) error {
 }
 
 func checkNativeProvisioningTrust(path string, w io.Writer) error {
-	encoded, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return err
+	}
+	defer file.Close()
+	encoded, err := io.ReadAll(io.LimitReader(file, int64(auroraclient.MaximumNativeProvisioningTrustBytes)+1))
+	if err != nil {
+		clear(encoded)
+		return fmt.Errorf("check native provisioning trust: read input: %w", err)
+	}
+	if len(encoded) > auroraclient.MaximumNativeProvisioningTrustBytes {
+		clear(encoded)
+		return fmt.Errorf("check native provisioning trust: trust input exceeds size limit")
 	}
 	defer clear(encoded)
 	trust, err := auroraclient.ParseNativeProvisioningTrust(encoded)

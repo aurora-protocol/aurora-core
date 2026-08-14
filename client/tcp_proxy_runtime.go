@@ -12,9 +12,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aurora-protocol/aurora-core/flow"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/session"
+	"github.com/aurora-protocol/aurora-core/transport"
+	"github.com/aurora-protocol/aurora-core/wire"
 )
 
 const (
@@ -26,6 +29,7 @@ const (
 	defaultTCPProxyPendingWriteBytes = 1 << 20
 	maximumTCPProxyPendingWriteBytes = 16 << 20
 	tcpProxyWriteQueueLength         = 16
+	maximumSOCKS5UDPDatagramBytes    = 65535
 )
 
 var (
@@ -40,7 +44,7 @@ type TCPProxyRuntimeOptions struct {
 	MaxPendingWriteBytes int
 }
 
-// TCPProxyRuntime maps local HTTP CONNECT and SOCKS5 TCP connections to one encrypted proxy-flow session.
+// TCPProxyRuntime maps local HTTP CONNECT and SOCKS5 TCP or UDP associations to one encrypted proxy-flow session.
 type TCPProxyRuntime struct {
 	application *session.Application
 	proxy       *LocalProxy
@@ -48,6 +52,8 @@ type TCPProxyRuntime struct {
 
 	mu         sync.Mutex
 	flows      map[uint64]*tcpProxyFlow
+	udpFlows   map[uint64]*udpProxyFlow
+	udpLinks   map[*udpProxyAssociation]struct{}
 	pending    map[net.Conn]struct{}
 	listeners  map[net.Listener]struct{}
 	nextFlowID uint64
@@ -68,6 +74,34 @@ type tcpProxyFlow struct {
 	pendingWrites  int
 	localCloseSent bool
 	draining       bool
+}
+
+type udpProxyTarget struct {
+	kind uint8
+	host string
+	port uint16
+}
+
+type udpProxyAssociation struct {
+	connection *net.UDPConn
+	peerIP     net.IP
+	peerPort   int
+
+	mu        sync.Mutex
+	peer      *net.UDPAddr
+	writeMu   sync.Mutex
+	closed    bool
+	closeOnce sync.Once
+}
+
+type udpProxyFlow struct {
+	id          uint64
+	association *udpProxyAssociation
+	target      udpProxyTarget
+
+	mu          sync.Mutex
+	confirmed   bool
+	replyTarget udpProxyTarget
 }
 
 type socks5RequestError struct {
@@ -92,6 +126,8 @@ func NewTCPProxyRuntime(application *session.Application, options TCPProxyRuntim
 		proxy:       NewLocalProxy(),
 		options:     normalized,
 		flows:       make(map[uint64]*tcpProxyFlow),
+		udpFlows:    make(map[uint64]*udpProxyFlow),
+		udpLinks:    make(map[*udpProxyAssociation]struct{}),
 		pending:     make(map[net.Conn]struct{}),
 		listeners:   make(map[net.Listener]struct{}),
 		nextFlowID:  1,
@@ -176,7 +212,7 @@ func (r *TCPProxyRuntime) Serve(ctx context.Context, listener net.Listener) erro
 	}
 }
 
-// HandleFrameBlock dispatches authenticated backward proxy-flow frames to their local TCP connection.
+// HandleFrameBlock dispatches authenticated backward proxy-flow frames to their local TCP connection or UDP association.
 func (r *TCPProxyRuntime) HandleFrameBlock(ctx context.Context, block protocol.FrameBlock) error {
 	if r == nil {
 		return fmt.Errorf("client: nil TCP proxy runtime")
@@ -193,7 +229,21 @@ func (r *TCPProxyRuntime) HandleFrameBlock(ctx context.Context, block protocol.F
 	for _, frame := range block.Frames {
 		switch frame.FrameType {
 		case registry.FrameStreamData:
-			if err := r.enqueueLocalWrite(frame.FlowID, frame.Payload); err != nil {
+			if r.flow(frame.FlowID) != nil {
+				if err := r.enqueueLocalWrite(frame.FlowID, frame.Payload); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := r.enqueueUDPWrite(frame); err != nil {
+				return err
+			}
+		case registry.FrameDatagramData:
+			if err := r.enqueueUDPWrite(frame); err != nil {
+				return err
+			}
+		case registry.FrameUDPTargetConfirm:
+			if err := r.handleUDPTargetConfirm(frame); err != nil {
 				return err
 			}
 		case registry.FrameFlowClose:
@@ -229,8 +279,18 @@ func (r *TCPProxyRuntime) Close() error {
 			delete(r.flows, flowID)
 			flows = append(flows, flow)
 		}
+		udpFlows := make([]*udpProxyFlow, 0, len(r.udpFlows))
+		for flowID, flow := range r.udpFlows {
+			delete(r.udpFlows, flowID)
+			udpFlows = append(udpFlows, flow)
+		}
+		udpLinks := make([]*udpProxyAssociation, 0, len(r.udpLinks))
+		for association := range r.udpLinks {
+			udpLinks = append(udpLinks, association)
+		}
 		r.pending = make(map[net.Conn]struct{})
 		r.listeners = make(map[net.Listener]struct{})
+		r.udpLinks = make(map[*udpProxyAssociation]struct{})
 		r.mu.Unlock()
 
 		var closeErrors []error
@@ -243,6 +303,12 @@ func (r *TCPProxyRuntime) Close() error {
 		for _, flow := range flows {
 			_ = r.proxy.Close(flow.id)
 			closeErrors = appendTCPProxyCloseError(closeErrors, flow.close())
+		}
+		for _, flow := range udpFlows {
+			_ = r.proxy.Close(flow.id)
+		}
+		for _, association := range udpLinks {
+			closeErrors = appendTCPProxyCloseError(closeErrors, association.close())
 		}
 		r.closeErr = errors.Join(closeErrors...)
 	})
@@ -273,7 +339,7 @@ func (r *TCPProxyRuntime) serveConnection(ctx context.Context, connection net.Co
 	}()
 
 	reader := bufio.NewReaderSize(connection, r.options.ReadBufferBytes)
-	host, port, response, err := r.readLocalRequest(reader, connection)
+	request, err := r.readLocalRequest(reader, connection)
 	if err != nil {
 		var socksError *socks5RequestError
 		if errors.As(err, &socksError) {
@@ -286,12 +352,15 @@ func (r *TCPProxyRuntime) serveConnection(ctx context.Context, connection net.Co
 		}
 		return err
 	}
-	flow, err := r.openFlow(ctx, connection, host, port)
+	if request.command == socksCommandUDP {
+		return r.serveSOCKS5UDPAssociation(ctx, reader, connection, request.host, request.port)
+	}
+	flow, err := r.openFlow(ctx, connection, request.host, request.port)
 	if err != nil {
 		return err
 	}
 	flowOpened = true
-	if _, err := connection.Write(response); err != nil {
+	if _, err := connection.Write(request.response); err != nil {
 		r.abortFlow(flow.id)
 		return err
 	}
@@ -302,10 +371,17 @@ func (r *TCPProxyRuntime) serveConnection(ctx context.Context, connection net.Co
 	return nil
 }
 
-func (r *TCPProxyRuntime) readLocalRequest(reader *bufio.Reader, connection net.Conn) (string, uint16, []byte, error) {
+type localProxyRequest struct {
+	command  byte
+	host     string
+	port     uint16
+	response []byte
+}
+
+func (r *TCPProxyRuntime) readLocalRequest(reader *bufio.Reader, connection net.Conn) (localProxyRequest, error) {
 	first, err := reader.Peek(1)
 	if err != nil {
-		return "", 0, nil, err
+		return localProxyRequest{}, err
 	}
 	if first[0] == socksVersion5 {
 		return readTCPProxySOCKS5Request(reader, connection)
@@ -313,27 +389,27 @@ func (r *TCPProxyRuntime) readLocalRequest(reader *bufio.Reader, connection net.
 	return readTCPProxyHTTPConnectRequest(reader, r.options.ReadBufferBytes)
 }
 
-func readTCPProxyHTTPConnectRequest(reader *bufio.Reader, maximum int) (string, uint16, []byte, error) {
+func readTCPProxyHTTPConnectRequest(reader *bufio.Reader, maximum int) (localProxyRequest, error) {
 	raw, err := readTCPProxyHeader(reader, maximum)
 	if err != nil {
-		return "", 0, nil, err
+		return localProxyRequest{}, err
 	}
 	defer zeroTCPProxyBytes(raw)
 	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(raw)))
 	if err != nil {
-		return "", 0, nil, fmt.Errorf("client: invalid HTTP CONNECT request: %w", err)
+		return localProxyRequest{}, fmt.Errorf("client: invalid HTTP CONNECT request: %w", err)
 	}
 	if request.Body != nil {
 		_ = request.Body.Close()
 	}
 	if request.Method != http.MethodConnect {
-		return "", 0, nil, fmt.Errorf("client: HTTP local interface requires CONNECT")
+		return localProxyRequest{}, fmt.Errorf("client: HTTP local interface requires CONNECT")
 	}
 	host, port, err := parseAuthority(request.Host)
 	if err != nil {
-		return "", 0, nil, err
+		return localProxyRequest{}, err
 	}
-	return host, port, append([]byte(nil), httpConnectEstablished...), nil
+	return localProxyRequest{command: socksCommandConnect, host: host, port: port, response: append([]byte(nil), httpConnectEstablished...)}, nil
 }
 
 func readTCPProxyHeader(reader *bufio.Reader, maximum int) ([]byte, error) {
@@ -359,61 +435,65 @@ func readTCPProxyHeader(reader *bufio.Reader, maximum int) ([]byte, error) {
 	}
 }
 
-func readTCPProxySOCKS5Request(reader *bufio.Reader, connection net.Conn) (string, uint16, []byte, error) {
+func readTCPProxySOCKS5Request(reader *bufio.Reader, connection net.Conn) (localProxyRequest, error) {
 	greetingPrefix := make([]byte, 2)
 	if _, err := io.ReadFull(reader, greetingPrefix); err != nil {
-		return "", 0, nil, err
+		return localProxyRequest{}, err
 	}
 	greeting := append([]byte(nil), greetingPrefix...)
 	defer zeroTCPProxyBytes(greeting)
 	if greetingPrefix[0] != socksVersion5 {
-		return "", 0, nil, fmt.Errorf("client: invalid SOCKS5 greeting")
+		return localProxyRequest{}, fmt.Errorf("client: invalid SOCKS5 greeting")
 	}
 	methods := make([]byte, int(greetingPrefix[1]))
 	if _, err := io.ReadFull(reader, methods); err != nil {
-		return "", 0, nil, err
+		return localProxyRequest{}, err
 	}
 	greeting = append(greeting, methods...)
 	zeroTCPProxyBytes(methods)
 	greetingResponse, greetingErr := HandleSOCKS5Greeting(greeting)
 	if len(greetingResponse) != 0 {
 		if _, err := connection.Write(greetingResponse); err != nil {
-			return "", 0, nil, err
+			return localProxyRequest{}, err
 		}
 	}
 	if greetingErr != nil {
-		return "", 0, nil, greetingErr
+		return localProxyRequest{}, greetingErr
 	}
 
 	requestPrefix := make([]byte, 4)
 	if _, err := io.ReadFull(reader, requestPrefix); err != nil {
-		return "", 0, nil, err
+		return localProxyRequest{}, err
 	}
 	request := append([]byte(nil), requestPrefix...)
 	defer zeroTCPProxyBytes(request)
 	if requestPrefix[0] != socksVersion5 || requestPrefix[2] != 0 {
-		return "", 0, nil, newSOCKS5RequestError(fmt.Errorf("client: invalid SOCKS5 request"), socksReplyGeneralFailure)
+		return localProxyRequest{}, newSOCKS5RequestError(fmt.Errorf("client: invalid SOCKS5 request"), socksReplyGeneralFailure)
 	}
-	if requestPrefix[1] != socksCommandConnect {
-		return "", 0, nil, newSOCKS5RequestError(fmt.Errorf("client: unsupported SOCKS5 command 0x%x", requestPrefix[1]), socksReplyCommandUnsupported)
+	if requestPrefix[1] != socksCommandConnect && requestPrefix[1] != socksCommandUDP {
+		return localProxyRequest{}, newSOCKS5RequestError(fmt.Errorf("client: unsupported SOCKS5 command 0x%x", requestPrefix[1]), socksReplyCommandUnsupported)
 	}
 	if requestPrefix[3] != socksATYPIPv4 && requestPrefix[3] != socksATYPDomain && requestPrefix[3] != socksATYPIPv6 {
-		return "", 0, nil, newSOCKS5RequestError(fmt.Errorf("client: unsupported SOCKS5 address type 0x%x", requestPrefix[3]), socksReplyAddressUnsupported)
+		return localProxyRequest{}, newSOCKS5RequestError(fmt.Errorf("client: unsupported SOCKS5 address type 0x%x", requestPrefix[3]), socksReplyAddressUnsupported)
 	}
 	remaining, err := tcpProxySOCKS5AddressBytes(reader, requestPrefix[3])
 	if err != nil {
-		return "", 0, nil, newSOCKS5RequestError(err, socksReplyGeneralFailure)
+		return localProxyRequest{}, newSOCKS5RequestError(err, socksReplyGeneralFailure)
 	}
 	request = append(request, remaining...)
 	zeroTCPProxyBytes(remaining)
-	host, port, end, err := parseSOCKS5Request(request, socksCommandConnect)
+	host, port, end, err := parseSOCKS5RequestWithOptions(request, requestPrefix[1], requestPrefix[1] == socksCommandUDP)
 	if err != nil {
-		return "", 0, nil, newSOCKS5RequestError(err, socksReplyGeneralFailure)
+		return localProxyRequest{}, newSOCKS5RequestError(err, socksReplyGeneralFailure)
 	}
 	if end != len(request) {
-		return "", 0, nil, newSOCKS5RequestError(fmt.Errorf("client: trailing SOCKS5 CONNECT bytes"), socksReplyGeneralFailure)
+		return localProxyRequest{}, newSOCKS5RequestError(fmt.Errorf("client: trailing SOCKS5 request bytes"), socksReplyGeneralFailure)
 	}
-	return host, port, append([]byte(nil), socksSuccessResponse...), nil
+	response := []byte(nil)
+	if requestPrefix[1] == socksCommandConnect {
+		response = append([]byte(nil), socksSuccessResponse...)
+	}
+	return localProxyRequest{command: requestPrefix[1], host: host, port: port, response: response}, nil
 }
 
 func newSOCKS5RequestError(err error, reply byte) error {
@@ -465,7 +545,7 @@ func (r *TCPProxyRuntime) openFlow(ctx context.Context, connection net.Conn, hos
 		r.mu.Unlock()
 		return nil, ErrTCPProxyClosed
 	}
-	if len(r.flows) >= r.options.MaxFlows {
+	if len(r.flows)+len(r.udpFlows) >= r.options.MaxFlows {
 		r.mu.Unlock()
 		return nil, ErrTCPProxyFlowLimit
 	}
@@ -504,7 +584,7 @@ func (r *TCPProxyRuntime) allocateFlowIDLocked() (uint64, error) {
 		if r.nextFlowID == 0 {
 			r.nextFlowID = 1
 		}
-		if flowID != 0 && r.flows[flowID] == nil {
+		if flowID != 0 && r.flows[flowID] == nil && r.udpFlows[flowID] == nil {
 			return flowID, nil
 		}
 	}
@@ -537,6 +617,258 @@ func (r *TCPProxyRuntime) readLocalFlow(ctx context.Context, reader *bufio.Reade
 		}
 		return err
 	}
+}
+
+func (r *TCPProxyRuntime) serveSOCKS5UDPAssociation(ctx context.Context, reader *bufio.Reader, control net.Conn, host string, port uint16) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	peerIP, peerPort, err := socksUDPAssociationPeer(host, port, control.RemoteAddr())
+	if err != nil {
+		return newSOCKS5RequestError(err, socksReplyGeneralFailure)
+	}
+	udpNetwork, udpAddress, err := socksUDPAssociationListenConfig(control.LocalAddr())
+	if err != nil {
+		return newSOCKS5RequestError(err, socksReplyGeneralFailure)
+	}
+	udpConnection, err := net.ListenUDP(udpNetwork, udpAddress)
+	if err != nil {
+		return newSOCKS5RequestError(fmt.Errorf("client: listen SOCKS5 UDP association: %w", err), socksReplyGeneralFailure)
+	}
+	association := &udpProxyAssociation{connection: udpConnection, peerIP: peerIP, peerPort: peerPort}
+	if err := r.addUDPAssociation(association); err != nil {
+		_ = association.close()
+		return err
+	}
+	defer r.removeUDPAssociation(association)
+	defer association.close()
+
+	address := udpConnection.LocalAddr().(*net.UDPAddr)
+	response, err := socks5BindResponse(address.IP.String(), uint16(address.Port))
+	if err != nil {
+		return err
+	}
+	if _, err := control.Write(response); err != nil {
+		return err
+	}
+	zeroTCPProxyBytes(response)
+
+	result := make(chan error, 1)
+	go func() { result <- r.readSOCKS5UDPAssociation(ctx, association) }()
+	controlResult := make(chan error, 1)
+	go func() {
+		_, err := reader.ReadByte()
+		controlResult <- err
+	}()
+	select {
+	case err := <-result:
+		return err
+	case err := <-controlResult:
+		if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		return nil
+	case <-r.done:
+		return nil
+	}
+}
+
+func socksUDPAssociationPeer(host string, port uint16, controlPeer net.Addr) (net.IP, int, error) {
+	peer, ok := controlPeer.(*net.TCPAddr)
+	if !ok || peer.IP == nil {
+		return nil, 0, fmt.Errorf("client: SOCKS5 UDP control peer is unavailable")
+	}
+	controlIP := peer.IP.To16()
+	if controlIP == nil {
+		return nil, 0, fmt.Errorf("client: SOCKS5 UDP control peer is invalid")
+	}
+	if host != "" && host != "0.0.0.0" && host != "::" {
+		requested := net.ParseIP(host)
+		if requested == nil || !requested.Equal(controlIP) {
+			return nil, 0, fmt.Errorf("client: SOCKS5 UDP association peer does not match control connection")
+		}
+	}
+	return append(net.IP(nil), controlIP...), int(port), nil
+}
+
+func socksUDPAssociationListenConfig(controlLocal net.Addr) (string, *net.UDPAddr, error) {
+	local, ok := controlLocal.(*net.TCPAddr)
+	if !ok || local.IP == nil {
+		return "", nil, fmt.Errorf("client: SOCKS5 UDP control listener is unavailable")
+	}
+	if ip4 := local.IP.To4(); ip4 != nil {
+		return "udp4", &net.UDPAddr{IP: append(net.IP(nil), ip4...)}, nil
+	}
+	if ip6 := local.IP.To16(); ip6 != nil {
+		return "udp6", &net.UDPAddr{IP: append(net.IP(nil), ip6...), Zone: local.Zone}, nil
+	}
+	return "", nil, fmt.Errorf("client: SOCKS5 UDP control listener is invalid")
+}
+
+func (r *TCPProxyRuntime) readSOCKS5UDPAssociation(ctx context.Context, association *udpProxyAssociation) error {
+	buffer := make([]byte, maximumSOCKS5UDPDatagramBytes)
+	defer zeroTCPProxyBytes(buffer)
+	for {
+		count, peer, err := association.connection.ReadFromUDP(buffer)
+		if count > 0 {
+			if !association.acceptPeer(peer) {
+				continue
+			}
+			if err := r.queueSOCKS5UDPDatagram(ctx, association, buffer[:count]); err != nil {
+				return err
+			}
+		}
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, net.ErrClosed) || ctx.Err() != nil || r.isClosed() {
+			return nil
+		}
+		return fmt.Errorf("client: read SOCKS5 UDP association: %w", err)
+	}
+}
+
+func (r *TCPProxyRuntime) queueSOCKS5UDPDatagram(ctx context.Context, association *udpProxyAssociation, packet []byte) error {
+	host, port, _, err := parseSOCKS5UDPHeader(packet)
+	if err != nil {
+		return err
+	}
+	targetKind, targetHost, err := localTarget(host)
+	if err != nil {
+		return err
+	}
+	canonicalHost := string(targetHost)
+	if targetKind == flow.TargetKindIPv4 || targetKind == flow.TargetKindIPv6 {
+		canonicalHost = net.IP(targetHost).String()
+	}
+	if canonicalHost == "" {
+		return fmt.Errorf("client: SOCKS5 UDP target is invalid")
+	}
+	target := udpProxyTarget{kind: targetKind, host: canonicalHost, port: port}
+	flow, opened, err := r.udpFlowForTarget(association, target)
+	if err != nil {
+		return err
+	}
+	now := uint64(time.Now().Unix())
+	frames, err := r.proxy.HandleSOCKS5UDPDatagramFrames(flow.id, packet, now, transport.UDPOverStreamFallback)
+	if err != nil {
+		if opened {
+			r.removeUDPFlow(flow.id)
+		}
+		return err
+	}
+	if err := r.application.QueueFrames(ctx, protocol.FrameBlock{Frames: frames}); err != nil {
+		for index := range frames {
+			zeroTCPProxyBytes(frames[index].Payload)
+		}
+		if opened {
+			r.removeUDPFlow(flow.id)
+		}
+		if errors.Is(err, session.ErrBackpressure) {
+			return nil
+		}
+		return err
+	}
+	for index := range frames {
+		zeroTCPProxyBytes(frames[index].Payload)
+	}
+	return nil
+}
+
+func (r *TCPProxyRuntime) udpFlowForTarget(association *udpProxyAssociation, target udpProxyTarget) (*udpProxyFlow, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil, false, ErrTCPProxyClosed
+	}
+	for _, flow := range r.udpFlows {
+		if flow.association == association && flow.target == target {
+			return flow, false, nil
+		}
+	}
+	if len(r.flows)+len(r.udpFlows) >= r.options.MaxFlows {
+		return nil, false, ErrTCPProxyFlowLimit
+	}
+	flowID, err := r.allocateFlowIDLocked()
+	if err != nil {
+		return nil, false, err
+	}
+	flow := &udpProxyFlow{id: flowID, association: association, target: target}
+	r.udpFlows[flowID] = flow
+	return flow, true, nil
+}
+
+func (r *TCPProxyRuntime) handleUDPTargetConfirm(frame protocol.AuroraFrame) error {
+	flow := r.udpFlow(frame.FlowID)
+	if flow == nil {
+		return fmt.Errorf("client: UDP target confirm targets an unknown flow")
+	}
+	if err := r.proxy.ReceiveUDPTargetConfirmFrameAt(frame, uint64(time.Now().Unix())); err != nil {
+		return err
+	}
+	reader := wire.NewReader(frame.Payload)
+	confirm := protocol.DecodeUDPTargetConfirm(reader)
+	if reader.Err() != nil || !reader.EOF() {
+		return fmt.Errorf("client: UDP target confirmation is malformed")
+	}
+	confirmedHost := net.IP(confirm.SelectedIP).String()
+	if confirmedHost == "" {
+		return fmt.Errorf("client: UDP target confirmation has an invalid selected IP")
+	}
+	flow.mu.Lock()
+	flow.confirmed = true
+	flow.replyTarget = udpProxyTarget{kind: confirm.TargetKind, host: confirmedHost, port: confirm.SelectedPort}
+	flow.mu.Unlock()
+	return nil
+}
+
+func (r *TCPProxyRuntime) enqueueUDPWrite(frame protocol.AuroraFrame) error {
+	if len(frame.Payload) == 0 {
+		return fmt.Errorf("client: UDP proxy relay data is empty")
+	}
+	flow := r.udpFlow(frame.FlowID)
+	if flow == nil {
+		return fmt.Errorf("client: UDP proxy relay data targets an unknown flow")
+	}
+	flow.mu.Lock()
+	confirmed := flow.confirmed
+	target := flow.replyTarget
+	flow.mu.Unlock()
+	if !confirmed || target.host == "" || target.port == 0 {
+		return fmt.Errorf("client: UDP proxy relay data arrived before target confirmation")
+	}
+	packet, err := socks5UDPDatagram(target.host, target.port, frame.Payload)
+	if err != nil {
+		return err
+	}
+	defer zeroTCPProxyBytes(packet)
+	return flow.association.write(packet)
+}
+
+func socks5UDPDatagram(host string, port uint16, payload []byte) ([]byte, error) {
+	targetKind, targetHost, err := localTarget(host)
+	if err != nil {
+		return nil, err
+	}
+	packet := []byte{0, 0, 0}
+	switch targetKind {
+	case flow.TargetKindIPv4:
+		packet = append(packet, socksATYPIPv4)
+	case flow.TargetKindIPv6:
+		packet = append(packet, socksATYPIPv6)
+	case flow.TargetKindDomainName:
+		if len(targetHost) > 255 {
+			return nil, fmt.Errorf("client: SOCKS5 UDP domain is too long")
+		}
+		packet = append(packet, socksATYPDomain, byte(len(targetHost)))
+	default:
+		return nil, fmt.Errorf("client: SOCKS5 UDP target is invalid")
+	}
+	packet = append(packet, targetHost...)
+	packet = append(packet, byte(port>>8), byte(port))
+	return append(packet, payload...), nil
 }
 
 func (r *TCPProxyRuntime) sendLocalFlowClose(ctx context.Context, flow *tcpProxyFlow) error {
@@ -627,7 +959,14 @@ func (r *TCPProxyRuntime) runLocalWritePump(flow *tcpProxyFlow) {
 
 func (r *TCPProxyRuntime) handlePeerFlowClose(frame protocol.AuroraFrame) error {
 	if r.flow(frame.FlowID) == nil {
-		return fmt.Errorf("client: TCP proxy relay close targets an unknown flow")
+		if r.udpFlow(frame.FlowID) == nil {
+			return fmt.Errorf("client: proxy relay close targets an unknown flow")
+		}
+		if err := r.proxy.ReceiveFlowCloseFrame(frame, uint64(time.Now().Unix()), 0); err != nil {
+			return err
+		}
+		r.removeUDPFlow(frame.FlowID)
+		return nil
 	}
 	if err := r.proxy.ReceiveFlowCloseFrame(frame, uint64(time.Now().Unix()), 0); err != nil {
 		return err
@@ -647,6 +986,126 @@ func (r *TCPProxyRuntime) abortFlow(flowID uint64) {
 	}
 	_ = r.proxy.Close(flowID)
 	_ = flow.close()
+}
+
+func (r *TCPProxyRuntime) udpFlow(flowID uint64) *udpProxyFlow {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.udpFlows[flowID]
+}
+
+func (r *TCPProxyRuntime) removeUDPFlow(flowID uint64) {
+	r.mu.Lock()
+	flow := r.udpFlows[flowID]
+	delete(r.udpFlows, flowID)
+	r.mu.Unlock()
+	if flow != nil {
+		_ = r.proxy.Close(flowID)
+	}
+}
+
+func (r *TCPProxyRuntime) addUDPAssociation(association *udpProxyAssociation) error {
+	if association == nil {
+		return fmt.Errorf("client: SOCKS5 UDP association is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return ErrTCPProxyClosed
+	}
+	if len(r.udpLinks) >= r.options.MaxFlows {
+		return ErrTCPProxyFlowLimit
+	}
+	r.udpLinks[association] = struct{}{}
+	return nil
+}
+
+func (r *TCPProxyRuntime) removeUDPAssociation(association *udpProxyAssociation) {
+	if association == nil {
+		return
+	}
+	r.mu.Lock()
+	notifyPeer := !r.closed
+	delete(r.udpLinks, association)
+	flowIDs := make([]uint64, 0)
+	for flowID, flow := range r.udpFlows {
+		if flow.association == association {
+			delete(r.udpFlows, flowID)
+			flowIDs = append(flowIDs, flowID)
+		}
+	}
+	r.mu.Unlock()
+	for _, flowID := range flowIDs {
+		frame, err := r.proxy.CloseFrame(flowID, 0, nil)
+		if err != nil {
+			_ = r.proxy.Close(flowID)
+			continue
+		}
+		if notifyPeer {
+			_ = r.application.QueueFrames(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}})
+		}
+		zeroTCPProxyBytes(frame.Payload)
+	}
+}
+
+func (a *udpProxyAssociation) acceptPeer(peer *net.UDPAddr) bool {
+	if a == nil || peer == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return false
+	}
+	if a.peer != nil {
+		return a.peer.IP.Equal(peer.IP) && a.peer.Port == peer.Port
+	}
+	if a.peerIP != nil && !a.peerIP.Equal(peer.IP) {
+		return false
+	}
+	if a.peerPort != 0 && a.peerPort != peer.Port {
+		return false
+	}
+	a.peer = &net.UDPAddr{IP: append(net.IP(nil), peer.IP...), Port: peer.Port, Zone: peer.Zone}
+	return true
+}
+
+func (a *udpProxyAssociation) write(packet []byte) error {
+	if a == nil || len(packet) == 0 {
+		return fmt.Errorf("client: SOCKS5 UDP response is invalid")
+	}
+	a.mu.Lock()
+	if a.closed || a.peer == nil {
+		a.mu.Unlock()
+		return fmt.Errorf("client: SOCKS5 UDP association peer is unavailable")
+	}
+	peer := &net.UDPAddr{IP: append(net.IP(nil), a.peer.IP...), Port: a.peer.Port, Zone: a.peer.Zone}
+	a.mu.Unlock()
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	count, err := a.connection.WriteToUDP(packet, peer)
+	if err != nil {
+		return fmt.Errorf("client: write SOCKS5 UDP response: %w", err)
+	}
+	if count != len(packet) {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
+func (a *udpProxyAssociation) close() error {
+	if a == nil {
+		return nil
+	}
+	var closeErr error
+	a.closeOnce.Do(func() {
+		a.mu.Lock()
+		a.closed = true
+		a.peer = nil
+		a.mu.Unlock()
+		closeErr = a.connection.Close()
+	})
+	return closeErr
 }
 
 func (r *TCPProxyRuntime) detachFlow(flowID uint64) *tcpProxyFlow {

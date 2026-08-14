@@ -494,6 +494,49 @@ func TestDevicePacketExchangerStopsOnInvalidReadLength(t *testing.T) {
 	default:
 		t.Fatal("readDevice did not terminate after an invalid read length")
 	}
+	if _, err := exchanger.ExchangePacketBatch(PacketBatch{}); err == nil || !strings.Contains(err.Error(), "invalid read length") {
+		t.Fatalf("ExchangePacketBatch error = %v, want invalid read length", err)
+	}
+}
+
+func TestDevicePacketExchangerReportsTerminalReadFailure(t *testing.T) {
+	device := newScriptedPacketDevice()
+	exchanger, err := NewDevicePacketExchanger(device, DevicePacketExchangerOptions{
+		MTU:          1280,
+		QueuePackets: 1,
+	})
+	if err != nil {
+		t.Fatalf("NewDevicePacketExchanger failed: %v", err)
+	}
+	defer exchanger.Close()
+	if err := device.Close(); err != nil {
+		t.Fatalf("packet device close failed: %v", err)
+	}
+	select {
+	case <-exchanger.readDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for terminal packet-device read failure")
+	}
+
+	if _, err := exchanger.ExchangePacketBatch(PacketBatch{}); !errors.Is(err, io.EOF) {
+		t.Fatalf("ExchangePacketBatch error = %v, want terminal read error %v", err, io.EOF)
+	}
+}
+
+func TestDevicePacketExchangerReportsEmptyRead(t *testing.T) {
+	exchanger := &DevicePacketExchanger{
+		device:   emptyReadPacketDevice{},
+		mtu:      1280,
+		outbound: make(chan []byte, 1),
+		done:     make(chan struct{}),
+		readDone: make(chan struct{}),
+	}
+
+	exchanger.readDevice()
+
+	if _, err := exchanger.ExchangePacketBatch(PacketBatch{}); err == nil || !strings.Contains(err.Error(), "empty read") {
+		t.Fatalf("ExchangePacketBatch error = %v, want empty read", err)
+	}
 }
 
 func TestWriteFullPacketRejectsInvalidWriteLength(t *testing.T) {
@@ -768,6 +811,20 @@ func (invalidReadPacketDevice) Write(packet []byte) (int, error) {
 }
 
 func (invalidReadPacketDevice) Close() error {
+	return nil
+}
+
+type emptyReadPacketDevice struct{}
+
+func (emptyReadPacketDevice) Read([]byte) (int, error) {
+	return 0, nil
+}
+
+func (emptyReadPacketDevice) Write(packet []byte) (int, error) {
+	return len(packet), nil
+}
+
+func (emptyReadPacketDevice) Close() error {
 	return nil
 }
 

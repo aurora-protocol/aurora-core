@@ -107,7 +107,7 @@ func TestNativeIntegrationCABICallerDeadlineReleasesHarness(t *testing.T) {
 	lockReleased := make(chan struct{})
 	go func() {
 		caller.mu.Lock()
-		caller.mu.Unlock()
+		defer caller.mu.Unlock()
 		close(lockReleased)
 	}()
 	select {

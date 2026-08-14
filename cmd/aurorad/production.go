@@ -399,9 +399,7 @@ func loadClassicalTranscriptSigner(path string) (handshake.TranscriptSigner, err
 	if !ok {
 		return nil, fmt.Errorf("server: classical signer key must be ECDSA")
 	}
-	signer, err := handshake.NewECDSAP256TranscriptSigner(private)
-	private.D.SetInt64(0)
-	return signer, err
+	return handshake.NewECDSAP256TranscriptSigner(private)
 }
 
 func loadPQTranscriptSigner(path string) (handshake.TranscriptSigner, error) {

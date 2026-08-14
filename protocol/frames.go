@@ -17,6 +17,25 @@ type AuroraFrame struct {
 	Payload   []byte
 }
 
+func (f AuroraFrame) EncodedLen() (int, bool) {
+	if len(f.Payload) > 0xffffff {
+		return 0, false
+	}
+	length := 3 + len(f.Payload)
+	for _, value := range []uint64{f.FrameType, f.FlowID, f.Flags} {
+		varintLength, err := wire.VarintLen(value)
+		if err != nil {
+			return 0, false
+		}
+		var ok bool
+		length, ok = addEncodedLength(length, varintLength)
+		if !ok {
+			return 0, false
+		}
+	}
+	return length, true
+}
+
 func (f AuroraFrame) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(f.FrameType)
 	e.WriteVarint(f.FlowID)
@@ -37,11 +56,37 @@ type FrameBlock struct {
 	Frames []AuroraFrame
 }
 
+func (b FrameBlock) EncodedLen() (int, bool) {
+	length, err := wire.VarintLen(uint64(len(b.Frames)))
+	if err != nil {
+		return 0, false
+	}
+	for _, frame := range b.Frames {
+		frameLength, known := frame.EncodedLen()
+		if !known {
+			return 0, false
+		}
+		var ok bool
+		length, ok = addEncodedLength(length, frameLength)
+		if !ok {
+			return 0, false
+		}
+	}
+	return length, true
+}
+
 func (b FrameBlock) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(uint64(len(b.Frames)))
 	for _, f := range b.Frames {
 		f.EncodeTo(e)
 	}
+}
+
+func addEncodedLength(total, next int) (int, bool) {
+	if next < 0 || total > int(^uint(0)>>1)-next {
+		return 0, false
+	}
+	return total + next, true
 }
 
 func DecodeFrameBlock(encoded []byte) (FrameBlock, error) {

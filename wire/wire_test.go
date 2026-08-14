@@ -8,6 +8,61 @@ import (
 	"testing"
 )
 
+type sizedPayload struct {
+	payload []byte
+}
+
+func (p sizedPayload) EncodeTo(e *Encoder) {
+	e.WriteBytes(p.payload)
+}
+
+func TestEncodeWithCapacityAvoidsOutputCopy(t *testing.T) {
+	payload := sizedPayload{payload: make([]byte, 1200)}
+	allocations := testing.AllocsPerRun(100, func() {
+		encoded, err := EncodeWithCapacity(payload, len(payload.payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := len(encoded), len(payload.payload); got != want {
+			t.Fatalf("encoded length = %d, want %d", got, want)
+		}
+	})
+	if allocations > 3 {
+		t.Fatalf("Encode allocations = %.0f, want at most 3", allocations)
+	}
+}
+
+type coincidentalLengthPayload struct {
+	payload []byte
+}
+
+func (p coincidentalLengthPayload) EncodeTo(e *Encoder) {
+	e.WriteBytes(p.payload)
+}
+
+func (coincidentalLengthPayload) EncodedLen() (int, bool) {
+	panic("wire.Encode must not inspect EncodedLen")
+}
+
+func TestEncodeDoesNotInspectCoincidentalLengthMethod(t *testing.T) {
+	encoded, err := Encode(coincidentalLengthPayload{payload: []byte{1, 2, 3}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(encoded, []byte{1, 2, 3}) {
+		t.Fatalf("encoded = %x, want 010203", encoded)
+	}
+}
+
+func TestEncoderSuppressesUint24AfterError(t *testing.T) {
+	e := NewEncoder()
+	e.WriteUint24(0x1000000)
+	e.WriteUint24(0x010203)
+	if got := len(e.buf); got != 0 {
+		t.Fatalf("encoder retained %d bytes after error, want 0", got)
+	}
+}
+
 func TestVarintMinimalEncodings(t *testing.T) {
 	tests := []struct {
 		value uint64

@@ -166,12 +166,9 @@ type ecdsaP256TranscriptSigner struct {
 
 // NewECDSAP256TranscriptSigner constructs a transcript signer from a P-256 private key.
 func NewECDSAP256TranscriptSigner(private *ecdsa.PrivateKey) (TranscriptSigner, error) {
-	if private == nil || private.D == nil || private.PublicKey.Curve != elliptic.P256() {
-		return nil, fmt.Errorf("handshake: P-256 transcript private key is invalid")
-	}
-	rawPrivate, err := private.Bytes()
+	rawPrivate, err := rawECDSAP256TranscriptPrivateKey(private)
 	if err != nil {
-		return nil, fmt.Errorf("handshake: encode P-256 transcript private key: %w", err)
+		return nil, err
 	}
 	defer zeroBindingBytes(rawPrivate)
 	ownedPrivate, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), rawPrivate)
@@ -190,6 +187,23 @@ func NewECDSAP256TranscriptSigner(private *ecdsa.PrivateKey) (TranscriptSigner, 
 			PublicKey:       encoded,
 		},
 	}, nil
+}
+
+func rawECDSAP256TranscriptPrivateKey(private *ecdsa.PrivateKey) (raw []byte, err error) {
+	if private == nil || private.PublicKey.Curve != elliptic.P256() {
+		return nil, fmt.Errorf("handshake: P-256 transcript private key is invalid")
+	}
+	defer func() {
+		if recover() != nil {
+			raw = nil
+			err = fmt.Errorf("handshake: P-256 transcript private key is invalid")
+		}
+	}()
+	raw, err = private.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("handshake: encode P-256 transcript private key: %w", err)
+	}
+	return raw, nil
 }
 
 func (s *ecdsaP256TranscriptSigner) PublicKey() protocol.PublicKeyRecord {

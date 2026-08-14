@@ -163,11 +163,6 @@ func socks5BindResponse(bindHost string, bindPort uint16) ([]byte, error) {
 	return binary.BigEndian.AppendUint16(response, bindPort), nil
 }
 
-func (p *LocalProxy) ensureSOCKS5UDPFlow(flowID uint64, host string, port uint16, now uint64) error {
-	_, _, err := p.ensureSOCKS5UDPFlowFrame(flowID, host, port, now)
-	return err
-}
-
 func (p *LocalProxy) ensureSOCKS5UDPFlowFrame(flowID uint64, host string, port uint16, now uint64) (protocol.AuroraFrame, bool, error) {
 	state, ok := p.FlowState(flowID)
 	if !ok {

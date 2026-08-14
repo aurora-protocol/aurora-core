@@ -90,10 +90,6 @@ func (r IssuerTokenKeyRecord) ValidateWithOptions(now uint64, opts ProofValidati
 	return nil
 }
 
-func (r IssuerTokenKeyRecord) validateStructural(allowLab bool) error {
-	return r.validateStructuralWithOptions(ProofValidationOptions{AllowLabProofs: allowLab})
-}
-
 func (r IssuerTokenKeyRecord) validateStructuralWithOptions(opts ProofValidationOptions) error {
 	if len(r.TokenKeyID) != 32 {
 		return fmt.Errorf("protocol: issuer token key id must be 32 bytes")
@@ -486,10 +482,6 @@ func validateIssuerProofTypeKnown(proofType uint64, opts ProofValidationOptions)
 	default:
 		return fmt.Errorf("protocol: unknown issuer proof type 0x%x", proofType)
 	}
-}
-
-func (s IssuerVerifierServiceRecord) validateStructural(allowLab bool) error {
-	return s.validateStructuralWithOptions(ProofValidationOptions{AllowLabProofs: allowLab})
 }
 
 func (s IssuerVerifierServiceRecord) validateStructuralWithOptions(opts ProofValidationOptions) error {

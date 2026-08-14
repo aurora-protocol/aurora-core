@@ -3,6 +3,8 @@ package handshake
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"testing"
 	"time"
 
@@ -52,6 +54,13 @@ func TestProductionTranscriptSignersMatchEpochPublicKeys(t *testing.T) {
 	}
 	if !publicKeysEqual(classicalSigner.PublicKey(), descriptor.EpochAuthClassicalKey) || !publicKeysEqual(pqSigner.PublicKey(), descriptor.EpochAuthPQKey) {
 		t.Fatal("production signer public key does not match descriptor epoch key")
+	}
+}
+
+func TestECDSAP256TranscriptSignerRejectsMalformedPrivateKey(t *testing.T) {
+	private := &ecdsa.PrivateKey{PublicKey: ecdsa.PublicKey{Curve: elliptic.P256()}}
+	if _, err := NewECDSAP256TranscriptSigner(private); err == nil {
+		t.Fatal("malformed P-256 private key was accepted")
 	}
 }
 

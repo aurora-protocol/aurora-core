@@ -156,6 +156,9 @@ func validateProductionFirstHopOptions(options ProductionFirstHopOptions) error 
 	if isNilFirstHopInterface(options.CoverOrigin) {
 		return fmt.Errorf("server: production first-hop cover origin is required")
 	}
+	if isNilFirstHopInterface(options.ProxySession.DNSResolver) {
+		return fmt.Errorf("server: production first-hop DNS resolver is required")
+	}
 	if options.MaxConcurrentSessions <= 0 || options.MaxConcurrentSessions > maximumProductionFirstHopSessions {
 		return fmt.Errorf("server: production first-hop session limit is invalid")
 	}

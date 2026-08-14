@@ -3,6 +3,7 @@ package auroracrypto
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"testing"
 
 	"github.com/aurora-protocol/aurora-core/registry"
@@ -316,5 +317,37 @@ func TestLabClassicalSuiteUsesChaChaAEAD(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("lab suite did not use ChaCha20-Poly1305")
+	}
+}
+
+func TestSuiteAEADSealToReusesPlaintextStorage(t *testing.T) {
+	for _, suite := range []uint64{
+		registry.SuiteHybrid768AESGCM,
+		registry.SuiteHybrid768ChaCha20,
+	} {
+		t.Run(fmt.Sprintf("suite-%x", suite), func(t *testing.T) {
+			aead, err := NewSuiteAEAD(suite, repeated(0x51, 32))
+			if err != nil {
+				t.Fatal(err)
+			}
+			nonce := repeated(0x52, 12)
+			aad := []byte("aad")
+			plaintext := make([]byte, len("in-place plaintext"), len("in-place plaintext")+16)
+			copy(plaintext, "in-place plaintext")
+			want, err := aead.Seal(nonce, aad, plaintext)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := aead.SealTo(plaintext[:0], nonce, aad, plaintext)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if &got[0] != &plaintext[0] {
+				t.Fatal("SealTo did not reuse plaintext storage")
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("sealed bytes = %x, want %x", got, want)
+			}
+		})
 	}
 }

@@ -471,8 +471,8 @@ func TestProtectorSealAllocationBudget(t *testing.T) {
 		destroyBytes(packet.Ciphertext)
 		destroyBytes(packet.AuthTag)
 	})
-	if allocations > 12 {
-		t.Fatalf("Seal allocations = %.0f, want at most 12", allocations)
+	if allocations > 6 {
+		t.Fatalf("Seal allocations = %.0f, want at most 6", allocations)
 	}
 }
 

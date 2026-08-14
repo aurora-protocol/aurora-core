@@ -12,13 +12,16 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -110,6 +113,37 @@ func TestRunIssuerStartsAndStopsProductionService(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "production issuer started") {
 		t.Fatalf("issuer startup output = %s", stdout.String())
+	}
+}
+
+func TestParseProductionIssuerConfigLoadsOwnerOnlyArgumentsFile(t *testing.T) {
+	config := newProductionIssuerCommandFixture(t)
+	encoded, err := json.Marshal(struct {
+		Arguments []string `json:"arguments"`
+	}{Arguments: productionIssuerCommandArguments(config)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "issuer.json")
+	writeProductionCommandFile(t, path, encoded, 0o600)
+
+	parsed, err := parseProductionIssuerConfig([]string{"--config", path}, io.Discard)
+	if err != nil {
+		t.Fatalf("parse issuer configuration file: %v", err)
+	}
+	if !reflect.DeepEqual(parsed, config) {
+		t.Fatalf("parsed issuer configuration = %+v, want %+v", parsed, config)
+	}
+}
+
+func TestParseProductionIssuerConfigHelpDescribesArgumentsFile(t *testing.T) {
+	var stderr bytes.Buffer
+	_, err := parseProductionIssuerConfig([]string{"--help"}, &stderr)
+	if err == nil {
+		t.Fatal("issuer help did not stop parsing")
+	}
+	if !strings.Contains(stderr.String(), "--config") {
+		t.Fatalf("issuer help does not describe configuration file mode: %s", stderr.String())
 	}
 }
 

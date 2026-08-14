@@ -1,0 +1,25 @@
+{
+  "arguments": [
+    "--listen", "0.0.0.0:9443",
+    "--authority", "cover.example:443",
+    "--path", "/assets/upload/42",
+    "--tls-cert", "/etc/aurora/server-cert.pem",
+    "--tls-key", "/etc/aurora/server-key.pem",
+    "--cover-origin-url", "https://cover.example",
+    "--relay-descriptor", "/etc/aurora/relay-descriptor.bin",
+    "--trusted-descriptor-hash", "/etc/aurora/relay-descriptor.hash",
+    "--cover-template", "/etc/aurora/cover-template.bin",
+    "--template-authority-key", "/etc/aurora/template-authority-key.bin",
+    "--request-class", "7",
+    "--suite", "2",
+    "--classical-signer-key", "/etc/aurora/epoch-classical.pem",
+    "--pq-signer-key", "/etc/aurora/epoch-pq.bin",
+    "--access-hints", "/etc/aurora/access-hints.bin",
+    "--token-verification-key", "/etc/aurora/token-verification-key.der",
+    "--hint-spent-cache", "/var/lib/aurora-relay/hint-spent.log",
+    "--token-spent-cache", "/var/lib/aurora-relay/token-spent.log",
+    "--bootstrap-cache", "/var/lib/aurora-relay/bootstrap-replay.log",
+    "--max-sessions", "256",
+    "--dns-upstream", "1.1.1.1:53"
+  ]
+}

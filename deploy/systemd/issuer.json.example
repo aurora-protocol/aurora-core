@@ -1,0 +1,13 @@
+{
+  "arguments": [
+    "--listen", "0.0.0.0:9444",
+    "--tls-cert", "/etc/aurora/issuer-cert.pem",
+    "--tls-key", "/etc/aurora/issuer-key.pem",
+    "--issuer-metadata", "/etc/aurora/issuer-metadata.bin",
+    "--metadata-authority-key", "/etc/aurora/issuer-authority-key.bin",
+    "--blind-rsa-key", "/etc/aurora/issuer-blind-rsa.pem",
+    "--spent-token-cache", "/var/lib/aurora-issuer/spent-token.log",
+    "--relay-bucket-id", "00000000000000000000000000000000",
+    "--origin-info-policy", "1"
+  ]
+}

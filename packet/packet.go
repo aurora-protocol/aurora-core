@@ -98,19 +98,20 @@ func (p *Protector) Seal(block protocol.FrameBlock) (AuroraPacket, error) {
 	if err != nil {
 		return AuroraPacket{}, err
 	}
-	defer destroyBytes(sealed)
 	if len(sealed) < 16 {
+		destroyBytes(sealed)
 		return AuroraPacket{}, fmt.Errorf("packet: sealed payload too short")
 	}
 	p.NextPacket++
+	ciphertextLength := len(sealed) - 16
 	return AuroraPacket{
 		RouteInstanceID: p.RouteInstanceID,
 		HopLayer:        p.HopLayer,
 		Direction:       p.Direction,
 		KeyPhase:        p.KeyPhase,
 		PacketNumber:    packetNumber,
-		Ciphertext:      append([]byte(nil), sealed[:len(sealed)-16]...),
-		AuthTag:         append([]byte(nil), sealed[len(sealed)-16:]...),
+		Ciphertext:      sealed[:ciphertextLength:ciphertextLength],
+		AuthTag:         sealed[ciphertextLength:],
 	}, nil
 }
 

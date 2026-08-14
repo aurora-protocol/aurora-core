@@ -445,6 +445,34 @@ func zeroKeyMaterialForTest(material *KeyMaterial) {
 	}
 }
 
+func TestProtectorSealAllocationBudget(t *testing.T) {
+	frame, err := protocol.NewStreamDataFrame(7, bytes.Repeat([]byte{0x5a}, 1200), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protector := &Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 0x42,
+		HopLayer:        1,
+		Direction:       0,
+		Key:             bytesOf(0x33, 32),
+		StaticIV:        bytesOf(0x44, 12),
+	}
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}
+	allocations := testing.AllocsPerRun(100, func() {
+		protector.NextPacket = 0
+		packet, sealErr := protector.Seal(block)
+		if sealErr != nil {
+			panic(sealErr)
+		}
+		destroyBytes(packet.Ciphertext)
+		destroyBytes(packet.AuthTag)
+	})
+	if allocations > 17 {
+		t.Fatalf("Seal allocations = %.0f, want at most 17", allocations)
+	}
+}
+
 func TestProtectorUsesChaChaSuiteAEAD(t *testing.T) {
 	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}
 	p := &Protector{

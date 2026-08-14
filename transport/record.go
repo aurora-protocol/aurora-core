@@ -60,6 +60,7 @@ func (r *RecordReader) Read() ([]byte, error) {
 	}
 	body := make([]byte, int(length))
 	if _, err := io.ReadFull(r.r, body); err != nil {
+		zeroRecordBytes(body)
 		return nil, err
 	}
 	return body, nil
@@ -131,4 +132,10 @@ func writeRecordBytes(w io.Writer, p []byte) error {
 		}
 	}
 	return nil
+}
+
+func zeroRecordBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
 }

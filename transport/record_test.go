@@ -34,6 +34,13 @@ type prefixOnlyReader struct {
 	reads  int
 }
 
+type partialRecordReader struct {
+	prefix   []byte
+	body     []byte
+	reads    int
+	retained []byte
+}
+
 type typedNilReader struct{}
 
 func (*typedNilReader) Read([]byte) (int, error) {
@@ -52,6 +59,15 @@ func (r *prefixOnlyReader) Read(p []byte) (int, error) {
 		return 0, errors.New("unexpected body read")
 	}
 	return copy(p, r.prefix), nil
+}
+
+func (r *partialRecordReader) Read(p []byte) (int, error) {
+	r.reads++
+	if r.reads == 1 {
+		return copy(p, r.prefix), nil
+	}
+	r.retained = p
+	return copy(p, r.body), io.ErrUnexpectedEOF
 }
 
 func TestRecordWriterUsesThreeByteBigEndianPrefix(t *testing.T) {
@@ -127,6 +143,28 @@ func TestRecordReaderRejectsInvalidLengthsBeforeBodyRead(t *testing.T) {
 				t.Fatalf("reader was called %d times, want only the prefix read", input.reads)
 			}
 		})
+	}
+}
+
+func TestRecordReaderZeroesPartiallyReadBodyOnFailure(t *testing.T) {
+	input := &partialRecordReader{
+		prefix: []byte{0, 0, 8},
+		body:   []byte("secr"),
+	}
+	reader, err := NewRecordReader(input, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Read(); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("Read error = %v, want io.ErrUnexpectedEOF", err)
+	}
+	if len(input.retained) != 8 {
+		t.Fatalf("retained body length = %d, want 8", len(input.retained))
+	}
+	for _, value := range input.retained {
+		if value != 0 {
+			t.Fatal("RecordReader retained partially read body bytes")
+		}
 	}
 }
 

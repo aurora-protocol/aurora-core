@@ -166,6 +166,7 @@ func parseSocketDNSQuestion(message []byte) (socketDNSQuestion, error) {
 		}
 		labels = append(labels, strings.ToLower(string(label)))
 		offset += labelLength
+		nameBytes += labelLength
 	}
 	if len(labels) == 0 || offset+4 > len(message) {
 		return socketDNSQuestion{}, ErrExitEventInvalid
@@ -175,6 +176,7 @@ func parseSocketDNSQuestion(message []byte) (socketDNSQuestion, error) {
 		return socketDNSQuestion{}, ErrExitEventInvalid
 	}
 	offset += 4
+	questionWire := append([]byte(nil), message[socketDNSHeaderBytes:offset]...)
 	for additional := 0; additional < int(binary.BigEndian.Uint16(message[10:12])); additional++ {
 		if err := skipSocketDNSRecord(message, &offset); err != nil {
 			return socketDNSQuestion{}, ErrExitEventInvalid
@@ -188,7 +190,7 @@ func parseSocketDNSQuestion(message []byte) (socketDNSQuestion, error) {
 		recursion:     flags&socketDNSFlagRecursionDesired != 0,
 		domain:        strings.Join(labels, "."),
 		queryType:     queryType,
-		wire:          append([]byte(nil), message[socketDNSHeaderBytes:offset]...),
+		wire:          questionWire,
 	}, nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"runtime"
 	"testing"
 	"time"
 
@@ -70,6 +71,23 @@ func TestNativeSessionFFIExchangesDNSThroughProductionFirstHop(t *testing.T) {
 	dns := response[28:]
 	if len(dns) < len(query)+16 || !bytes.Equal(dns[:2], query[:2]) || dns[2]&0x80 == 0 || binary.BigEndian.Uint16(dns[6:8]) != 1 || !bytes.Equal(dns[len(dns)-4:], []byte{127, 0, 0, 1}) {
 		t.Fatalf("native DNS response = %x", dns)
+	}
+}
+
+func TestNativeSessionFFIRejectsUnconfiguredProvisioningTrust(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skipf("native archive process test is unsupported on %s", runtime.GOOS)
+	}
+	caller := newNativeIntegrationCABICaller(t)
+	fixture := newNativeSessionFixture(t, time.Now())
+	defer fixture.Close(t)
+	encoded, err := client.EncodeNativeProvisioning(fixture.Provisioning(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeBytes(encoded)
+	if status, payload := nativeIntegrationCall(t, caller, opBeginNativeSessionJSON, encoded, 0); status != statusError || len(payload) != 0 {
+		t.Fatalf("unconfigured C ABI native session = status %d payload %x", status, payload)
 	}
 }
 

@@ -49,6 +49,7 @@ type proxyConfig struct {
 	provisioningPath       string
 	provisioningWalletPath string
 	walletStatePath        string
+	signedSeedTrustPath    string
 	httpListenAddress      string
 	socksListenAddress     string
 	allowPublicListener    bool
@@ -176,6 +177,7 @@ func parseProxyConfig(args []string, stderr io.Writer) (proxyConfig, error) {
 	flags.StringVar(&config.provisioningPath, "provisioning", "", "owner-only one-time native provisioning file")
 	flags.StringVar(&config.provisioningWalletPath, "provisioning-wallet", "", "owner-only native provisioning wallet file")
 	flags.StringVar(&config.walletStatePath, "wallet-state", "", "owner-only local wallet reservation state file")
+	flags.StringVar(&config.signedSeedTrustPath, "signed-seed-roots", "", "owner-only signed-seed root configuration")
 	flags.StringVar(&config.httpListenAddress, "http-listen", "127.0.0.1:8080", "local HTTP CONNECT listen address")
 	flags.StringVar(&config.socksListenAddress, "socks-listen", "127.0.0.1:1080", "local SOCKS5 listen address")
 	flags.BoolVar(&config.allowPublicListener, "allow-public-listeners", false, "allow non-loopback local proxy listeners")
@@ -189,7 +191,7 @@ func parseProxyConfig(args []string, stderr io.Writer) (proxyConfig, error) {
 	if flags.NArg() != 0 {
 		return proxyConfig{}, fmt.Errorf("client: unexpected proxy command arguments")
 	}
-	if err := validateProvisioningSource(config.provisioningPath, config.provisioningWalletPath, config.walletStatePath); err != nil {
+	if err := validateProvisioningSource(config.provisioningPath, config.provisioningWalletPath, config.walletStatePath, config.signedSeedTrustPath); err != nil {
 		return proxyConfig{}, err
 	}
 	if config.issuerTimeout <= 0 || config.issuerTimeout > 5*time.Minute {
@@ -215,11 +217,12 @@ func parseProxyConfig(args []string, stderr io.Writer) (proxyConfig, error) {
 	return config, nil
 }
 
-func validateProvisioningSource(provisioningPath, walletPath, statePath string) error {
+func validateProvisioningSource(provisioningPath, walletPath, statePath, trustPath string) error {
 	single := validProvisioningPath(provisioningPath)
 	wallet := validProvisioningPath(walletPath)
 	state := validProvisioningPath(statePath)
-	if (provisioningPath != "" && !single) || (walletPath != "" && !wallet) || (statePath != "" && !state) {
+	trusted := validProvisioningPath(trustPath)
+	if (provisioningPath != "" && !single) || (walletPath != "" && !wallet) || (statePath != "" && !state) || (trustPath != "" && !trusted) {
 		return fmt.Errorf("client: provisioning source path is invalid")
 	}
 	if single == wallet {
@@ -227,6 +230,9 @@ func validateProvisioningSource(provisioningPath, walletPath, statePath string) 
 	}
 	if (single || wallet) != state {
 		return fmt.Errorf("client: provisioning requires a wallet state file")
+	}
+	if (single || wallet) != trusted {
+		return fmt.Errorf("client: provisioning requires a signed-seed root configuration")
 	}
 	return nil
 }
@@ -262,20 +268,24 @@ func runProxy(ctx context.Context, config proxyConfig, stdout io.Writer) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if config.provisioningWalletPath != "" {
-		return runProxyWithProvisioningWallet(ctx, config, stdout)
+	signedSeedTrust, err := loadNativeProvisioningTrust(config.signedSeedTrustPath)
+	if err != nil {
+		return err
 	}
-	return runProxyAttempt(ctx, config, stdout)
+	if config.provisioningWalletPath != "" {
+		return runProxyWithProvisioningWallet(ctx, config, signedSeedTrust, stdout)
+	}
+	return runProxyAttempt(ctx, config, signedSeedTrust, stdout)
 }
 
-func runProxyAttempt(ctx context.Context, config proxyConfig, stdout io.Writer) error {
+func runProxyAttempt(ctx context.Context, config proxyConfig, signedSeedTrust client.NativeProvisioningTrust, stdout io.Writer) error {
 	if ctx == nil {
 		return fmt.Errorf("client: proxy context is required")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	reservation, err := reserveSingleNativeProvisioning(config.provisioningPath, config.walletStatePath, time.Now().UTC())
+	reservation, err := reserveSingleNativeProvisioning(config.provisioningPath, config.walletStatePath, signedSeedTrust, time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -283,13 +293,13 @@ func runProxyAttempt(ctx context.Context, config proxyConfig, stdout io.Writer) 
 	return runProxyWithProvisioning(ctx, config, reservation.Provisioning, stdout)
 }
 
-func runProxyWithProvisioningWallet(ctx context.Context, config proxyConfig, stdout io.Writer) error {
+func runProxyWithProvisioningWallet(ctx context.Context, config proxyConfig, signedSeedTrust client.NativeProvisioningTrust, stdout io.Writer) error {
 	encoded, err := readRestrictedProvisioningWalletFile(config.provisioningWalletPath)
 	if err != nil {
 		return err
 	}
 	sourceDigest := provisioningWalletSourceDigest(encoded)
-	wallet, err := client.ParseNativeProvisioningWallet(encoded, time.Now().UTC())
+	wallet, err := client.ParseNativeProvisioningWalletWithTrust(encoded, signedSeedTrust, time.Now().UTC())
 	zeroProxyBytes(encoded)
 	if err != nil {
 		return fmt.Errorf("client: parse provisioning wallet: %w", err)
@@ -352,20 +362,24 @@ func runTUN(ctx context.Context, config tunConfig, stdout io.Writer) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if config.provisioningWalletPath != "" {
-		return runTUNWithProvisioningWallet(ctx, config, stdout)
+	signedSeedTrust, err := loadNativeProvisioningTrust(config.signedSeedTrustPath)
+	if err != nil {
+		return err
 	}
-	return runTUNAttempt(ctx, config, stdout)
+	if config.provisioningWalletPath != "" {
+		return runTUNWithProvisioningWallet(ctx, config, signedSeedTrust, stdout)
+	}
+	return runTUNAttempt(ctx, config, signedSeedTrust, stdout)
 }
 
-func runTUNAttempt(ctx context.Context, config tunConfig, stdout io.Writer) error {
+func runTUNAttempt(ctx context.Context, config tunConfig, signedSeedTrust client.NativeProvisioningTrust, stdout io.Writer) error {
 	if ctx == nil {
 		return fmt.Errorf("client: tunnel context is required")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	reservation, err := reserveSingleNativeProvisioning(config.provisioningPath, config.walletStatePath, time.Now().UTC())
+	reservation, err := reserveSingleNativeProvisioning(config.provisioningPath, config.walletStatePath, signedSeedTrust, time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -373,13 +387,13 @@ func runTUNAttempt(ctx context.Context, config tunConfig, stdout io.Writer) erro
 	return runTUNWithProvisioning(ctx, config, reservation.Provisioning, stdout)
 }
 
-func runTUNWithProvisioningWallet(ctx context.Context, config tunConfig, stdout io.Writer) error {
+func runTUNWithProvisioningWallet(ctx context.Context, config tunConfig, signedSeedTrust client.NativeProvisioningTrust, stdout io.Writer) error {
 	encoded, err := readRestrictedProvisioningWalletFile(config.provisioningWalletPath)
 	if err != nil {
 		return err
 	}
 	sourceDigest := provisioningWalletSourceDigest(encoded)
-	wallet, err := client.ParseNativeProvisioningWallet(encoded, time.Now().UTC())
+	wallet, err := client.ParseNativeProvisioningWalletWithTrust(encoded, signedSeedTrust, time.Now().UTC())
 	zeroProxyBytes(encoded)
 	if err != nil {
 		return fmt.Errorf("client: parse provisioning wallet: %w", err)
@@ -763,13 +777,26 @@ func readRestrictedProvisioningWalletFile(path string) ([]byte, error) {
 	return readRestrictedOwnerFile(path, client.MaximumNativeProvisioningWalletBytes, "provisioning wallet file")
 }
 
-func reserveSingleNativeProvisioning(provisioningPath, statePath string, now time.Time) (client.NativeProvisioningReservation, error) {
+func loadNativeProvisioningTrust(path string) (client.NativeProvisioningTrust, error) {
+	encoded, err := readRestrictedOwnerFile(path, client.MaximumNativeProvisioningTrustBytes, "signed-seed root configuration")
+	if err != nil {
+		return client.NativeProvisioningTrust{}, err
+	}
+	trusted, err := client.ParseNativeProvisioningTrust(encoded)
+	zeroProxyBytes(encoded)
+	if err != nil {
+		return client.NativeProvisioningTrust{}, fmt.Errorf("client: parse signed-seed root configuration: %w", err)
+	}
+	return trusted, nil
+}
+
+func reserveSingleNativeProvisioning(provisioningPath, statePath string, signedSeedTrust client.NativeProvisioningTrust, now time.Time) (client.NativeProvisioningReservation, error) {
 	encoded, err := readRestrictedProvisioningFile(provisioningPath)
 	if err != nil {
 		return client.NativeProvisioningReservation{}, err
 	}
 	sourceDigest := provisioningWalletSourceDigest(encoded)
-	provisioning, err := client.ParseNativeProvisioning(encoded, now)
+	provisioning, err := client.ParseNativeProvisioningWithTrust(encoded, signedSeedTrust, now)
 	zeroProxyBytes(encoded)
 	if err != nil {
 		return client.NativeProvisioningReservation{}, fmt.Errorf("client: parse provisioning: %w", err)
@@ -779,7 +806,7 @@ func reserveSingleNativeProvisioning(provisioningPath, statePath string, now tim
 	if err != nil {
 		return client.NativeProvisioningReservation{}, fmt.Errorf("client: encode single provisioning wallet: %w", err)
 	}
-	wallet, err := client.ParseNativeProvisioningWallet(walletEncoded, now)
+	wallet, err := client.ParseNativeProvisioningWalletWithTrust(walletEncoded, signedSeedTrust, now)
 	zeroProxyBytes(walletEncoded)
 	if err != nil {
 		return client.NativeProvisioningReservation{}, fmt.Errorf("client: load single provisioning wallet: %w", err)

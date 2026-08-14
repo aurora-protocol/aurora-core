@@ -26,11 +26,10 @@ import (
 )
 
 const (
-	nativeProvisioningFormat                  uint64 = 4
+	nativeProvisioningFormat                  uint64 = 5
 	maximumNativeProvisioningBytes                   = 1 << 20
 	maximumNativeProvisioningURLBytes                = 2048
 	maximumNativeProvisioningObjectBytes             = 256 << 10
-	maximumNativeProvisioningSignedSeedRoots         = 16
 	maximumNativeProvisioningPolicyBytes             = 32 << 10
 	maximumNativeProvisioningHintsBytes              = 32 << 10
 	maximumNativeProvisioningHeaderBytes             = 64 << 10
@@ -49,7 +48,6 @@ type NativeProvisioning struct {
 	IssuerCarrierPath     string
 	IssuerMetadata        []byte
 	SignedSeed            []byte
-	SignedSeedRoots       []protocol.AuthorityKeyRecord
 	Descriptor            []byte
 	TrustedDescriptorHash []byte
 	Template              []byte
@@ -63,6 +61,7 @@ type NativeProvisioning struct {
 	RelayRequestHeaders   []byte
 	RelayResponseHeaders  []byte
 	RelayTrustRoots       []byte
+	signedSeedTrust       NativeProvisioningTrust
 }
 
 type nativeProvisioningObjects struct {
@@ -90,10 +89,6 @@ func EncodeNativeProvisioning(provisioning NativeProvisioning) ([]byte, error) {
 	encoder.WriteOpaque16([]byte(provisioning.IssuerCarrierPath))
 	encoder.WriteOpaque24(provisioning.IssuerMetadata)
 	encoder.WriteOpaque24(provisioning.SignedSeed)
-	encoder.WriteVarint(uint64(len(provisioning.SignedSeedRoots)))
-	for _, key := range provisioning.SignedSeedRoots {
-		key.EncodeTo(encoder)
-	}
 	encoder.WriteOpaque24(provisioning.Descriptor)
 	encoder.WritePreHash(provisioning.TrustedDescriptorHash)
 	encoder.WriteOpaque24(provisioning.Template)
@@ -119,10 +114,20 @@ func EncodeNativeProvisioning(provisioning NativeProvisioning) ([]byte, error) {
 
 // ParseNativeProvisioning validates a complete native provisioning bundle before use.
 func ParseNativeProvisioning(encoded []byte, now time.Time) (NativeProvisioning, error) {
+	return NativeProvisioning{}, ErrNativeProvisioningTrustRequired
+}
+
+// ParseNativeProvisioningWithTrust validates a complete native provisioning
+// bundle using roots supplied independently from the bundle itself.
+func ParseNativeProvisioningWithTrust(encoded []byte, signedSeedTrust NativeProvisioningTrust, now time.Time) (NativeProvisioning, error) {
+	if err := signedSeedTrust.validate(); err != nil {
+		return NativeProvisioning{}, fmt.Errorf("client: native provisioning trust: %w", err)
+	}
 	provisioning, err := parseNativeProvisioningContainer(encoded)
 	if err != nil {
 		return NativeProvisioning{}, err
 	}
+	provisioning.signedSeedTrust = signedSeedTrust
 	if err := provisioning.validateAt(now); err != nil {
 		zeroNativeProvisioning(&provisioning)
 		return NativeProvisioning{}, err
@@ -144,7 +149,6 @@ func parseNativeProvisioningContainer(encoded []byte) (NativeProvisioning, error
 		IssuerCarrierPath:     string(readNativeProvisioningOpaque16(reader, maximumNativeProvisioningURLBytes)),
 		IssuerMetadata:        readNativeProvisioningOpaque24(reader, maximumNativeProvisioningObjectBytes),
 		SignedSeed:            readNativeProvisioningOpaque24(reader, maximumNativeProvisioningObjectBytes),
-		SignedSeedRoots:       readNativeProvisioningSignedSeedRoots(reader),
 		Descriptor:            readNativeProvisioningOpaque24(reader, maximumNativeProvisioningObjectBytes),
 		TrustedDescriptorHash: reader.ReadPreHash(),
 		Template:              readNativeProvisioningOpaque24(reader, maximumNativeProvisioningObjectBytes),
@@ -251,6 +255,10 @@ func (p NativeProvisioning) validateAt(now time.Time) error {
 }
 
 func (p NativeProvisioning) validatedObjectsAndDeployment(now time.Time) (nativeProvisioningObjects, trust.VerifiedRelayDeployment, error) {
+	return p.validatedObjectsAndDeploymentAt(now, true)
+}
+
+func (p NativeProvisioning) validatedObjectsAndDeploymentAt(now time.Time, requireUsableAccessHint bool) (nativeProvisioningObjects, trust.VerifiedRelayDeployment, error) {
 	if err := p.validateContainer(); err != nil {
 		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, err
 	}
@@ -261,7 +269,7 @@ func (p NativeProvisioning) validatedObjectsAndDeployment(now time.Time) (native
 	if err != nil {
 		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, err
 	}
-	if objects.accessHint.ExpiryUnix == 0 || uint64(now.Unix()) >= objects.accessHint.ExpiryUnix {
+	if requireUsableAccessHint && (objects.accessHint.ExpiryUnix == 0 || uint64(now.Unix()) >= objects.accessHint.ExpiryUnix) {
 		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, fmt.Errorf("client: native provisioning access hint is expired")
 	}
 	seed, authorityKeys, err := p.verifiedSignedSeedAt(now)
@@ -320,9 +328,6 @@ func (p NativeProvisioning) validateContainer() error {
 	}
 	if len(p.SignedSeed) == 0 || len(p.SignedSeed) > maximumNativeProvisioningObjectBytes {
 		return fmt.Errorf("client: native provisioning signed seed size is invalid")
-	}
-	if len(p.SignedSeedRoots) == 0 || len(p.SignedSeedRoots) > maximumNativeProvisioningSignedSeedRoots {
-		return fmt.Errorf("client: native provisioning signed seed root count is invalid")
 	}
 	for _, field := range []struct {
 		label   string
@@ -427,7 +432,7 @@ func (p NativeProvisioning) verifiedIssuerMetadataAt(now time.Time) (protocol.Is
 	if err := validateNativeCarrierPath(p.IssuerCarrierPath); err != nil {
 		return protocol.IssuerMetadata{}, fmt.Errorf("client: invalid issuer carrier path: %w", err)
 	}
-	if len(p.IssuerMetadata) == 0 || len(p.IssuerMetadata) > maximumNativeProvisioningObjectBytes || len(p.SignedSeed) == 0 || len(p.SignedSeed) > maximumNativeProvisioningObjectBytes || len(p.SignedSeedRoots) == 0 || len(p.SignedSeedRoots) > maximumNativeProvisioningSignedSeedRoots {
+	if len(p.IssuerMetadata) == 0 || len(p.IssuerMetadata) > maximumNativeProvisioningObjectBytes || len(p.SignedSeed) == 0 || len(p.SignedSeed) > maximumNativeProvisioningObjectBytes {
 		return protocol.IssuerMetadata{}, fmt.Errorf("client: native issuer metadata inputs are invalid")
 	}
 	metadata, err := decodeNativeIssuerMetadata(p.IssuerMetadata)
@@ -451,16 +456,16 @@ func (p NativeProvisioning) verifiedSignedSeedAt(now time.Time) (protocol.Signed
 	if now.IsZero() || now.Unix() < 0 {
 		return protocol.SignedSeedRecord{}, nil, fmt.Errorf("client: native signed seed requires a valid time")
 	}
-	if len(p.SignedSeed) == 0 || len(p.SignedSeed) > maximumNativeProvisioningObjectBytes || len(p.SignedSeedRoots) == 0 || len(p.SignedSeedRoots) > maximumNativeProvisioningSignedSeedRoots {
+	if len(p.SignedSeed) == 0 || len(p.SignedSeed) > maximumNativeProvisioningObjectBytes {
 		return protocol.SignedSeedRecord{}, nil, fmt.Errorf("client: native signed seed inputs are invalid")
 	}
 	seed, err := decodeNativeSignedSeed(p.SignedSeed)
 	if err != nil {
 		return protocol.SignedSeedRecord{}, nil, err
 	}
-	store, err := trust.NewSignedSeedTrustStore(p.SignedSeedRoots)
+	store, err := p.signedSeedTrust.newStore()
 	if err != nil {
-		return protocol.SignedSeedRecord{}, nil, fmt.Errorf("client: native signed seed roots: %w", err)
+		return protocol.SignedSeedRecord{}, nil, fmt.Errorf("client: native signed seed trust: %w", err)
 	}
 	if err := store.Accept(seed, uint64(now.Unix())); err != nil {
 		return protocol.SignedSeedRecord{}, nil, fmt.Errorf("client: native signed seed verification: %w", err)
@@ -543,19 +548,6 @@ func decodeNativeSignedSeed(encoded []byte) (protocol.SignedSeedRecord, error) {
 		return protocol.SignedSeedRecord{}, fmt.Errorf("client: malformed native signed seed")
 	}
 	return seed, nil
-}
-
-func readNativeProvisioningSignedSeedRoots(reader *wire.Reader) []protocol.AuthorityKeyRecord {
-	count := reader.ReadVectorCount("native signed seed root")
-	if reader.Err() != nil || count > maximumNativeProvisioningSignedSeedRoots {
-		reader.SetErr(fmt.Errorf("client: native signed seed root count is invalid"))
-		return nil
-	}
-	keys := make([]protocol.AuthorityKeyRecord, 0, count)
-	for index := uint64(0); index < count; index++ {
-		keys = append(keys, protocol.DecodeAuthorityKeyRecord(reader))
-	}
-	return keys
 }
 
 func decodeNativeRelayDescriptor(encoded []byte) (protocol.RelayDescriptor, error) {

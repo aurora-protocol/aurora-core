@@ -62,6 +62,7 @@ const (
 	opIngressLocalPacketJSON           = 18
 	opReserveNativeProvisioning        = 19
 	opValidateNativeProvisioningSource = 20
+	opConfigureNativeProvisioningTrust = 21
 )
 
 // Result status bytes.
@@ -241,7 +242,11 @@ func dispatch(op int, in []byte, arg uint64) (byte, []byte) {
 		if arg != 0 {
 			return statusError, nil
 		}
-		provisioning, err := client.ParseNativeProvisioning(in, time.Now())
+		trustConfig, err := nativeProvisioningTrust.load()
+		if err != nil {
+			return statusError, nil
+		}
+		provisioning, err := client.ParseNativeProvisioningWithTrust(in, trustConfig, time.Now())
 		if err != nil {
 			return statusError, nil
 		}
@@ -341,7 +346,11 @@ func dispatch(op int, in []byte, arg uint64) (byte, []byte) {
 		if arg != 0 {
 			return statusError, nil
 		}
-		provisioning, err := client.ParseNativeProvisioning(in, time.Now())
+		trustConfig, err := nativeProvisioningTrust.load()
+		if err != nil {
+			return statusError, nil
+		}
+		provisioning, err := client.ParseNativeProvisioningWithTrust(in, trustConfig, time.Now())
 		if err != nil {
 			return statusError, nil
 		}
@@ -397,7 +406,13 @@ func dispatch(op int, in []byte, arg uint64) (byte, []byte) {
 		if arg == 0 || arg > uint64(^uint64(0)>>1) {
 			return statusError, nil
 		}
-		if err := client.ValidateNativeProvisioningSource(in, time.Unix(int64(arg), 0).UTC()); err != nil {
+		trustConfig, err := nativeProvisioningTrust.load()
+		if err != nil || client.ValidateNativeProvisioningSourceWithTrust(in, trustConfig, time.Unix(int64(arg), 0).UTC()) != nil {
+			return statusError, nil
+		}
+		return statusOK, nil
+	case opConfigureNativeProvisioningTrust:
+		if arg != 0 || nativeProvisioningTrust.configure(in) != nil {
 			return statusError, nil
 		}
 		return statusOK, nil
@@ -418,7 +433,11 @@ func reserveNativeProvisioning(encoded []byte, now time.Time) (client.NativeProv
 	if err != nil {
 		return client.NativeProvisioningReservation{}, err
 	}
-	return client.ReserveNativeProvisioning(source, func(candidate []byte) bool {
+	trustConfig, err := nativeProvisioningTrust.load()
+	if err != nil {
+		return client.NativeProvisioningReservation{}, err
+	}
+	return client.ReserveNativeProvisioningWithTrust(source, trustConfig, func(candidate []byte) bool {
 		for _, spentHintKey := range spentHintKeys {
 			if subtle.ConstantTimeCompare(candidate, spentHintKey) == 1 {
 				return true

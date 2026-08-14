@@ -31,13 +31,13 @@ func TestParseNativeProvisioningRejectsMalformedAndTrailingBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parsed, err := ParseNativeProvisioning(encoded, now)
+	parsed, err := ParseNativeProvisioningWithTrust(encoded, input.signedSeedTrust, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if parsed.RelayURL != input.RelayURL || parsed.IssuerURL != input.IssuerURL || parsed.IssuerCarrierPath != input.IssuerCarrierPath ||
 		parsed.RequestClassID != input.RequestClassID || parsed.Suite != input.Suite || parsed.RelayExpectedStatus != input.RelayExpectedStatus ||
-		!bytes.Equal(parsed.IssuerMetadata, input.IssuerMetadata) || !bytes.Equal(parsed.SignedSeed, input.SignedSeed) || len(parsed.SignedSeedRoots) != len(input.SignedSeedRoots) ||
+		!bytes.Equal(parsed.IssuerMetadata, input.IssuerMetadata) || !bytes.Equal(parsed.SignedSeed, input.SignedSeed) ||
 		!bytes.Equal(parsed.Descriptor, input.Descriptor) || !bytes.Equal(parsed.Template, input.Template) ||
 		!bytes.Equal(parsed.AccessHint, input.AccessHint) || !bytes.Equal(parsed.PolicyOffer, input.PolicyOffer) ||
 		!bytes.Equal(parsed.TransportHints, input.TransportHints) || !bytes.Equal(parsed.RelayRequestHeaders, input.RelayRequestHeaders) ||
@@ -55,9 +55,54 @@ func TestParseNativeProvisioningRejectsMalformedAndTrailingBytes(t *testing.T) {
 		append(append([]byte(nil), encoded...), 0),
 		make([]byte, maximumNativeProvisioningBytes+1),
 	} {
-		if _, err := ParseNativeProvisioning(malformed, now); err == nil {
+		if _, err := ParseNativeProvisioningWithTrust(malformed, input.signedSeedTrust, now); err == nil {
 			t.Fatalf("malformed native provisioning accepted: %d bytes", len(malformed))
 		}
+	}
+}
+
+func TestParseNativeProvisioningRequiresIndependentTrust(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	input := validNativeProvisioning(t, now)
+	encoded, err := EncodeNativeProvisioning(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseNativeProvisioning(encoded, now); err == nil {
+		t.Fatal("native provisioning was accepted without an independently configured trust root")
+	}
+}
+
+func TestParseNativeProvisioningWithTrustRejectsSubstitutedSignedSeedRoot(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	input := validNativeProvisioning(t, now)
+	seed, err := decodeNativeSignedSeed(input.SignedSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := decodeNativeIssuerMetadata(input.IssuerMetadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementSeed, replacementTrust := nativeProvisioningSignedSeedAndTrust(
+		t,
+		now,
+		metadata,
+		seed.BootstrapAuthorityKeys,
+		seed.TokenIssuerHint,
+		nil,
+	)
+	input.SignedSeed = replacementSeed
+	encoded, err := EncodeNativeProvisioning(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeProvisioningBytes(encoded)
+	if _, err := ParseNativeProvisioningWithTrust(encoded, input.signedSeedTrust, now); err == nil {
+		t.Fatal("native provisioning accepted a signed seed authorized only by substituted roots")
+	}
+	if _, err := ParseNativeProvisioningWithTrust(encoded, replacementTrust, now); err != nil {
+		t.Fatalf("native provisioning rejected the independently supplied matching trust: %v", err)
 	}
 }
 
@@ -70,7 +115,7 @@ func TestNativeProvisioningRejectsInvalidAccessHint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseNativeProvisioning(encoded, now); err == nil {
+	if _, err := ParseNativeProvisioningWithTrust(encoded, input.signedSeedTrust, now); err == nil {
 		t.Fatal("native provisioning accepted invalid access hint")
 	}
 }
@@ -82,7 +127,7 @@ func TestNativeProvisioningVerifiesDeploymentBeforeUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parsed, err := ParseNativeProvisioning(encoded, now)
+	parsed, err := ParseNativeProvisioningWithTrust(encoded, input.signedSeedTrust, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +154,7 @@ func TestNativeProvisioningVerifiesDeploymentBeforeUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseNativeProvisioning(encoded, now); err == nil {
+	if _, err := ParseNativeProvisioningWithTrust(encoded, input.signedSeedTrust, now); err == nil {
 		t.Fatal("native provisioning accepted a descriptor hash mismatch")
 	}
 }
@@ -119,7 +164,6 @@ func TestNativeProvisioningRequiresSignedIssuerMetadata(t *testing.T) {
 	input := validNativeProvisioning(t, now)
 	input.IssuerMetadata = nil
 	input.SignedSeed = nil
-	input.SignedSeedRoots = nil
 	if _, err := EncodeNativeProvisioning(input); err == nil {
 		t.Fatal("native provisioning accepted an issuer without signed metadata")
 	}
@@ -138,12 +182,12 @@ func TestNativeProvisioningRejectsUnboundSignedSeed(t *testing.T) {
 	}
 	wrongMetadataHash := append([]byte(nil), seed.IssuerMetadataHash...)
 	wrongMetadataHash[0] ^= 0xff
-	input.SignedSeed, input.SignedSeedRoots = nativeProvisioningSignedSeed(t, now, metadata, seed.BootstrapAuthorityKeys, seed.TokenIssuerHint, wrongMetadataHash)
+	input.SignedSeed, input.signedSeedTrust = nativeProvisioningSignedSeedAndTrust(t, now, metadata, seed.BootstrapAuthorityKeys, seed.TokenIssuerHint, wrongMetadataHash)
 	encoded, err := EncodeNativeProvisioning(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseNativeProvisioning(encoded, now); err == nil {
+	if _, err := ParseNativeProvisioningWithTrust(encoded, input.signedSeedTrust, now); err == nil {
 		t.Fatal("native provisioning accepted a seed not bound to issuer metadata")
 	}
 }
@@ -161,12 +205,12 @@ func TestNativeProvisioningRejectsSignedSeedIssuerMismatch(t *testing.T) {
 	}
 	wrongIssuerID := append([]byte(nil), seed.TokenIssuerHint...)
 	wrongIssuerID[0] ^= 0xff
-	input.SignedSeed, input.SignedSeedRoots = nativeProvisioningSignedSeed(t, now, metadata, seed.BootstrapAuthorityKeys, wrongIssuerID, nil)
+	input.SignedSeed, input.signedSeedTrust = nativeProvisioningSignedSeedAndTrust(t, now, metadata, seed.BootstrapAuthorityKeys, wrongIssuerID, nil)
 	encoded, err := EncodeNativeProvisioning(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseNativeProvisioning(encoded, now); err == nil {
+	if _, err := ParseNativeProvisioningWithTrust(encoded, input.signedSeedTrust, now); err == nil {
 		t.Fatal("native provisioning accepted a seed with a different issuer hint")
 	}
 }
@@ -174,13 +218,14 @@ func TestNativeProvisioningRejectsSignedSeedIssuerMismatch(t *testing.T) {
 func TestNativeProvisioningRejectsTamperedSignedSeedRoot(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	input := validNativeProvisioning(t, now)
-	input.SignedSeedRoots = cloneNativeAuthorityKeys(input.SignedSeedRoots)
-	input.SignedSeedRoots[0].PublicKey.PublicKey[0] ^= 0xff
+	tamperedTrust := input.signedSeedTrust
+	tamperedTrust.roots = cloneNativeProvisioningAuthorityKeys(tamperedTrust.roots)
+	tamperedTrust.roots[0].PublicKey.PublicKey[0] ^= 0xff
 	encoded, err := EncodeNativeProvisioning(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseNativeProvisioning(encoded, now); err == nil {
+	if _, err := ParseNativeProvisioningWithTrust(encoded, tamperedTrust, now); err == nil {
 		t.Fatal("native provisioning accepted a tampered signed seed root")
 	}
 }
@@ -201,7 +246,7 @@ func TestNativeProvisioningRejectsTamperedIssuerMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseNativeProvisioning(encoded, now); err == nil {
+	if _, err := ParseNativeProvisioningWithTrust(encoded, input.signedSeedTrust, now); err == nil {
 		t.Fatal("native provisioning accepted tampered issuer metadata")
 	}
 }
@@ -222,7 +267,7 @@ func TestNativeProvisioningRejectsIssuerScopeMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseNativeProvisioning(encoded, now); err == nil {
+	if _, err := ParseNativeProvisioningWithTrust(encoded, input.signedSeedTrust, now); err == nil {
 		t.Fatal("native provisioning accepted an issuer scope mismatch")
 	}
 }
@@ -258,7 +303,7 @@ func TestNativeProvisioningBuildsPinnedHTTP2Carrier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	provisioning, err := ParseNativeProvisioning(encoded, now)
+	provisioning, err := ParseNativeProvisioningWithTrust(encoded, input.signedSeedTrust, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +344,7 @@ func TestNativeProvisioningRejectsWrongCarrierSPKIPin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	provisioning, err := ParseNativeProvisioning(encoded, now)
+	provisioning, err := ParseNativeProvisioningWithTrust(encoded, input.signedSeedTrust, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +412,7 @@ func TestParseNativeProvisioningRejectsStaleAndUnsignedDeployment(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := ParseNativeProvisioning(encoded, now); err == nil {
+			if _, err := ParseNativeProvisioningWithTrust(encoded, input.signedSeedTrust, now); err == nil {
 				t.Fatal("invalid native provisioning was accepted")
 			}
 		})
@@ -384,7 +429,32 @@ func FuzzParseNativeProvisioning(f *testing.F) {
 	}
 	f.Add(encoded)
 	f.Fuzz(func(t *testing.T, encoded []byte) {
-		_, _ = ParseNativeProvisioning(encoded, time.Unix(1_700_000_000, 0))
+		_, _ = ParseNativeProvisioningWithTrust(encoded, input.signedSeedTrust, time.Unix(1_700_000_000, 0))
+	})
+}
+
+func FuzzParseNativeProvisioningTrust(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte{0x01, 0x00})
+	input := validNativeProvisioning(f, time.Unix(1_700_000_000, 0))
+	encoded, err := EncodeNativeProvisioningTrust(input.signedSeedTrust)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(encoded)
+	f.Fuzz(func(t *testing.T, encoded []byte) {
+		trust, err := ParseNativeProvisioningTrust(encoded)
+		if err != nil {
+			return
+		}
+		canonical, err := EncodeNativeProvisioningTrust(trust)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer zeroNativeProvisioningBytes(canonical)
+		if !bytes.Equal(encoded, canonical) {
+			t.Fatal("native provisioning trust parser accepted a non-canonical encoding")
+		}
 	})
 }
 
@@ -605,13 +675,16 @@ func validNativeProvisioningWithOriginSPKI(t testing.TB, now time.Time, originSP
 	if err != nil {
 		t.Fatal(err)
 	}
+	signedSeedTrust, err := NewNativeProvisioningTrust(signedSeedRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return NativeProvisioning{
 		RelayURL:              "https://relay.example/assets/upload/42",
 		IssuerURL:             "https://issuer.example",
 		IssuerCarrierPath:     "/assets/issue/42",
 		IssuerMetadata:        issuerMetadataBytes,
 		SignedSeed:            signedSeed,
-		SignedSeedRoots:       signedSeedRoots,
 		Descriptor:            descriptorBytes,
 		TrustedDescriptorHash: descriptorHash,
 		Template:              templateBytes,
@@ -625,6 +698,7 @@ func validNativeProvisioningWithOriginSPKI(t testing.TB, now time.Time, originSP
 		RelayRequestHeaders:   requestHeaders,
 		RelayResponseHeaders:  responseHeaders,
 		RelayTrustRoots:       trustRoots,
+		signedSeedTrust:       signedSeedTrust,
 	}
 }
 
@@ -670,7 +744,7 @@ func nativeProvisioningSignedSeed(t testing.TB, now time.Time, metadata protocol
 		BridgeBucketHint:           []byte("bridge"),
 		TokenIssuerHint:            append([]byte(nil), issuerID...),
 		IssuerMetadataHash:         metadataHash,
-		BootstrapAuthorityKeys:     cloneNativeAuthorityKeys(bootstrapKeys),
+		BootstrapAuthorityKeys:     cloneNativeProvisioningAuthorityKeys(bootstrapKeys),
 		BootstrapCoverTemplateHash: nativeProvisioningBytes(0x28, 48),
 		NextSeedCommitment:         nativeProvisioningBytes(0x29, 48),
 		SoftwareUpdateEpoch:        1,
@@ -693,6 +767,17 @@ func nativeProvisioningSignedSeed(t testing.TB, now time.Time, metadata protocol
 		t.Fatal(err)
 	}
 	return encodedSeed, []protocol.AuthorityKeyRecord{root}
+}
+
+func nativeProvisioningSignedSeedAndTrust(t testing.TB, now time.Time, metadata protocol.IssuerMetadata, bootstrapKeys []protocol.AuthorityKeyRecord, issuerID, metadataHashOverride []byte) ([]byte, NativeProvisioningTrust) {
+	t.Helper()
+	seed, roots := nativeProvisioningSignedSeed(t, now, metadata, bootstrapKeys, issuerID, metadataHashOverride)
+	trusted, err := NewNativeProvisioningTrust(roots)
+	zeroNativeProvisioningAuthorityKeys(roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return seed, trusted
 }
 
 func configureNativeProvisioningRelay(t testing.TB, input *NativeProvisioning, relayURL string, trustRoot []byte) {

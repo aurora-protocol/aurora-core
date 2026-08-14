@@ -659,12 +659,17 @@ func TestLiveFirstHopProvisionedSessionEgress(t *testing.T) {
 	fixture := newLiveFirstHopFixtureWithOriginSPKI(t, now, auroracrypto.PreHash(certificate.RawSubjectPublicKeyInfo))
 	harness := startLiveFirstHopHarnessWithSessionFactoryAndTLS(t, fixture, fixture.newRelayDriver(t), nil, nil, tlsMaterial)
 	issuer := startLiveFirstHopIssuer(t, fixture)
-	provisioning := fixture.nativeProvisioningForHarness(t, harness, issuer.URL)
+	provisioning, signedSeedRoots := fixture.nativeProvisioningForHarness(t, harness, issuer.URL)
+	signedSeedTrust, err := auroraclient.NewNativeProvisioningTrust(signedSeedRoots)
+	zeroLiveFirstHopAuthorityKeys(signedSeedRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
 	encodedProvisioning, err := auroraclient.EncodeNativeProvisioning(provisioning)
 	if err != nil {
 		t.Fatal(err)
 	}
-	provisioning, err = auroraclient.ParseNativeProvisioning(encodedProvisioning, now)
+	provisioning, err = auroraclient.ParseNativeProvisioningWithTrust(encodedProvisioning, signedSeedTrust, now)
 	zeroLiveFirstHopBytes(encodedProvisioning)
 	if err != nil {
 		t.Fatal(err)
@@ -743,15 +748,21 @@ func TestLiveFirstHopProvisioningWalletRebuildsAfterCarrierLoss(t *testing.T) {
 	})
 	harness := startLiveFirstHopHarnessWithSessionFactoryAndTLS(t, fixture, relayDriver, nil, nil, tlsMaterial)
 	issuer := startLiveFirstHopIssuer(t, fixture)
-	firstProvisioning := fixture.nativeProvisioningForHarness(t, harness, issuer.URL)
-	secondProvisioning := secondFixture.nativeProvisioningForHarness(t, harness, issuer.URL)
+	firstProvisioning, firstSignedSeedRoots := fixture.nativeProvisioningForHarness(t, harness, issuer.URL)
+	secondProvisioning, secondSignedSeedRoots := secondFixture.nativeProvisioningForHarness(t, harness, issuer.URL)
+	signedSeedRoots := append(firstSignedSeedRoots, secondSignedSeedRoots...)
+	signedSeedTrust, err := auroraclient.NewNativeProvisioningTrust(signedSeedRoots)
+	zeroLiveFirstHopAuthorityKeys(signedSeedRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
 	walletEncoded, err := auroraclient.EncodeNativeProvisioningWallet([]auroraclient.NativeProvisioning{firstProvisioning, secondProvisioning})
 	zeroLiveFirstHopNativeProvisioning(&firstProvisioning)
 	zeroLiveFirstHopNativeProvisioning(&secondProvisioning)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wallet, err := auroraclient.ParseNativeProvisioningWallet(walletEncoded, now)
+	wallet, err := auroraclient.ParseNativeProvisioningWalletWithTrust(walletEncoded, signedSeedTrust, now)
 	zeroLiveFirstHopBytes(walletEncoded)
 	if err != nil {
 		t.Fatal(err)
@@ -2402,7 +2413,7 @@ func liveFirstHopIssueResponse(t testing.TB, issuer *httptest.Server, work auror
 	return encoded
 }
 
-func (f liveFirstHopFixture) nativeProvisioningForHarness(t testing.TB, harness liveFirstHopHarness, issuerURL string) auroraclient.NativeProvisioning {
+func (f liveFirstHopFixture) nativeProvisioningForHarness(t testing.TB, harness liveFirstHopHarness, issuerURL string) (auroraclient.NativeProvisioning, []protocol.AuthorityKeyRecord) {
 	t.Helper()
 	descriptor, err := protocol.Encode(f.deployment.Descriptor())
 	if err != nil {
@@ -2451,7 +2462,6 @@ func (f liveFirstHopFixture) nativeProvisioningForHarness(t testing.TB, harness 
 		IssuerCarrierPath:     "/assets/issue/42",
 		IssuerMetadata:        issuerMetadata,
 		SignedSeed:            signedSeed,
-		SignedSeedRoots:       signedSeedRoots,
 		Descriptor:            descriptor,
 		TrustedDescriptorHash: f.deployment.DescriptorHash(),
 		Template:              template,
@@ -2465,7 +2475,7 @@ func (f liveFirstHopFixture) nativeProvisioningForHarness(t testing.TB, harness 
 		RelayRequestHeaders:   requestHeaders,
 		RelayResponseHeaders:  responseHeaders,
 		RelayTrustRoots:       trustRoots,
-	}
+	}, signedSeedRoots
 }
 
 func zeroLiveFirstHopBytes(value []byte) {
@@ -2561,12 +2571,15 @@ func zeroLiveFirstHopNativeProvisioning(provisioning *auroraclient.NativeProvisi
 	} {
 		zeroLiveFirstHopBytes(field)
 	}
-	for index := range provisioning.SignedSeedRoots {
-		zeroLiveFirstHopBytes(provisioning.SignedSeedRoots[index].AuthorityID)
-		zeroLiveFirstHopBytes(provisioning.SignedSeedRoots[index].AuthorityKeyID)
-		zeroLiveFirstHopBytes(provisioning.SignedSeedRoots[index].PublicKey.PublicKey)
-	}
 	*provisioning = auroraclient.NativeProvisioning{}
+}
+
+func zeroLiveFirstHopAuthorityKeys(keys []protocol.AuthorityKeyRecord) {
+	for index := range keys {
+		zeroLiveFirstHopBytes(keys[index].AuthorityID)
+		zeroLiveFirstHopBytes(keys[index].AuthorityKeyID)
+		zeroLiveFirstHopBytes(keys[index].PublicKey.PublicKey)
+	}
 }
 
 type liveFirstHopMutatingOpener struct {

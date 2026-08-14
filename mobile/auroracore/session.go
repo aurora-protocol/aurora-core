@@ -911,11 +911,6 @@ func zeroNativeProvisioning(value *client.NativeProvisioning) {
 	for _, field := range [][]byte{value.IssuerMetadata, value.SignedSeed, value.Descriptor, value.TrustedDescriptorHash, value.Template, value.TemplateAuthorityKey, value.AccessHint, value.PolicyOffer, value.TransportHints, value.RelayRequestHeaders, value.RelayResponseHeaders, value.RelayTrustRoots} {
 		zeroNativeBytes(field)
 	}
-	for index := range value.SignedSeedRoots {
-		zeroNativeBytes(value.SignedSeedRoots[index].AuthorityID)
-		zeroNativeBytes(value.SignedSeedRoots[index].AuthorityKeyID)
-		zeroNativeBytes(value.SignedSeedRoots[index].PublicKey.PublicKey)
-	}
 	*value = client.NativeProvisioning{}
 }
 

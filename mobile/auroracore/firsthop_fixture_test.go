@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -88,6 +89,7 @@ func newNativeSessionFixture(t testing.TB, now time.Time) *Fixture {
 		t.Fatal("first-hop fixture requires a valid time")
 	}
 	now = now.UTC().Truncate(time.Second)
+	configureNativeProvisioningTrustForTest(t)
 	nowUnix := uint64(now.Unix())
 
 	certificate, certificateRaw := firstHopCertificate(t)
@@ -249,6 +251,7 @@ func (f *Fixture) Provisioning(t testing.TB) client.NativeProvisioning {
 		t.Fatal(err)
 	}
 	signedSeed, signedSeedRoots := firstHopSignedSeed(t, time.Now().UTC(), publishedIssuerMetadata, f.issuer.AuthorityKeys(), f.accessHint.HintIssuerID)
+	zeroFirstHopAuthorityKeys(signedSeedRoots)
 	policyOffer, err := protocol.Encode(protocol.PolicyOffer{
 		OfferedVersions:         []uint64{registry.Version20},
 		OfferedSuites:           []uint64{f.deployment.Suite()},
@@ -284,7 +287,6 @@ func (f *Fixture) Provisioning(t testing.TB) client.NativeProvisioning {
 		IssuerCarrierPath:     fixtureIssuerPath,
 		IssuerMetadata:        issuerMetadata,
 		SignedSeed:            signedSeed,
-		SignedSeedRoots:       signedSeedRoots,
 		Descriptor:            descriptor,
 		TrustedDescriptorHash: f.deployment.DescriptorHash(),
 		Template:              template,
@@ -301,24 +303,35 @@ func (f *Fixture) Provisioning(t testing.TB) client.NativeProvisioning {
 	}
 }
 
-func firstHopSignedSeed(t testing.TB, now time.Time, metadata protocol.IssuerMetadata, bootstrapKeys []protocol.AuthorityKeyRecord, issuerID []byte) ([]byte, []protocol.AuthorityKeyRecord) {
+func configureNativeProvisioningTrustForTest(t testing.TB) {
 	t.Helper()
-	rootPrivateKey := firstHopECDSAKey(t)
-	rootPublicKey := firstHopECDSAPublicRecord(t, rootPrivateKey)
-	encodedRootPublicKey, err := protocol.Encode(rootPublicKey)
+	trusted := firstHopNativeProvisioningTrust(t)
+	encoded, err := client.EncodeNativeProvisioningTrust(trusted)
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := protocol.AuthorityKeyRecord{
-		AuthorityID:    firstHopRandomBytes(t, 16),
-		AuthorityKeyID: trust.AuthorityKeyID(encodedRootPublicKey),
-		AuthorityRole:  1,
-		PublicKey:      rootPublicKey,
-		ValidFromUnix:  uint64(now.Add(-time.Minute).Unix()),
-		ValidUntilUnix: uint64(now.Add(time.Hour).Unix()),
-		KeyStatus:      registry.AuthorityActive,
-		UsageFlags:     registry.UsageMaySignSignedSeedRecord,
+	defer zeroNativeBytes(encoded)
+	if err := nativeProvisioningTrust.configure(encoded); err != nil {
+		t.Fatal(err)
 	}
+}
+
+func firstHopNativeProvisioningTrust(t testing.TB) client.NativeProvisioningTrust {
+	t.Helper()
+	roots := firstHopSignedSeedRoots(t)
+	trusted, err := client.NewNativeProvisioningTrust(roots)
+	zeroFirstHopAuthorityKeys(roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return trusted
+}
+
+func firstHopSignedSeed(t testing.TB, now time.Time, metadata protocol.IssuerMetadata, bootstrapKeys []protocol.AuthorityKeyRecord, issuerID []byte) ([]byte, []protocol.AuthorityKeyRecord) {
+	t.Helper()
+	rootPrivateKey := firstHopECDSAKey(t)
+	roots := firstHopSignedSeedRoots(t)
+	root := roots[0]
 	metadataHash, err := trust.IssuerMetadataHash(metadata)
 	if err != nil {
 		t.Fatal(err)
@@ -354,7 +367,28 @@ func firstHopSignedSeed(t testing.TB, now time.Time, metadata protocol.IssuerMet
 	if err != nil {
 		t.Fatal(err)
 	}
-	return encodedSeed, []protocol.AuthorityKeyRecord{root}
+	return encodedSeed, roots
+}
+
+func firstHopSignedSeedRoots(t testing.TB) []protocol.AuthorityKeyRecord {
+	t.Helper()
+	rootPrivateKey := firstHopECDSAKey(t)
+	rootPublicKey := firstHopECDSAPublicRecord(t, rootPrivateKey)
+	encodedRootPublicKey, err := protocol.Encode(rootPublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeBytes(encodedRootPublicKey)
+	return []protocol.AuthorityKeyRecord{{
+		AuthorityID:    []byte{0xa1, 0xa1, 0xa1, 0xa1, 0xa1, 0xa1, 0xa1, 0xa1, 0xa1, 0xa1, 0xa1, 0xa1, 0xa1, 0xa1, 0xa1, 0xa1},
+		AuthorityKeyID: trust.AuthorityKeyID(encodedRootPublicKey),
+		AuthorityRole:  1,
+		PublicKey:      rootPublicKey,
+		ValidFromUnix:  1,
+		ValidUntilUnix: 4_102_444_800,
+		KeyStatus:      registry.AuthorityActive,
+		UsageFlags:     registry.UsageMaySignSignedSeedRecord,
+	}}
 }
 
 func cloneFirstHopAuthorityKeys(keys []protocol.AuthorityKeyRecord) []protocol.AuthorityKeyRecord {
@@ -366,6 +400,14 @@ func cloneFirstHopAuthorityKeys(keys []protocol.AuthorityKeyRecord) []protocol.A
 		cloned[index].PublicKey.PublicKey = append([]byte(nil), key.PublicKey.PublicKey...)
 	}
 	return cloned
+}
+
+func zeroFirstHopAuthorityKeys(keys []protocol.AuthorityKeyRecord) {
+	for index := range keys {
+		zeroNativeBytes(keys[index].AuthorityID)
+		zeroNativeBytes(keys[index].AuthorityKeyID)
+		zeroNativeBytes(keys[index].PublicKey.PublicKey)
+	}
 }
 
 // Issue fulfills a portable-core issuer request with the fixture's bound issuer service.
@@ -722,11 +764,11 @@ func firstHopEgressLimits() relay.SocketEgressLimits {
 
 func firstHopECDSAKey(t testing.TB) *ecdsa.PrivateKey {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
+	curve := elliptic.P256()
+	return &ecdsa.PrivateKey{
+		PublicKey: ecdsa.PublicKey{Curve: curve, X: curve.Params().Gx, Y: curve.Params().Gy},
+		D:         big.NewInt(1),
 	}
-	return key
 }
 
 func firstHopECDSAPublicRecord(t testing.TB, key *ecdsa.PrivateKey) protocol.PublicKeyRecord {

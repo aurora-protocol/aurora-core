@@ -102,6 +102,12 @@ func main() {
 		err = p0P11Check(os.Stdout)
 	case "host-build-check":
 		err = hostBuildCheck(os.Args[2:], os.Stdout)
+	case "check-native-provisioning-trust":
+		if len(os.Args) != 3 {
+			err = fmt.Errorf("check-native-provisioning-trust requires a path")
+			break
+		}
+		err = checkNativeProvisioningTrust(os.Args[2], os.Stdout)
 	case "check-config":
 		if len(os.Args) != 3 {
 			err = fmt.Errorf("check-config requires a path")
@@ -118,7 +124,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|server-check|client-check|p0-p8-check|p0-p11-check|cover-check|crypto-check|wire-check|transport-check|flow-check|route-check|perf-check|load-check --url URL [--requests N --concurrency N --packet-bytes N --request-limit D]|coverage-check --profile PATH [--minimum PERCENT]|release-gate-check|host-build-check [--portable|--apple-simulator|--all]|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|server-check|client-check|p0-p8-check|p0-p11-check|cover-check|crypto-check|wire-check|transport-check|flow-check|route-check|perf-check|load-check --url URL [--requests N --concurrency N --packet-bytes N --request-limit D]|coverage-check --profile PATH [--minimum PERCENT]|release-gate-check|host-build-check [--portable|--apple-simulator|--all]|check-native-provisioning-trust PATH|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -1435,6 +1441,28 @@ func checkConfig(path string) error {
 		return err
 	}
 	fmt.Printf("ok profile=%s route=%s speed=%s effective=%s\n", cfg.Profile, cfg.Route, cfg.Speed, cfg.EffectiveProfile("normal").Name)
+	return nil
+}
+
+func checkNativeProvisioningTrust(path string, w io.Writer) error {
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	defer clear(encoded)
+	trust, err := auroraclient.ParseNativeProvisioningTrust(encoded)
+	if err != nil {
+		return fmt.Errorf("check native provisioning trust: %w", err)
+	}
+	canonical, err := auroraclient.EncodeNativeProvisioningTrust(trust)
+	if err != nil {
+		return fmt.Errorf("check native provisioning trust: %w", err)
+	}
+	defer clear(canonical)
+	if !bytes.Equal(encoded, canonical) {
+		return fmt.Errorf("check native provisioning trust: root bundle is not canonical")
+	}
+	fmt.Fprintln(w, "native_provisioning_trust_check passed=true")
 	return nil
 }
 

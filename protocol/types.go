@@ -59,5 +59,10 @@ func ValidateExtensions(xs []Extension, known map[uint64]bool) error {
 }
 
 func Encode(v wire.Encodable) ([]byte, error) {
+	if block, ok := v.(FrameBlock); ok {
+		if length, known := block.EncodedLen(); known {
+			return wire.EncodeWithCapacity(block, length)
+		}
+	}
 	return wire.Encode(v)
 }

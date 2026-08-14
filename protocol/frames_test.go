@@ -35,6 +35,24 @@ func TestDataFrameConstructorsCopyPayloads(t *testing.T) {
 	}
 }
 
+func TestFrameBlockEncodedLenMatchesEncoding(t *testing.T) {
+	block := FrameBlock{Frames: []AuroraFrame{
+		{FrameType: 1, FlowID: 64, Flags: 16384, Payload: []byte{1, 2, 3}},
+		{FrameType: 1073741824, FlowID: 0, Flags: 63, Payload: []byte{4}},
+	}}
+	want, err := Encode(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, known := block.EncodedLen()
+	if !known {
+		t.Fatal("encoded length is unknown")
+	}
+	if got != len(want) {
+		t.Fatalf("encoded length = %d, want %d", got, len(want))
+	}
+}
+
 func TestValidateFrameBlockRejectsMalformedDataFrames(t *testing.T) {
 	cases := []AuroraFrame{
 		{FrameType: registry.FrameStreamData, FlowID: 0, Payload: []byte("data")},

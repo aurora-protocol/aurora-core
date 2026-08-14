@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-protocol/aurora-core/flow"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/session"
@@ -190,6 +191,263 @@ func TestTCPProxyRuntimeForwardsSOCKS5Connect(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("SOCKS5 proxy connection did not stop after local close")
+	}
+}
+
+func TestTCPProxyRuntimeForwardsSOCKS5UDPAssociation(t *testing.T) {
+	clientApplication, relayApplication := tcpProxyRuntimeApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	runtime, err := NewTCPProxyRuntime(clientApplication, TCPProxyRuntimeOptions{MaxFlows: 2, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- runtime.Serve(ctx, listener) }()
+
+	control, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	if _, err := control.Write([]byte{socksVersion5, 0x01, socksNoAuth}); err != nil {
+		t.Fatal(err)
+	}
+	if response := tcpProxyRuntimeReadExactly(t, control, 2); !bytes.Equal(response, []byte{socksVersion5, socksNoAuth}) {
+		t.Fatalf("SOCKS5 greeting response = %x, want 0500", response)
+	}
+	if _, err := control.Write([]byte{socksVersion5, socksCommandUDP, 0x00, socksATYPIPv4, 0, 0, 0, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	associate := tcpProxyRuntimeReadExactly(t, control, len(socksSuccessResponse))
+	if associate[0] != socksVersion5 || associate[1] != 0 || associate[2] != 0 || associate[3] != socksATYPIPv4 {
+		t.Fatalf("SOCKS5 UDP ASSOCIATE response = %x", associate)
+	}
+	udpTarget := &net.UDPAddr{IP: append(net.IP(nil), associate[4:8]...), Port: int(associate[8])<<8 | int(associate[9])}
+	udpConnection, err := net.DialUDP("udp4", nil, udpTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udpConnection.Close()
+	payload := bytes.Repeat([]byte("p"), 4<<10)
+	request := append([]byte{0, 0, 0, socksATYPDomain, byte(len("target.example"))}, []byte("target.example")...)
+	request = append(request, 0x14, 0xe9)
+	request = append(request, payload...)
+	if _, err := udpConnection.Write(request); err != nil {
+		t.Fatal(err)
+	}
+
+	frames := tcpProxyRuntimeNextRelayFrames(t, clientApplication, relayApplication)
+	if len(frames) != 2 {
+		t.Fatalf("first UDP packet frames = %+v, want FLOW_OPEN and data", frames)
+	}
+	open := frames[0]
+	if open.FrameType != registry.FrameFlowOpen {
+		t.Fatalf("first UDP frame type = 0x%x, want FLOW_OPEN", open.FrameType)
+	}
+	flowOpen := protocol.DecodeFlowOpen(wire.NewReader(open.Payload))
+	if flowOpen.FlowID == 0 || flowOpen.FlowKind != flow.FlowKindUDPAssociation || flowOpen.TargetKind != flow.TargetKindDomainName || !bytes.Equal(flowOpen.TargetHost, []byte("target.example")) || flowOpen.TargetPort != 5353 {
+		t.Fatalf("unexpected UDP FLOW_OPEN: %+v", flowOpen)
+	}
+	data := frames[1]
+	if data.FrameType != registry.FrameStreamData || data.FlowID != flowOpen.FlowID || !bytes.Equal(data.Payload, payload) {
+		t.Fatalf("unexpected UDP data frame: %+v", data)
+	}
+
+	confirm, err := protocol.NewUDPTargetConfirmFrame(protocol.UDPTargetConfirm{
+		FlowID:           flowOpen.FlowID,
+		TargetKind:       flow.TargetKindIPv4,
+		SelectedIP:       []byte{203, 0, 113, 9},
+		SelectedPort:     5353,
+		DNSAnswerSetHash: make([]byte, 48),
+		TTLSeconds:       60,
+		ResolutionSource: protocol.UDPResolutionClientSuppliedIP,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responsePayload := bytes.Repeat([]byte("q"), 4<<10)
+	response, err := protocol.NewStreamDataFrame(flowOpen.FlowID, responsePayload, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.HandleFrameBlock(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{response}}); err == nil {
+		t.Fatal("UDP relay data before target confirmation was accepted")
+	}
+	if err := runtime.HandleFrameBlock(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{confirm, response}}); err != nil {
+		t.Fatal(err)
+	}
+	wantResponse := append([]byte{0, 0, 0, socksATYPIPv4, 203, 0, 113, 9, 0x14, 0xe9}, responsePayload...)
+	if got := tcpProxyRuntimeReadExactly(t, udpConnection, len(wantResponse)); !bytes.Equal(got, wantResponse) {
+		t.Fatalf("SOCKS5 UDP response = %x, want %x", got, wantResponse)
+	}
+
+	_ = control.Close()
+	closeFrame := tcpProxyRuntimeNextRelayFrame(t, clientApplication, relayApplication)
+	if closeFrame.FrameType != registry.FrameFlowClose || closeFrame.FlowID != flowOpen.FlowID {
+		t.Fatalf("SOCKS5 UDP association close frame = %+v", closeFrame)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-serveResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SOCKS5 UDP runtime did not stop after close")
+	}
+}
+
+func TestSOCKSUDPAssociationPeerRequiresControlAddress(t *testing.T) {
+	controlPeer := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 43210}
+	peer, port, err := socksUDPAssociationPeer("0.0.0.0", 0, controlPeer)
+	if err != nil || !peer.Equal(net.IPv4(127, 0, 0, 1)) || port != 0 {
+		t.Fatalf("wildcard SOCKS5 UDP peer = %v:%d err=%v", peer, port, err)
+	}
+	if _, _, err := socksUDPAssociationPeer("127.0.0.2", 0, controlPeer); err == nil {
+		t.Fatal("mismatched SOCKS5 UDP peer was accepted")
+	}
+	if _, _, err := socksUDPAssociationPeer("client.example", 0, controlPeer); err == nil {
+		t.Fatal("domain SOCKS5 UDP peer was accepted")
+	}
+}
+
+func TestSOCKSUDPAssociationListenConfigUsesControlAddressFamily(t *testing.T) {
+	tests := []struct {
+		name         string
+		controlLocal net.Addr
+		wantNetwork  string
+		wantIP       net.IP
+	}{
+		{name: "IPv4", controlLocal: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1080}, wantNetwork: "udp4", wantIP: net.IPv4(127, 0, 0, 1)},
+		{name: "IPv6", controlLocal: &net.TCPAddr{IP: net.ParseIP("::1"), Port: 1080}, wantNetwork: "udp6", wantIP: net.ParseIP("::1")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			network, address, err := socksUDPAssociationListenConfig(test.controlLocal)
+			if err != nil || network != test.wantNetwork || address == nil || !address.IP.Equal(test.wantIP) || address.Port != 0 {
+				t.Fatalf("SOCKS5 UDP listen config = %q %v err=%v", network, address, err)
+			}
+		})
+	}
+}
+
+func TestTCPProxyRuntimeBoundsUDPAssociations(t *testing.T) {
+	clientApplication, relayApplication := tcpProxyRuntimeApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	runtime, err := NewTCPProxyRuntime(clientApplication, TCPProxyRuntimeOptions{MaxFlows: 1, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := &udpProxyAssociation{}
+	if err := runtime.addUDPAssociation(first); err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.removeUDPAssociation(first)
+	if err := runtime.addUDPAssociation(&udpProxyAssociation{}); !errors.Is(err, ErrTCPProxyFlowLimit) {
+		t.Fatalf("second UDP association error = %v, want flow limit", err)
+	}
+}
+
+func TestTCPProxyRuntimeCountsUDPFlowsAgainstSharedLimit(t *testing.T) {
+	clientApplication, relayApplication := tcpProxyRuntimeApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	runtime, err := NewTCPProxyRuntime(clientApplication, TCPProxyRuntimeOptions{MaxFlows: 1, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	if _, opened, err := runtime.udpFlowForTarget(&udpProxyAssociation{}, udpProxyTarget{kind: flow.TargetKindIPv4, host: "203.0.113.8", port: 443}); err != nil || !opened {
+		t.Fatalf("open UDP flow error=%v opened=%t", err, opened)
+	}
+	serverConnection, clientConnection := net.Pipe()
+	defer clientConnection.Close()
+	if _, err := runtime.openFlow(context.Background(), serverConnection, "target.example", 443); !errors.Is(err, ErrTCPProxyFlowLimit) {
+		t.Fatalf("TCP flow after UDP limit error = %v, want flow limit", err)
+	}
+}
+
+func TestTCPProxyRuntimeCanonicalizesUDPFlowTargets(t *testing.T) {
+	clientApplication, relayApplication := tcpProxyRuntimeApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	runtime, err := NewTCPProxyRuntime(clientApplication, TCPProxyRuntimeOptions{MaxFlows: 2, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	association := &udpProxyAssociation{}
+	upper := append([]byte{0, 0, 0, socksATYPDomain, byte(len("Target.EXAMPLE"))}, []byte("Target.EXAMPLE")...)
+	upper = append(upper, 0x01, 0xbb, 0x01)
+	lower := append([]byte{0, 0, 0, socksATYPDomain, byte(len("target.example"))}, []byte("target.example")...)
+	lower = append(lower, 0x01, 0xbb, 0x02)
+	if err := runtime.queueSOCKS5UDPDatagram(context.Background(), association, upper); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.queueSOCKS5UDPDatagram(context.Background(), association, lower); err != nil {
+		t.Fatal(err)
+	}
+	runtime.mu.Lock()
+	flowCount := len(runtime.udpFlows)
+	runtime.mu.Unlock()
+	if flowCount != 1 {
+		t.Fatalf("canonical UDP target created %d flows, want 1", flowCount)
+	}
+}
+
+func TestTCPProxyRuntimeDropsUDPDatagramOnSessionBackpressure(t *testing.T) {
+	clientApplication, relayApplication := tcpProxyRuntimeApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	runtime, err := NewTCPProxyRuntime(clientApplication, TCPProxyRuntimeOptions{MaxFlows: 2, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	association := &udpProxyAssociation{}
+	packet := []byte{0, 0, 0, socksATYPIPv4, 203, 0, 113, 8, 0x01, 0xbb, 0x01}
+	if err := runtime.queueSOCKS5UDPDatagram(context.Background(), association, packet); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 5; index++ {
+		frame, err := protocol.NewStreamDataFrame(uint64(100+index), []byte("fill"), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := clientApplication.QueueFrames(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := runtime.queueSOCKS5UDPDatagram(context.Background(), association, packet); err != nil {
+		t.Fatalf("UDP datagram under expected session backpressure = %v", err)
+	}
+	runtime.mu.Lock()
+	flowCount := len(runtime.udpFlows)
+	runtime.mu.Unlock()
+	if flowCount != 1 {
+		t.Fatalf("UDP flow count after backpressure = %d, want 1", flowCount)
+	}
+	for index := 0; index < 6; index++ {
+		if _, err := clientApplication.TryNextPacket(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := runtime.queueSOCKS5UDPDatagram(context.Background(), association, packet); err != nil {
+		t.Fatalf("UDP association did not remain usable after backpressure: %v", err)
 	}
 }
 
@@ -522,6 +780,15 @@ func tcpProxyRuntimeApplications(t testing.TB) (*session.Application, *session.A
 
 func tcpProxyRuntimeNextRelayFrame(t testing.TB, clientApplication, relayApplication *session.Application) protocol.AuroraFrame {
 	t.Helper()
+	frames := tcpProxyRuntimeNextRelayFrames(t, clientApplication, relayApplication)
+	if len(frames) != 1 {
+		t.Fatalf("unexpected relay frames: %+v", frames)
+	}
+	return frames[0]
+}
+
+func tcpProxyRuntimeNextRelayFrames(t testing.TB, clientApplication, relayApplication *session.Application) []protocol.AuroraFrame {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	packet, err := clientApplication.NextPacket(ctx)
@@ -532,10 +799,10 @@ func tcpProxyRuntimeNextRelayFrame(t testing.TB, clientApplication, relayApplica
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(blocks) != 1 || len(blocks[0].Frames) != 1 {
+	if len(blocks) != 1 {
 		t.Fatalf("unexpected relay frame blocks: %+v", blocks)
 	}
-	return blocks[0].Frames[0]
+	return blocks[0].Frames
 }
 
 func tcpProxyRuntimeReadExactly(t testing.TB, connection net.Conn, length int) []byte {

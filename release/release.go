@@ -430,8 +430,22 @@ func verifySignedUpdatePipeline(update SignedUpdatePipeline, artifactsByName map
 
 func verifyDeviceProvisioning(targets []platform.PackagingTarget, evidence []DeviceProvisioningEvidence, report *ReadinessReport) bool {
 	passed := true
+	targetsByName := make(map[string]platform.PackagingTarget, len(targets))
+	for _, target := range targets {
+		targetsByName[target.Name] = target
+	}
 	byName := map[string]DeviceProvisioningEvidence{}
 	for _, item := range evidence {
+		if _, known := targetsByName[item.TargetName]; !known {
+			report.addFinding("device provisioning evidence target is unknown")
+			passed = false
+			continue
+		}
+		if _, exists := byName[item.TargetName]; exists {
+			report.addFinding("device provisioning evidence names are duplicated")
+			passed = false
+			continue
+		}
 		byName[item.TargetName] = item
 	}
 	for _, target := range targets {

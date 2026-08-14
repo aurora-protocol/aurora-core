@@ -63,7 +63,7 @@ func TestLiveFirstHopRandomizedApplicationRoundTrip(t *testing.T) {
 	harness := startLiveFirstHopHarness(t, fixture, relayDriver, nil)
 	clientFrames := make(chan []byte, 1)
 	connectContext, cancelConnect := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelConnect()
+	t.Cleanup(cancelConnect)
 	established, err := clientDriver.Connect(connectContext, harness.opener)
 	if err != nil {
 		t.Fatal(err)

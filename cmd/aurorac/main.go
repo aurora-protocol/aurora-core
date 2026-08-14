@@ -185,6 +185,7 @@ func parseProxyConfig(args []string, stderr io.Writer) (proxyConfig, error) {
 	flags.IntVar(&config.runtimeOptions.MaxFlows, "max-flows", 0, "maximum concurrent local TCP proxy flows")
 	flags.IntVar(&config.runtimeOptions.ReadBufferBytes, "read-buffer-bytes", 0, "per-flow local read buffer size")
 	flags.IntVar(&config.runtimeOptions.MaxPendingWriteBytes, "max-pending-write-bytes", 0, "per-flow local pending write limit")
+	flags.IntVar(&config.runtimeOptions.MaxTotalPendingWriteBytes, "max-total-pending-write-bytes", 0, "aggregate local pending write limit")
 	if err := flags.Parse(args); err != nil {
 		return proxyConfig{}, err
 	}

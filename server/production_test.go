@@ -45,6 +45,7 @@ func TestNewProductionFirstHopServerRejectsInvalidOptions(t *testing.T) {
 		{name: "nil cover origin", mutate: func(options *ProductionFirstHopOptions) { options.CoverOrigin = nil }},
 		{name: "nil dialer", mutate: func(options *ProductionFirstHopOptions) { options.ProxySession.Dialer = nil }},
 		{name: "nil resolver", mutate: func(options *ProductionFirstHopOptions) { options.ProxySession.Resolver = nil }},
+		{name: "nil DNS resolver", mutate: func(options *ProductionFirstHopOptions) { options.ProxySession.DNSResolver = nil }},
 		{name: "implicit egress limits", mutate: func(options *ProductionFirstHopOptions) { options.ProxySession.Limits = relay.SocketEgressLimits{} }},
 		{name: "invalid egress limits", mutate: func(options *ProductionFirstHopOptions) { options.ProxySession.Limits.MaxFlows = -1 }},
 		{name: "zero session cap", mutate: func(options *ProductionFirstHopOptions) { options.MaxConcurrentSessions = 0 }},
@@ -384,9 +385,15 @@ func newProductionFirstHopTestOptions(t testing.TB) ProductionFirstHopOptions {
 		CarrierStatus:         http.StatusCreated,
 		CarrierHeader:         http.Header{"Content-Type": {"application/octet-stream"}, "X-Carrier-Mode": {"ordinary"}},
 		CoverOrigin:           coverOrigin,
-		ProxySession:          FirstHopProxySessionOptions{ExitPolicy: relay.ExitPolicy{AllowPrivate: true}, Dialer: &net.Dialer{}, Resolver: net.DefaultResolver, Limits: productionFirstHopTestEgressLimits()},
+		ProxySession:          FirstHopProxySessionOptions{ExitPolicy: relay.ExitPolicy{AllowPrivate: true}, Dialer: &net.Dialer{}, Resolver: net.DefaultResolver, DNSResolver: productionFirstHopTestDNSResolver{}, Limits: productionFirstHopTestEgressLimits()},
 		MaxConcurrentSessions: 1,
 	}
+}
+
+type productionFirstHopTestDNSResolver struct{}
+
+func (productionFirstHopTestDNSResolver) ExchangeDNS(context.Context, []byte) ([]byte, error) {
+	return nil, errors.New("DNS exchange is not used by this production constructor test")
 }
 
 func productionFirstHopTestEgressLimits() relay.SocketEgressLimits {

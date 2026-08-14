@@ -483,7 +483,10 @@ func runWithCarrierRecovery(ctx context.Context, policy carrierRecoveryPolicy, a
 		}
 		recoverable, err := attempt(ctx)
 		if ctx.Err() != nil {
-			return nil
+			if err == nil || err == ctx.Err() {
+				return nil
+			}
+			return err
 		}
 		if err == nil {
 			return nil
@@ -703,7 +706,7 @@ func runProxyComponents(ctx context.Context, established *handshake.EstablishedS
 		<-results
 	}
 	if ctx.Err() != nil {
-		return nil
+		return closeErr
 	}
 	terminalErr := newComponentFailure(terminal)
 	if closeErr != nil {

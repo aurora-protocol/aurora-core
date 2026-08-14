@@ -163,6 +163,10 @@ func newApplicationWithClock(cfg Config, clock applicationClock) (*Application, 
 	if cfg.Write.Direction == cfg.Read.Direction {
 		return nil, fmt.Errorf("session: write and read directions must differ")
 	}
+	write, err := packet.NewProtector(cfg.Suite, cfg.RouteInstanceID, cfg.HopLayer, cfg.Write.Direction, 0, cfg.Write.Key, cfg.Write.IV)
+	if err != nil {
+		return nil, fmt.Errorf("session: prepare write protector: %w", err)
+	}
 	entropy, err := normalizeEntropy(cfg.Entropy)
 	if err != nil {
 		return nil, err
@@ -181,16 +185,9 @@ func newApplicationWithClock(cfg Config, clock applicationClock) (*Application, 
 		lifecycleCancel:     lifecycleCancel,
 		clock:               clock,
 		writePhaseStartedAt: clock.Now(),
-		write: packet.Protector{
-			Suite:           cfg.Suite,
-			RouteInstanceID: cfg.RouteInstanceID,
-			HopLayer:        cfg.HopLayer,
-			Direction:       cfg.Write.Direction,
-			Key:             append([]byte(nil), cfg.Write.Key...),
-			StaticIV:        append([]byte(nil), cfg.Write.IV...),
-		},
-		writeState: newDirectionState(cfg.RouteInstanceID, cfg.HopLayer, cfg.Write),
-		readState:  newDirectionState(cfg.RouteInstanceID, cfg.HopLayer, cfg.Read),
+		write:               write,
+		writeState:          newDirectionState(cfg.RouteInstanceID, cfg.HopLayer, cfg.Write),
+		readState:           newDirectionState(cfg.RouteInstanceID, cfg.HopLayer, cfg.Read),
 		receiver: packet.NewReceiver(packet.ReceiverConfig{
 			WindowSize: limits.ReplayWindow,
 		}),
@@ -280,7 +277,9 @@ func (a *Application) takeNextPacketLocked() ([]byte, error) {
 		if err := a.writeState.CommitPreparedUpdate(queued.update.prepared, now); err != nil {
 			return nil, a.failLocked(fmt.Errorf("session: commit emitted key update: %w", err))
 		}
-		a.activateWriteStateLocked(now)
+		if err := a.activateWriteStateLocked(now); err != nil {
+			return nil, a.failLocked(fmt.Errorf("session: activate write key state: %w", err))
+		}
 		a.scheduleWriteDrainLocked()
 		a.pendingWriteUpdate = false
 	}
@@ -431,8 +430,8 @@ func (a *Application) terminateLocked(err error) {
 	a.reservedPackets = 0
 	a.reservedBytes = 0
 	a.pendingWriteUpdate = false
-	zeroBytes(a.write.Key)
-	zeroBytes(a.write.StaticIV)
+	a.write.Destroy()
+	a.receiver.Destroy()
 	a.writeState.Destroy()
 	a.readState.Destroy()
 	a.writePacketNumbers = [256]uint64{}

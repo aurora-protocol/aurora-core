@@ -1,6 +1,7 @@
 package packet
 
 import (
+	"crypto/subtle"
 	"fmt"
 
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
@@ -71,6 +72,67 @@ type Protector struct {
 	Key             []byte
 	StaticIV        []byte
 	NextPacket      uint64
+
+	aead        *auroracrypto.SuiteAEAD
+	cachedSuite uint64
+	cachedKey   [32]byte
+}
+
+// NewProtector returns a protector that owns copies of its traffic material.
+func NewProtector(suite, routeInstanceID uint64, hopLayer, direction, keyPhase uint8, key, staticIV []byte) (Protector, error) {
+	p := Protector{
+		Suite:           suite,
+		RouteInstanceID: routeInstanceID,
+		HopLayer:        hopLayer,
+		Direction:       direction,
+		KeyPhase:        keyPhase,
+	}
+	if err := p.ReplaceMaterial(key, staticIV); err != nil {
+		return Protector{}, err
+	}
+	return p, nil
+}
+
+// Prepare validates and retains AEAD state for the current traffic key.
+func (p *Protector) Prepare() error {
+	_, err := p.cachedAEAD()
+	return err
+}
+
+// ReplaceMaterial atomically replaces traffic material and its derived AEAD state.
+func (p *Protector) ReplaceMaterial(key, staticIV []byte) error {
+	if p == nil {
+		return fmt.Errorf("packet: nil protector")
+	}
+	if len(staticIV) != 12 {
+		return fmt.Errorf("packet: static IV length %d, want 12", len(staticIV))
+	}
+	aead, err := auroracrypto.NewSuiteAEAD(p.Suite, key)
+	if err != nil {
+		return err
+	}
+	keyCopy := append([]byte(nil), key...)
+	ivCopy := append([]byte(nil), staticIV...)
+	destroyBytes(p.Key)
+	destroyBytes(p.StaticIV)
+	p.clearAEAD()
+	p.Key = keyCopy
+	p.StaticIV = ivCopy
+	p.aead = aead
+	p.cachedSuite = p.Suite
+	copy(p.cachedKey[:], key)
+	return nil
+}
+
+// Destroy zeroes exported traffic material and releases cached AEAD ownership.
+func (p *Protector) Destroy() {
+	if p == nil {
+		return
+	}
+	destroyBytes(p.Key)
+	destroyBytes(p.StaticIV)
+	p.clearAEAD()
+	*p = Protector{}
 }
 
 func (p *Protector) Seal(block protocol.FrameBlock) (AuroraPacket, error) {
@@ -94,7 +156,11 @@ func (p *Protector) Seal(block protocol.FrameBlock) (AuroraPacket, error) {
 	if err != nil {
 		return AuroraPacket{}, err
 	}
-	sealed, err := auroracrypto.SealForSuite(p.Suite, p.Key, nonce, aad, plaintext)
+	aead, err := p.cachedAEAD()
+	if err != nil {
+		return AuroraPacket{}, err
+	}
+	sealed, err := aead.Seal(nonce, aad, plaintext)
 	if err != nil {
 		return AuroraPacket{}, err
 	}
@@ -129,7 +195,11 @@ func (p Protector) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
 	}
 	sealed := append(append([]byte(nil), pkt.Ciphertext...), pkt.AuthTag...)
 	defer destroyBytes(sealed)
-	plaintext, err := auroracrypto.OpenForSuite(p.Suite, p.Key, nonce, aad, sealed)
+	aead, err := p.cachedAEAD()
+	if err != nil {
+		return protocol.FrameBlock{}, err
+	}
+	plaintext, err := aead.Open(nonce, aad, sealed)
 	if err != nil {
 		return protocol.FrameBlock{}, err
 	}
@@ -143,4 +213,33 @@ func (p Protector) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
 		return protocol.FrameBlock{}, err
 	}
 	return block, nil
+}
+
+func (p *Protector) cachedAEAD() (*auroracrypto.SuiteAEAD, error) {
+	if p == nil {
+		return nil, fmt.Errorf("packet: nil protector")
+	}
+	if p.aead != nil && p.cachedSuite == p.Suite && len(p.Key) == len(p.cachedKey) && subtle.ConstantTimeCompare(p.cachedKey[:], p.Key) == 1 {
+		return p.aead, nil
+	}
+	aead, err := auroracrypto.NewSuiteAEAD(p.Suite, p.Key)
+	if err != nil {
+		return nil, err
+	}
+	p.clearAEAD()
+	p.aead = aead
+	p.cachedSuite = p.Suite
+	copy(p.cachedKey[:], p.Key)
+	return aead, nil
+}
+
+func (p *Protector) clearAEAD() {
+	if p == nil {
+		return
+	}
+	for i := range p.cachedKey {
+		p.cachedKey[i] = 0
+	}
+	p.cachedSuite = 0
+	p.aead = nil
 }

@@ -126,7 +126,9 @@ func newProvisionedSession(ctx context.Context, provisioning NativeProvisioning,
 		return nil, IssuerWork{}, fmt.Errorf("client: provisioned session starter returned no handshake")
 	}
 
-	request = cloneProvisionedProofRequest(request)
+	ownedRequest := cloneProvisionedProofRequest(request)
+	zeroProvisionedProofRequest(&request)
+	request = ownedRequest
 	work, err := buildProvisionedIssuerWork(provisioning.IssuerURL, provisioning.IssuerCarrierPath, request, now, options.IssuerLifetime, options.random)
 	if err != nil {
 		cancel()

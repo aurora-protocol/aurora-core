@@ -148,7 +148,9 @@ func (r *nativeSessionRegistry) begin(provisioning client.NativeProvisioning) (n
 		zeroNativeProofRequest(&request)
 		return nativeIssuerWork{}, fmt.Errorf("auroracore: native session starter returned no handshake")
 	}
-	request = cloneNativeProofRequest(request)
+	ownedRequest := cloneNativeProofRequest(request)
+	zeroNativeProofRequest(&request)
+	request = ownedRequest
 	work, err := r.issueWork(provisioning.IssuerURL, provisioning.IssuerCarrierPath, request, now)
 	if err != nil {
 		cancel()

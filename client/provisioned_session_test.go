@@ -51,6 +51,40 @@ func TestProvisionedSessionBuildsIssuerWorkAndClosesDeferredHandshake(t *testing
 	}
 }
 
+func TestProvisionedSessionTakesOwnershipOfStarterProofRequest(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	request := provisionedSessionTestRequest()
+	expected := cloneProvisionedProofRequest(request)
+	defer zeroProvisionedProofRequest(&expected)
+	deferred := &provisionedSessionTestHandshake{}
+	session, work, err := newProvisionedSession(
+		context.Background(),
+		provisionedSessionTestProvisioning(t, now, nil),
+		ProvisionedSessionOptions{
+			now:    func() time.Time { return now },
+			random: bytes.NewReader(bytes.Repeat([]byte{0x75}, 32)),
+			start: func(context.Context, NativeProvisioning, time.Time) (provisionedSessionHandshake, handshake.ClientProofRequest, error) {
+				return deferred, request, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer work.Zero()
+	defer session.Close()
+	if !bytes.Equal(session.request.AdmissionContextHash, expected.AdmissionContextHash) ||
+		!bytes.Equal(session.request.HandshakeBindingContext, expected.HandshakeBindingContext) ||
+		!bytes.Equal(session.request.ReplayWindowID, expected.ReplayWindowID) {
+		t.Fatal("provisioned session did not retain an independent proof request")
+	}
+	for _, field := range [][]byte{request.AdmissionContextHash, request.HandshakeBindingContext, request.ReplayWindowID} {
+		if !bytes.Equal(field, make([]byte, len(field))) {
+			t.Fatal("provisioned session retained starter proof request material")
+		}
+	}
+}
+
 func TestProvisionedSessionClosesDeferredHandshakeReturnedWithError(t *testing.T) {
 	deferred := &provisionedSessionTestHandshake{}
 	_, _, err := newProvisionedSession(

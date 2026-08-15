@@ -94,6 +94,9 @@ func NewVerifierHTTPHandler(service *Service) http.Handler {
 			writeError(w, http.StatusBadRequest, "invalid verifier request")
 			return
 		}
+		if rejectCanceledRequest(w, r) {
+			return
+		}
 		if err := service.AuthorizeVerifierRequestClient(req, r.TLS.PeerCertificates[0]); err != nil {
 			writeError(w, http.StatusServiceUnavailable, "verifier unavailable")
 			return
@@ -154,6 +157,9 @@ func NewHTTPHandler(service *Service) http.Handler {
 			writeError(w, http.StatusBadRequest, "invalid issue request")
 			return
 		}
+		if rejectCanceledRequest(w, r) {
+			return
+		}
 		nonce, err := decodeHexFixed(req.TokenNonce, 32)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid issue request")
@@ -190,6 +196,9 @@ func NewHTTPHandler(service *Service) http.Handler {
 			writeError(w, http.StatusBadRequest, "invalid verifier request")
 			return
 		}
+		if rejectCanceledRequest(w, r) {
+			return
+		}
 		relayBucketID, err := decodeHexFixed(req.RelayBucketID, 16)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid verifier request")
@@ -214,6 +223,9 @@ func NewHTTPHandler(service *Service) http.Handler {
 		var req SpendRequest
 		if err := decodeJSONBody(r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid spend request")
+			return
+		}
+		if rejectCanceledRequest(w, r) {
 			return
 		}
 		raw, err := hex.DecodeString(req.AdmissionProof)
@@ -448,13 +460,28 @@ func verifyIssuedProof(service *Service, proof protocol.AdmissionProof, nowUnix 
 
 func methodHandler(method string, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r == nil {
+			writeError(w, http.StatusBadRequest, "invalid request")
+			return
+		}
 		if r.Method != method {
 			w.Header().Set("Allow", method)
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
+		if rejectCanceledRequest(w, r) {
+			return
+		}
 		handler(w, r)
 	}
+}
+
+func rejectCanceledRequest(w http.ResponseWriter, r *http.Request) bool {
+	if r != nil && r.Context().Err() == nil {
+		return false
+	}
+	writeError(w, http.StatusRequestTimeout, "request canceled")
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

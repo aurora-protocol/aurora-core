@@ -2,6 +2,7 @@ package issuerd
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -214,6 +216,88 @@ func TestHTTPDaemonRejectsOversizedStreamingJSONBody(t *testing.T) {
 	}
 }
 
+func TestHTTPDaemonDoesNotSpendTokenAfterRequestCancellation(t *testing.T) {
+	service, err := NewHarnessService(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := service.IssueBlindRSA2048(IssueBlindRSA2048Request{
+		TokenNonce:            fill(0x46, 32),
+		RedemptionContextHash: fill(0x47, 48),
+		ExpiryUnix:            300,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedProof, err := protocol.Encode(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := mustJSON(t, SpendRequest{AdmissionProof: hex.EncodeToString(encodedProof)})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodPost, "/token/spend", nil).WithContext(ctx)
+	request.Header.Set("Content-Type", "application/json")
+	request.Body = &cancelAfterIssuerBodyRead{reader: bytes.NewReader(body), cancel: cancel}
+	request.ContentLength = -1
+	response := httptest.NewRecorder()
+	NewHTTPHandler(service).ServeHTTP(response, request)
+	if response.Code != http.StatusRequestTimeout {
+		t.Fatalf("canceled spend response = %d %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), hex.EncodeToString(proof.TokenAuthenticator)) {
+		t.Fatalf("canceled spend response leaked proof material: %s", response.Body.String())
+	}
+
+	completed := serveHTTP(t, NewHTTPHandler(service), http.MethodPost, "/token/spend", body)
+	if completed.Code != http.StatusOK {
+		t.Fatalf("fresh spend after cancellation = %d %s", completed.Code, completed.Body.String())
+	}
+}
+
+func TestVerifierHTTPHandlerDoesNotSpendRequestAfterCancellation(t *testing.T) {
+	service, err := NewHarnessService(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifierService := service.PublishIssuerMetadata().VerifierServices[0]
+	requestBody, err := protocol.Encode(verifierHTTPTestRequest(t, service, verifierService))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.AuthorizeRelayClientKey(verifierService.RequestAuthPolicyID, protocol.PublicKeyRecord{
+		SignatureScheme: registry.SigECDSAP256SHA384DER,
+		KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+		PublicKey:       mustECDSAPublicKeyBytes(t, &clientKey.PublicKey),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodPost, "/", nil).WithContext(ctx)
+	request.Body = &cancelAfterIssuerBodyRead{reader: bytes.NewReader(requestBody), cancel: cancel}
+	request.ContentLength = -1
+	request.TLS = &tls.ConnectionState{
+		Version:          tls.VersionTLS13,
+		PeerCertificates: []*x509.Certificate{{PublicKey: &clientKey.PublicKey}},
+	}
+	response := httptest.NewRecorder()
+	NewVerifierHTTPHandler(service).ServeHTTP(response, request)
+	if response.Code != http.StatusRequestTimeout {
+		t.Fatalf("canceled verifier response = %d %s", response.Code, response.Body.String())
+	}
+
+	verified, err := service.VerifyIssuerVerifierRequest(verifierHTTPTestRequest(t, service, verifierService))
+	if err != nil {
+		t.Fatalf("fresh verifier request after cancellation: %v", err)
+	}
+	if verified.Decision != registry.VerifierDecisionAccept {
+		t.Fatalf("fresh verifier decision = 0x%x, want accept", verified.Decision)
+	}
+}
+
 func TestVerifierHTTPHandlerExchangesSignedBinaryResponseOverMTLS(t *testing.T) {
 	service, err := NewHarnessService(200)
 	if err != nil {
@@ -377,6 +461,22 @@ func serveHTTP(t *testing.T, handler http.Handler, method, target string, body [
 	handler.ServeHTTP(rec, req)
 	return rec
 }
+
+type cancelAfterIssuerBodyRead struct {
+	reader *bytes.Reader
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (r *cancelAfterIssuerBodyRead) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		r.once.Do(r.cancel)
+	}
+	return n, err
+}
+
+func (r *cancelAfterIssuerBodyRead) Close() error { return nil }
 
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()

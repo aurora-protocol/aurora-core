@@ -134,6 +134,31 @@ func TestReadVerifierRequestBodyAvoidsFixedScratchAllocation(t *testing.T) {
 	}
 }
 
+func TestReadVerifierRequestBodyAvoidsGrowAtUnknownLengthEOFBoundary(t *testing.T) {
+	input := bytes.Repeat([]byte{0xa1}, verifierRequestInitialCapacity)
+	reader := bytes.NewReader(input)
+	reader.Reset(input)
+	body, err := readVerifierRequestBody(reader, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap(body) != verifierRequestInitialCapacity {
+		t.Fatalf("unknown-length exact-capacity verifier request capacity = %d, want %d", cap(body), verifierRequestInitialCapacity)
+	}
+	zeroIssuerdOwnedBytes(body)
+	allocations := testing.AllocsPerRun(1000, func() {
+		reader.Reset(input)
+		body, err := readVerifierRequestBody(reader, -1)
+		if err != nil {
+			panic(err)
+		}
+		zeroIssuerdOwnedBytes(body)
+	})
+	if allocations > 2 {
+		t.Fatalf("unknown-length exact-capacity verifier request allocations = %.0f, want at most 2", allocations)
+	}
+}
+
 func TestHTTPDaemonPublishesMetadataIssuesVerifiesAndSpends(t *testing.T) {
 	service, err := NewHarnessService(200)
 	if err != nil {

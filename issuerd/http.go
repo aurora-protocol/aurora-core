@@ -529,13 +529,14 @@ func readVerifierRequestBody(source io.Reader, contentLength int64) ([]byte, err
 	body := make([]byte, 0, capacityHint)
 	for {
 		if len(body) == cap(body) {
-			if len(body) == maximum {
-				var extra [1]byte
-				count, err := source.Read(extra[:])
+			var extra [1]byte
+			count, err := source.Read(extra[:])
+			if count > 0 {
+				var appendErr error
+				body, appendErr = appendIssuerdOwnedBytes(body, extra[:count], maximum)
 				zeroIssuerdBytes(extra[:])
-				if count > 0 {
-					zeroIssuerdOwnedBytes(body)
-					return nil, errVerifierRequestTooLarge
+				if appendErr != nil {
+					return nil, appendErr
 				}
 				if err == io.EOF {
 					return body, nil
@@ -546,13 +547,15 @@ func readVerifierRequestBody(source io.Reader, contentLength int64) ([]byte, err
 				}
 				continue
 			}
-			bodyLength := len(body)
-			var err error
-			body, err = reserveIssuerdOwnedBytes(body, bodyLength+1, maximum)
+			zeroIssuerdBytes(extra[:])
+			if err == io.EOF {
+				return body, nil
+			}
 			if err != nil {
+				zeroIssuerdOwnedBytes(body)
 				return nil, err
 			}
-			body = body[:bodyLength]
+			continue
 		}
 		count, err := source.Read(body[len(body):cap(body)])
 		body = body[:len(body)+count]

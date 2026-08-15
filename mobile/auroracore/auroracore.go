@@ -149,32 +149,37 @@ func nativeCallInputLengthValid(length int) bool {
 	return length >= 0 && length <= maximumNativeCallInputBytes
 }
 
-// AuroraCoreFree releases an output buffer from AuroraCoreCall.
-//
-// Deprecated: use AuroraCoreZeroFree to scrub the buffer before release.
+// AuroraCoreFree securely releases an output buffer from AuroraCoreCall.
+// It is retained for ABI compatibility with callers that do not pass a length.
 //
 //export AuroraCoreFree
 func AuroraCoreFree(p *C.uint8_t) {
-	releaseNativeOutput(unsafe.Pointer(p), false)
+	releaseNativeOutput(unsafe.Pointer(p))
 }
 
 // AuroraCoreZeroFree scrubs and releases an output buffer from AuroraCoreCall.
-// The length parameter is retained for ABI compatibility; Core uses the length
-// recorded when it allocated the output rather than trusting caller input.
+// Core uses the length recorded when it allocated the output rather than
+// trusting the length passed by the caller.
 //
 //export AuroraCoreZeroFree
 func AuroraCoreZeroFree(p *C.uint8_t, _ C.int) {
-	releaseNativeOutput(unsafe.Pointer(p), true)
+	releaseNativeOutput(unsafe.Pointer(p))
 }
 
-func releaseNativeOutput(p unsafe.Pointer, scrub bool) {
+func releaseNativeOutput(p unsafe.Pointer) {
+	releaseNativeOutputWith(p, freeNativeOutput)
+}
+
+func releaseNativeOutputWith(p unsafe.Pointer, release func(unsafe.Pointer, int)) {
 	length, ok := takeNativeOutput(p)
 	if !ok {
 		return
 	}
-	if scrub {
-		zeroNativeOutput(p, length)
-	}
+	zeroNativeOutput(p, length)
+	release(p, length)
+}
+
+func freeNativeOutput(p unsafe.Pointer, _ int) {
 	C.free(p)
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net/netip"
 	"testing"
@@ -586,6 +587,69 @@ func TestPacketAdapterExpiresIPv6FragmentsAndClearsBuffers(t *testing.T) {
 	if !bytes.Equal(header, make([]byte, len(header))) || !bytes.Equal(payload, make([]byte, len(payload))) {
 		t.Fatal("expired IPv6 fragment buffers were not cleared")
 	}
+}
+
+func TestPacketAdapterCloseClearsRetainedPacketBuffers(t *testing.T) {
+	application, relayApplication := packetAdapterApplications(t)
+	defer application.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	syn := packetAdapterTCPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, 100, 0, tcpFlagSYN, nil)
+	if err := adapter.Ingress(context.Background(), syn, now); err != nil {
+		t.Fatalf("ingress TCP SYN: %v", err)
+	}
+	if len(adapter.localPackets) != 1 {
+		t.Fatalf("queued local packets = %d, want 1", len(adapter.localPackets))
+	}
+	queued := adapter.localPackets[0]
+
+	fragmented := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50001, 443, bytes.Repeat([]byte{0x5a}, 24))
+	fragment := packetAdapterIPv4FragmentAt(t, fragmented, 0, 8, true)
+	if err := adapter.Ingress(context.Background(), fragment, now); err != nil {
+		t.Fatalf("ingress IPv4 fragment: %v", err)
+	}
+	if len(adapter.ipv4Fragments) != 1 {
+		t.Fatalf("IPv4 fragment sets = %d, want 1", len(adapter.ipv4Fragments))
+	}
+	var retained *packetAdapterIPv4FragmentSet
+	for _, retained = range adapter.ipv4Fragments {
+	}
+	header := retained.header
+	payload := retained.segments[0].payload
+
+	ipv6Packet, err := buildPacketAdapterTCPPacket(6, netip.MustParseAddr("2001:db8::2"), netip.MustParseAddr("2606:4700:4700::1111"), 50002, 443, 100, 0, tcpFlagSYN, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ipv6Fragment, _ := packetAdapterIPv6Fragments(t, ipv6Packet, 1, 8)
+	if err := adapter.Ingress(context.Background(), ipv6Fragment, now); err != nil {
+		t.Fatalf("ingress IPv6 fragment: %v", err)
+	}
+	if len(adapter.ipv6Fragments) != 1 {
+		t.Fatalf("IPv6 fragment sets = %d, want 1", len(adapter.ipv6Fragments))
+	}
+	var retainedIPv6 *packetAdapterIPv6FragmentSet
+	for _, retainedIPv6 = range adapter.ipv6Fragments {
+	}
+	ipv6Header := retainedIPv6.header
+	ipv6Payload := retainedIPv6.segments[0].payload
+
+	adapter.Close()
+
+	if len(adapter.localPackets) != 0 || len(adapter.flowsByTuple) != 0 || len(adapter.ipv4Fragments) != 0 || len(adapter.ipv6Fragments) != 0 || adapter.FlowCount() != 0 {
+		t.Fatal("adapter close retained packet state")
+	}
+	if !bytes.Equal(queued, make([]byte, len(queued))) || !bytes.Equal(header, make([]byte, len(header))) || !bytes.Equal(payload, make([]byte, len(payload))) || !bytes.Equal(ipv6Header, make([]byte, len(ipv6Header))) || !bytes.Equal(ipv6Payload, make([]byte, len(ipv6Payload))) {
+		t.Fatal("adapter close did not clear retained packet buffers")
+	}
+	if err := adapter.Ingress(context.Background(), syn, now); !errors.Is(err, ErrPacketAdapterClosed) {
+		t.Fatalf("ingress after close = %v, want %v", err, ErrPacketAdapterClosed)
+	}
+	adapter.Close()
 }
 
 func TestPacketAdapterRejectsOverlappingIPv6Fragments(t *testing.T) {

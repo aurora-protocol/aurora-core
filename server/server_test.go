@@ -129,6 +129,60 @@ func TestServeCoverCarrierScrubsSpendRequestInputAfterDispatch(t *testing.T) {
 	}
 }
 
+func TestServeCoverCarrierScrubsPacketBatchesAfterDispatch(t *testing.T) {
+	exchanger := &retainingPacketExchanger{}
+	payload, err := EncodePacketBatch(PacketBatch{
+		Packets:         [][]byte{{0x45, 0x41, 0x42, 0x43}},
+		ProtocolNumbers: []uint16{2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, DefaultPacketExchangePath, bytes.NewReader(EncodeCarrier(CarrierPacketBatch, payload)))
+	response := httptest.NewRecorder()
+	serveCoverCarrier(response, request, relay.StaticOrigin{}, http.NotFoundHandler(), exchanger, nil)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("carrier packet response status = %d, want %d", response.Code, http.StatusOK)
+	}
+	for _, batch := range []PacketBatch{exchanger.inbound, exchanger.outbound} {
+		for _, packet := range batch.Packets {
+			for _, value := range packet {
+				if value != 0 {
+					t.Fatal("packet exchanger retained packet bytes after carrier dispatch")
+				}
+			}
+		}
+	}
+}
+
+func TestServeCoverCarrierScrubsPacketBatchReturnedWithExchangeFailure(t *testing.T) {
+	exchanger := &retainingPacketExchanger{err: errors.New("packet exchange failed")}
+	payload, err := EncodePacketBatch(PacketBatch{
+		Packets:         [][]byte{{0x45, 0x41, 0x42, 0x43}},
+		ProtocolNumbers: []uint16{2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, DefaultPacketExchangePath, bytes.NewReader(EncodeCarrier(CarrierPacketBatch, payload)))
+	response := httptest.NewRecorder()
+	serveCoverCarrier(response, request, relay.StaticOrigin{}, http.NotFoundHandler(), exchanger, nil)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("failed carrier packet response status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+	for _, batch := range []PacketBatch{exchanger.inbound, exchanger.outbound} {
+		for _, packet := range batch.Packets {
+			for _, value := range packet {
+				if value != 0 {
+					t.Fatal("packet exchanger retained packet bytes after a failed carrier dispatch")
+				}
+			}
+		}
+	}
+}
+
 func TestPacketBatchCodecMatchesInteroperabilityVector(t *testing.T) {
 	batch := PacketBatch{
 		Packets:         [][]byte{{0x45, 0x00, 0x00, 0x14}},
@@ -155,6 +209,18 @@ type retainingCarrierIssuer struct {
 	issueTokenNonce        []byte
 	issueRedemptionContext []byte
 	spentProof             []byte
+}
+
+type retainingPacketExchanger struct {
+	inbound  PacketBatch
+	outbound PacketBatch
+	err      error
+}
+
+func (e *retainingPacketExchanger) ExchangePacketBatch(inbound PacketBatch) (PacketBatch, error) {
+	e.inbound = inbound
+	e.outbound = clonePacketBatch(inbound)
+	return e.outbound, e.err
 }
 
 func (*retainingCarrierIssuer) IssuerMetadata() ([]byte, []byte, error) {

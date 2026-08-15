@@ -200,7 +200,9 @@ func serveCarrierPacketBatch(w http.ResponseWriter, r *http.Request, origin rela
 		serveCoverFailure(w, r, origin, coverOrigin)
 		return
 	}
+	defer zeroPacketBatch(&inbound)
 	outbound, err := exchanger.ExchangePacketBatch(inbound)
+	defer zeroPacketBatch(&outbound)
 	if err != nil {
 		serveCoverFailure(w, r, origin, coverOrigin)
 		return
@@ -210,6 +212,7 @@ func serveCarrierPacketBatch(w http.ResponseWriter, r *http.Request, origin rela
 		serveCoverFailure(w, r, origin, coverOrigin)
 		return
 	}
+	defer zeroCarrierPayload(encoded)
 	writeCarrier(w, CarrierPacketBatch, encoded)
 }
 

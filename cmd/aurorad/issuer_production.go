@@ -398,9 +398,23 @@ func newProductionIssuerHTTPServer(runtime *productionIssuerService) (*http.Serv
 }
 
 func zeroRSAPrivateKey(privateKey *rsa.PrivateKey) {
-	if privateKey != nil {
-		*privateKey = rsa.PrivateKey{}
+	if privateKey == nil {
+		return
 	}
+	zeroPrivateBigInt(privateKey.D)
+	for _, prime := range privateKey.Primes {
+		zeroPrivateBigInt(prime)
+	}
+	zeroPrivateBigInt(privateKey.Precomputed.Dp)
+	zeroPrivateBigInt(privateKey.Precomputed.Dq)
+	zeroPrivateBigInt(privateKey.Precomputed.Qinv)
+	//lint:ignore SA1019 Clear legacy retained CRT limbs if a parser populated them.
+	for _, value := range privateKey.Precomputed.CRTValues {
+		zeroPrivateBigInt(value.Exp)
+		zeroPrivateBigInt(value.Coeff)
+		zeroPrivateBigInt(value.R)
+	}
+	*privateKey = rsa.PrivateKey{}
 }
 
 var _ io.Closer = (*productionIssuerService)(nil)

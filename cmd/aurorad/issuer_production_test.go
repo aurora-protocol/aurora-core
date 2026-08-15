@@ -16,6 +16,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -65,6 +66,39 @@ func TestNewProductionIssuerServiceLoadsSignedBlindRSAState(t *testing.T) {
 		ExpiryUnix:            uint64(time.Now().Unix()) + 60,
 	}); err != nil {
 		t.Fatalf("loaded production issuer did not issue: %v", err)
+	}
+}
+
+func TestZeroRSAPrivateKeyClearsPrivateMaterial(t *testing.T) {
+	private, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private.Precompute()
+	privateExponent := private.D
+	prime := private.Primes[0]
+	secondPrime := private.Primes[1]
+	precomputedExponent := private.Precomputed.Dp
+	secondPrecomputedExponent := private.Precomputed.Dq
+	precomputedInverse := private.Precomputed.Qinv
+	if privateExponent == nil || prime == nil || secondPrime == nil || precomputedExponent == nil || secondPrecomputedExponent == nil || precomputedInverse == nil {
+		t.Fatal("generated RSA private key is unexpectedly incomplete")
+	}
+	zeroRSAPrivateKey(private)
+	if private.D != nil || len(private.Primes) != 0 {
+		t.Fatal("RSA private key struct retained material after zeroization")
+	}
+	for name, value := range map[string]*big.Int{
+		"private exponent":            privateExponent,
+		"first prime":                 prime,
+		"second prime":                secondPrime,
+		"precomputed exponent":        precomputedExponent,
+		"second precomputed exponent": secondPrecomputedExponent,
+		"precomputed inverse":         precomputedInverse,
+	} {
+		if value.Sign() != 0 {
+			t.Fatalf("RSA %s limbs retained material after zeroization", name)
+		}
 	}
 }
 

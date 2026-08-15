@@ -623,6 +623,10 @@ func exchangeIssuerWork(ctx context.Context, timeout time.Duration, work client.
 		return nil, fmt.Errorf("client: issuer request: %w", err)
 	}
 	defer response.Body.Close()
+	stopResponseCancel := context.AfterFunc(requestContext, func() {
+		_ = response.Body.Close()
+	})
+	defer stopResponseCancel()
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("client: issuer returned status %d", response.StatusCode)
 	}

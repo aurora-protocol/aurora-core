@@ -2,7 +2,9 @@ package packet
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"math/bits"
 	"sync"
 	"time"
 
@@ -10,6 +12,12 @@ import (
 )
 
 const defaultReceiverWindowSize uint64 = 1024
+
+// MaxReceiverWindowSize bounds the replay window a receiver will honor. Larger
+// configured windows are clamped to it, which only makes acceptance stricter.
+const MaxReceiverWindowSize uint64 = 1 << 20
+
+var errReceiverDestroyed = errors.New("packet: receiver destroyed")
 
 type ReceiverConfig struct {
 	Protector  Protector
@@ -21,9 +29,17 @@ type Receiver struct {
 	protector           Protector
 	directionProtectors map[receiverPacketNumberSpace]*Protector
 	windowSize          uint64
-	seen                map[receiverPacketNumberKey]struct{}
-	highest             map[receiverPacketNumberSpace]uint64
-	havePacket          map[receiverPacketNumberSpace]bool
+	windowBits          uint64
+	windows             map[receiverPacketNumberSpace]*replayWindow
+	destroyed           bool
+}
+
+// replayWindow tracks accepted packet numbers in a fixed-size ring bitmap. Bit
+// n%windowBits records packet number n, so the ring holds exactly the window
+// [highest-windowSize, highest] and needs no per-packet pruning.
+type replayWindow struct {
+	highest uint64
+	bits    []uint64
 }
 
 // ReceiverStats reports replay-window memory use.
@@ -83,15 +99,17 @@ func NewReceiver(cfg ReceiverConfig) *Receiver {
 	if windowSize == 0 {
 		windowSize = defaultReceiverWindowSize
 	}
+	if windowSize > MaxReceiverWindowSize {
+		windowSize = MaxReceiverWindowSize
+	}
 	protector := cfg.Protector
 	_ = protector.Prepare()
 	return &Receiver{
 		protector:           protector,
 		directionProtectors: make(map[receiverPacketNumberSpace]*Protector),
 		windowSize:          windowSize,
-		seen:                make(map[receiverPacketNumberKey]struct{}),
-		highest:             make(map[receiverPacketNumberSpace]uint64),
-		havePacket:          make(map[receiverPacketNumberSpace]bool),
+		windowBits:          windowSize + 1,
+		windows:             make(map[receiverPacketNumberSpace]*replayWindow),
 	}
 }
 
@@ -99,7 +117,11 @@ func NewReceiver(cfg ReceiverConfig) *Receiver {
 func (r *Receiver) Stats() ReceiverStats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return ReceiverStats{PacketNumberSpaces: len(r.havePacket), SeenPackets: len(r.seen)}
+	seen := 0
+	for _, window := range r.windows {
+		seen += window.count()
+	}
+	return ReceiverStats{PacketNumberSpaces: len(r.windows), SeenPackets: seen}
 }
 
 // Destroy releases cached traffic material and replay-window state.
@@ -114,9 +136,8 @@ func (r *Receiver) Destroy() {
 		protector.Destroy()
 	}
 	r.directionProtectors = nil
-	r.seen = nil
-	r.highest = nil
-	r.havePacket = nil
+	r.windows = nil
+	r.destroyed = true
 }
 
 // ForgetPacketNumberSpace removes replay state for an erased key phase.
@@ -131,13 +152,7 @@ func (r *Receiver) ForgetPacketNumberSpace(routeInstanceID uint64, hopLayer, dir
 	defer r.mu.Unlock()
 	// An in-flight open can retain a protector after this cache eviction.
 	delete(r.directionProtectors, space)
-	delete(r.highest, space)
-	delete(r.havePacket, space)
-	for key := range r.seen {
-		if key.Space == space {
-			delete(r.seen, key)
-		}
-	}
+	delete(r.windows, space)
 }
 
 func (r *Receiver) Open(pkt AuroraPacket) (protocol.FrameBlock, error) {
@@ -255,6 +270,9 @@ func (r *Receiver) directionProtector(pkt AuroraPacket, state *DirectionState, s
 	space := packetNumberSpace(pkt)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.destroyed {
+		return nil, errReceiverDestroyed
+	}
 	if protector := r.directionProtectors[space]; protector != nil && protector.Suite == suite && protector.RouteInstanceID == state.RouteInstanceID && protector.HopLayer == state.HopLayer && protector.Direction == state.Direction && protector.KeyPhase == pkt.KeyPhase && bytes.Equal(protector.Key, material.Key) && bytes.Equal(protector.StaticIV, material.IV) {
 		return protector, nil
 	}
@@ -285,32 +303,79 @@ func (r *Receiver) checkPacketNumberLocked(pkt AuroraPacket) error {
 }
 
 func (r *Receiver) checkPacketNumberKeyLocked(key receiverPacketNumberKey) error {
-	if _, ok := r.seen[key]; ok {
-		return fmt.Errorf("packet: duplicate packet number %d", key.PacketNumber)
+	if r.destroyed {
+		return errReceiverDestroyed
 	}
-	highest := r.highest[key.Space]
-	if r.havePacket[key.Space] && highest >= r.windowSize && key.PacketNumber < highest-r.windowSize {
+	window := r.windows[key.Space]
+	if window == nil || key.PacketNumber > window.highest {
+		return nil
+	}
+	distance := window.highest - key.PacketNumber
+	if distance > r.windowSize {
 		return fmt.Errorf("packet: packet number %d outside receiver window", key.PacketNumber)
+	}
+	if window.contains(key.PacketNumber, r.windowBits) {
+		return fmt.Errorf("packet: duplicate packet number %d", key.PacketNumber)
 	}
 	return nil
 }
 
 func (r *Receiver) markPacketNumberKeyLocked(key receiverPacketNumberKey) {
-	space := key.Space
-	r.seen[key] = struct{}{}
-	if !r.havePacket[space] || key.PacketNumber > r.highest[space] {
-		r.highest[space] = key.PacketNumber
-		r.havePacket[space] = true
-	}
-	if !r.havePacket[space] || r.highest[space] < r.windowSize {
+	if r.windows == nil {
 		return
 	}
-	cutoff := r.highest[space] - r.windowSize
-	for seen := range r.seen {
-		if seen.Space == space && seen.PacketNumber < cutoff {
-			delete(r.seen, seen)
+	window := r.windows[key.Space]
+	if window == nil {
+		window = &replayWindow{
+			highest: key.PacketNumber,
+			bits:    make([]uint64, (r.windowBits+63)/64),
 		}
+		window.set(key.PacketNumber, r.windowBits)
+		r.windows[key.Space] = window
+		return
 	}
+	if key.PacketNumber > window.highest {
+		window.advance(key.PacketNumber, r.windowBits)
+	} else if window.highest-key.PacketNumber > r.windowSize {
+		return
+	}
+	window.set(key.PacketNumber, r.windowBits)
+}
+
+func (w *replayWindow) contains(packetNumber, windowBits uint64) bool {
+	index := packetNumber % windowBits
+	return w.bits[index/64]&(1<<(index%64)) != 0
+}
+
+func (w *replayWindow) set(packetNumber, windowBits uint64) {
+	index := packetNumber % windowBits
+	w.bits[index/64] |= 1 << (index % 64)
+}
+
+// advance slides the window up to highest, clearing the slots that newly
+// entered it. Sequential traffic clears a single bit per packet.
+func (w *replayWindow) advance(highest, windowBits uint64) {
+	distance := highest - w.highest
+	if distance >= windowBits {
+		for i := range w.bits {
+			w.bits[i] = 0
+		}
+		w.highest = highest
+		return
+	}
+	for offset := uint64(1); offset <= distance; offset++ {
+		index := (w.highest + offset) % windowBits
+		w.bits[index/64] &^= 1 << (index % 64)
+	}
+	w.highest = highest
+}
+
+func (w *replayWindow) count() int {
+	total := 0
+	for _, word := range w.bits {
+		total += bits.OnesCount64(word)
+	}
+	return total
 }
 
 func cloneReceiverFrameBlock(block protocol.FrameBlock) protocol.FrameBlock {

@@ -36,7 +36,9 @@ const (
 	maxQueuedBytes   = 64 << 20
 	minReservedBytes = 8 << 10
 	minReplayWindow  = 64
-	maxReplayWindow  = 1 << 20
+	// maxReplayWindow tracks the largest window the packet receiver honors, so a
+	// configured session window is never silently clamped below its limit.
+	maxReplayWindow = packet.MaxReceiverWindowSize
 
 	maxPacketEncodingOverhead = 8 + 1 + 1 + 1 + 8 + 3 + 16
 	maxPacketCiphertextBytes  = 0xffffff

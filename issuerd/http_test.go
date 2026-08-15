@@ -25,6 +25,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	auroratrust "github.com/aurora-protocol/aurora-core/trust"
+	"github.com/aurora-protocol/aurora-core/wire"
 )
 
 func TestHTTPDaemonReadinessHarnessCoversLiveIssuerSurface(t *testing.T) {
@@ -99,6 +100,38 @@ func TestDecodeVerifierRequestBodyOwnsAndScrubsInput(t *testing.T) {
 			t.Fatalf("malformed verifier request byte %d = %x after decode, want zero", index, value)
 		}
 	}
+}
+
+func TestWriteIssuerVerifierResponseScrubsOwnedBuffersAfterDelivery(t *testing.T) {
+	retainedResponse := issuerVerifierHTTPResponseFixture()
+	retainedFields := issuerVerifierResponseFields(retainedResponse)
+	retainingWriter := &retainingIssuerdResponseWriter{header: make(http.Header)}
+	if err := writeIssuerVerifierResponse(retainingWriter, &retainedResponse); err != nil {
+		t.Fatalf("writeIssuerVerifierResponse failed: %v", err)
+	}
+	for index, value := range retainingWriter.body {
+		if value != 0 {
+			t.Fatalf("encoded verifier response byte %d = %x after write, want zero", index, value)
+		}
+	}
+	assertIssuerVerifierResponseFieldsZeroed(t, retainedFields)
+
+	deliveredResponse := issuerVerifierHTTPResponseFixture()
+	expectedSpentKey := append([]byte(nil), deliveredResponse.TokenSpentKey...)
+	deliveredFields := issuerVerifierResponseFields(deliveredResponse)
+	recorder := httptest.NewRecorder()
+	if err := writeIssuerVerifierResponse(recorder, &deliveredResponse); err != nil {
+		t.Fatalf("writeIssuerVerifierResponse failed: %v", err)
+	}
+	reader := wire.NewReader(recorder.Body.Bytes())
+	decoded := protocol.DecodeIssuerVerifierResponse(reader)
+	if reader.Err() != nil || !reader.EOF() {
+		t.Fatalf("decode delivered verifier response failed: %v", reader.Err())
+	}
+	if decoded.Decision != registry.VerifierDecisionAccept || !bytes.Equal(decoded.TokenSpentKey, expectedSpentKey) {
+		t.Fatalf("delivered verifier response decision=%d spent_key=%x", decoded.Decision, decoded.TokenSpentKey)
+	}
+	assertIssuerVerifierResponseFieldsZeroed(t, deliveredFields)
 }
 
 func TestAppendIssuerdOwnedBytesScrubsReplacedBuffer(t *testing.T) {
@@ -569,6 +602,56 @@ type cancelAfterIssuerBodyRead struct {
 	reader *bytes.Reader
 	cancel context.CancelFunc
 	once   sync.Once
+}
+
+type retainingIssuerdResponseWriter struct {
+	header http.Header
+	body   []byte
+}
+
+func (w *retainingIssuerdResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (*retainingIssuerdResponseWriter) WriteHeader(int) {}
+
+func (w *retainingIssuerdResponseWriter) Write(body []byte) (int, error) {
+	w.body = body
+	return len(body), nil
+}
+
+func issuerVerifierHTTPResponseFixture() protocol.IssuerVerifierResponse {
+	return protocol.IssuerVerifierResponse{
+		ResponseVersion:  registry.Version20,
+		ServiceID:        bytes.Repeat([]byte{0x41}, 16),
+		RequestHash:      bytes.Repeat([]byte{0x42}, 48),
+		Decision:         registry.VerifierDecisionAccept,
+		TokenSpentKey:    bytes.Repeat([]byte{0x43}, 48),
+		ValidUntilUnix:   300,
+		ResponseNonce:    bytes.Repeat([]byte{0x44}, 32),
+		ServiceSignature: bytes.Repeat([]byte{0x45}, 64),
+	}
+}
+
+func issuerVerifierResponseFields(response protocol.IssuerVerifierResponse) [][]byte {
+	return [][]byte{
+		response.ServiceID,
+		response.RequestHash,
+		response.TokenSpentKey,
+		response.ResponseNonce,
+		response.ServiceSignature,
+	}
+}
+
+func assertIssuerVerifierResponseFieldsZeroed(t *testing.T, fields [][]byte) {
+	t.Helper()
+	for _, field := range fields {
+		for index, value := range field {
+			if value != 0 {
+				t.Fatalf("verifier response byte %d = %x after delivery, want zero", index, value)
+			}
+		}
+	}
 }
 
 func (r *cancelAfterIssuerBodyRead) Read(p []byte) (int, error) {

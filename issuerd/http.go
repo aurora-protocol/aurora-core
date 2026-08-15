@@ -108,14 +108,9 @@ func NewVerifierHTTPHandler(service *Service) http.Handler {
 			writeError(w, http.StatusServiceUnavailable, "verifier unavailable")
 			return
 		}
-		encoded, err := protocol.Encode(resp)
-		if err != nil {
+		if err := writeIssuerVerifierResponse(w, &resp); err != nil {
 			writeError(w, http.StatusInternalServerError, "verifier unavailable")
-			return
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(encoded)
 	}))
 	return mux
 }
@@ -492,6 +487,22 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
+func writeIssuerVerifierResponse(w http.ResponseWriter, response *protocol.IssuerVerifierResponse) error {
+	if response == nil {
+		return fmt.Errorf("issuerd: missing verifier response")
+	}
+	defer zeroIssuerVerifierResponse(response)
+	encoded, err := protocol.Encode(*response)
+	if err != nil {
+		return err
+	}
+	defer zeroIssuerdOwnedBytes(encoded)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(encoded)
+	return nil
+}
+
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
@@ -632,6 +643,22 @@ func zeroIssuerVerifierRequest(request *protocol.IssuerVerifierRequest) {
 		zeroIssuerdBytes(field)
 	}
 	*request = protocol.IssuerVerifierRequest{}
+}
+
+func zeroIssuerVerifierResponse(response *protocol.IssuerVerifierResponse) {
+	if response == nil {
+		return
+	}
+	for _, field := range [][]byte{
+		response.ServiceID,
+		response.RequestHash,
+		response.TokenSpentKey,
+		response.ResponseNonce,
+		response.ServiceSignature,
+	} {
+		zeroIssuerdBytes(field)
+	}
+	*response = protocol.IssuerVerifierResponse{}
 }
 
 func zeroIssuerdBytes(value []byte) {

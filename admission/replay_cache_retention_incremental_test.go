@@ -256,3 +256,56 @@ func residentName(resident int) string {
 		return "20k-records"
 	}
 }
+
+// TestRetentionFileReplayCacheInsertDoesNotScaleWithResidentRecords guards the
+// property that makes admission affordable: an insert consumes only the records
+// appended since the last one, so its allocation count must not grow with the
+// number of records the cache already holds. Reparsing the whole file on each
+// insert regresses this by orders of magnitude.
+func TestRetentionFileReplayCacheInsertDoesNotScaleWithResidentRecords(t *testing.T) {
+	if testing.Short() {
+		t.Skip("insert allocation measurement performs durable writes")
+	}
+	measure := func(resident int) float64 {
+		directory, err := os.Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer directory.Close()
+		cache, err := NewRetentionFileReplayCacheAt(directory, "replay.log", 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cache.Close()
+		key := make([]byte, 32)
+		next := 0
+		insert := func() {
+			binary.BigEndian.PutUint64(key[24:], uint64(next))
+			next++
+			inserted, err := cache.InsertIfAbsentUntil(key, 1<<40, 100)
+			if err != nil {
+				t.Fatalf("insert: %v", err)
+			}
+			if !inserted {
+				t.Fatal("unique key was reported as a duplicate")
+			}
+		}
+		for i := 0; i < resident; i++ {
+			insert()
+		}
+		return testing.AllocsPerRun(5, insert)
+	}
+
+	const (
+		fewRecords  = 100
+		manyRecords = 1000
+	)
+	small := measure(fewRecords)
+	large := measure(manyRecords)
+	// Ten times more resident records must not cost meaningfully more
+	// allocations. The slack absorbs map growth, not per-record parsing.
+	if limit := small + 24; large > limit {
+		t.Fatalf("insert allocated %.0f times with %d resident records and %.0f with %d; want at most %.0f",
+			large, manyRecords, small, fewRecords, limit)
+	}
+}

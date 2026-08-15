@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"testing"
@@ -12,7 +13,6 @@ import (
 type decodeFuzzTarget struct {
 	name string
 	seed []byte
-	run  func([]byte) error
 }
 
 func DecodeFuzzTargetNames() []string {
@@ -38,7 +38,19 @@ func FuzzDecodeProtocolStructs(f *testing.F) {
 			targetIndex = ^targetIndex
 		}
 		target := targets[targetIndex%len(targets)]
-		_ = target.run(data)
+		decoded, err := decodeFuzzTargetValue(target.name, data)
+		if err != nil {
+			// Rejecting an input is the expected outcome for most of the
+			// generated corpus.
+			return
+		}
+		reencoded, err := wire.Encode(decoded)
+		if err != nil {
+			t.Fatalf("%s decoded but did not re-encode: %v", target.name, err)
+		}
+		if !bytes.Equal(reencoded, data) {
+			t.Fatalf("%s re-encoded to %x, want %x", target.name, reencoded, data)
+		}
 	})
 }
 
@@ -98,32 +110,11 @@ func decodeFuzzTargets() []decodeFuzzTarget {
 }
 
 func readerFuzzTarget(name string, sample wire.Encodable) decodeFuzzTarget {
-	return decodeFuzzTarget{
-		name: name,
-		seed: mustEncodeFuzzSeed(sample),
-		run: func(data []byte) error {
-			r := wire.NewReader(data)
-			decodeByName(name, r)
-			if err := r.Err(); err != nil {
-				return err
-			}
-			if !r.EOF() {
-				return fmt.Errorf("protocol: trailing %s bytes", name)
-			}
-			return nil
-		},
-	}
+	return decodeFuzzTarget{name: name, seed: mustEncodeFuzzSeed(sample)}
 }
 
 func frameBlockFuzzTarget(name string, sample FrameBlock) decodeFuzzTarget {
-	return decodeFuzzTarget{
-		name: name,
-		seed: mustEncodeFuzzSeed(sample),
-		run: func(data []byte) error {
-			_, err := DecodeFrameBlock(data)
-			return err
-		},
-	}
+	return decodeFuzzTarget{name: name, seed: mustEncodeFuzzSeed(sample)}
 }
 
 func decodeFuzzTargetValue(name string, data []byte) (wire.Encodable, error) {

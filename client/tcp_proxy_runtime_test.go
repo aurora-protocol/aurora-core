@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -79,6 +80,42 @@ func TestTCPProxyRuntimeForwardsHTTPConnectBytes(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("proxy connection did not stop after local close")
+	}
+}
+
+func TestTCPProxyRuntimeQueuesOneFramePerLocalRead(t *testing.T) {
+	clientApplication, relayApplication := tcpProxyRuntimeApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	runtime, err := NewTCPProxyRuntime(clientApplication, TCPProxyRuntimeOptions{MaxFlows: 1, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	serverConnection, clientConnection := net.Pipe()
+	defer clientConnection.Close()
+	flow, err := runtime.openFlow(context.Background(), serverConnection, "target.example", 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if open := tcpProxyRuntimeNextRelayFrame(t, clientApplication, relayApplication); open.FrameType != registry.FrameFlowOpen || open.FlowID != flow.id {
+		t.Fatalf("local flow open = %+v", open)
+	}
+
+	if err := runtime.readLocalFlow(context.Background(), bufio.NewReader(bytes.NewReader([]byte("one local read"))), flow); err != nil {
+		t.Fatal(err)
+	}
+	data := tcpProxyRuntimeNextRelayFrame(t, clientApplication, relayApplication)
+	if data.FrameType != registry.FrameStreamData || data.FlowID != flow.id || !bytes.Equal(data.Payload, []byte("one local read")) {
+		t.Fatalf("local read frame = %+v", data)
+	}
+	closeFrame := tcpProxyRuntimeNextRelayFrame(t, clientApplication, relayApplication)
+	if closeFrame.FrameType != registry.FrameFlowClose || closeFrame.FlowID != flow.id {
+		t.Fatalf("local EOF frame = %+v", closeFrame)
+	}
+	if packet, err := clientApplication.TryNextPacket(); !errors.Is(err, session.ErrNoPacket) || packet != nil {
+		t.Fatalf("unexpected packet after one local read = %x, %v", packet, err)
 	}
 }
 

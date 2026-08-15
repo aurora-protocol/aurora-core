@@ -18,6 +18,7 @@ type PacketBatch struct {
 	ProtocolNumbers []uint16
 }
 
+// PacketExchanger synchronously consumes the supplied packet batch and returns caller-owned packets.
 type PacketExchanger interface {
 	ExchangePacketBatch(PacketBatch) (PacketBatch, error)
 }
@@ -136,4 +137,16 @@ func clonePacketBatch(batch PacketBatch) PacketBatch {
 		out.Packets[i] = append([]byte(nil), packet...)
 	}
 	return out
+}
+
+func zeroPacketBatch(batch *PacketBatch) {
+	if batch == nil {
+		return
+	}
+	for index := range batch.Packets {
+		zeroCarrierPayload(batch.Packets[index])
+		batch.Packets[index] = nil
+	}
+	batch.Packets = nil
+	batch.ProtocolNumbers = nil
 }

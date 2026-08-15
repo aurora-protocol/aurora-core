@@ -64,6 +64,7 @@ type nativeSessionRegistry struct {
 type nativeSession struct {
 	mu             sync.Mutex
 	localIngressMu sync.Mutex
+	localPacketMu  sync.Mutex
 
 	context           context.Context
 	cancel            context.CancelFunc
@@ -574,6 +575,8 @@ func (s *nativeSession) enqueueLocalPacket(ctx context.Context, packet []byte) e
 	if s == nil || ctx == nil || len(packet) == 0 || len(packet) > maximumNativeLocalPacketBytes {
 		return fmt.Errorf("auroracore: native local packet is invalid")
 	}
+	s.localPacketMu.Lock()
+	defer s.localPacketMu.Unlock()
 	s.mu.Lock()
 	packetContext := s.context
 	packets := s.localPackets
@@ -710,8 +713,8 @@ func (s *nativeSession) close() error {
 		return nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
@@ -719,21 +722,38 @@ func (s *nativeSession) close() error {
 		s.issuerTimer.Stop()
 		s.issuerTimer = nil
 	}
-	if s.cancel != nil {
-		s.cancel()
-	}
+	cancel := s.cancel
+	handshake := s.handshake
+	established := s.established
+	adapter := s.adapter
+	localPackets := s.localPackets
+	s.context = nil
+	s.cancel = nil
+	s.handshake = nil
+	s.established = nil
+	s.adapter = nil
+	s.localPackets = nil
 	zeroNativeProofRequest(&s.request)
-	var closeErrors []error
-	if s.handshake != nil {
-		closeErrors = append(closeErrors, s.handshake.Close())
-		s.handshake = nil
-	}
-	if s.established != nil {
-		closeErrors = append(closeErrors, s.established.Close())
-		s.established = nil
-	}
 	s.issuerURL = ""
 	s.issuerCarrierPath = ""
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	s.localPacketMu.Lock()
+	zeroNativeLocalPacketQueue(localPackets)
+	s.localPacketMu.Unlock()
+	if adapter != nil {
+		adapter.Close()
+	}
+	var closeErrors []error
+	if handshake != nil {
+		closeErrors = append(closeErrors, handshake.Close())
+	}
+	if established != nil {
+		closeErrors = append(closeErrors, established.Close())
+	}
 	return errors.Join(closeErrors...)
 }
 
@@ -896,6 +916,17 @@ func zeroNativeLocalPackets(values [][]byte) {
 	for index := range values {
 		zeroNativeBytes(values[index])
 		values[index] = nil
+	}
+}
+
+func zeroNativeLocalPacketQueue(packets chan []byte) {
+	for {
+		select {
+		case packet := <-packets:
+			zeroNativeBytes(packet)
+		default:
+			return
+		}
 	}
 }
 

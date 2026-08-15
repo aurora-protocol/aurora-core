@@ -571,6 +571,12 @@ func writeSocketBytes(conn net.Conn, data []byte) error {
 	return nil
 }
 
+func zeroSocketEgressBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
+}
+
 func (e *SocketEgress) activeFlow(flowID uint64, kind uint8) (*socketFlow, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -621,6 +627,7 @@ func (e *SocketEgress) startUDPReadPump(flowID uint64, flow *socketFlow) error {
 func (e *SocketEgress) runTCPReadPump(flowID uint64, flow *socketFlow) {
 	defer e.closeFlow(flowID, flow)
 	buffer := make([]byte, flow.bufferBytes)
+	defer zeroSocketEgressBytes(buffer)
 	for {
 		if err := flow.ctx.Err(); err != nil {
 			return
@@ -630,6 +637,10 @@ func (e *SocketEgress) runTCPReadPump(flowID uint64, flow *socketFlow) {
 			return
 		}
 		n, err := flow.conn.Read(buffer)
+		if n < 0 || n > len(buffer) {
+			e.queueTCPFlowClose(flow, flowID, protocol.CloseResetByPeer)
+			return
+		}
 		if n > 0 {
 			frame, frameErr := protocol.NewStreamDataFrame(flowID, buffer[:n], 0)
 			if frameErr != nil || e.queueSocketFrames(flow.ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}) != nil {
@@ -656,6 +667,7 @@ func (e *SocketEgress) runTCPReadPump(flowID uint64, flow *socketFlow) {
 func (e *SocketEgress) runUDPReadPump(flowID uint64, flow *socketFlow) {
 	defer e.closeFlow(flowID, flow)
 	buffer := make([]byte, flow.bufferBytes)
+	defer zeroSocketEgressBytes(buffer)
 	for {
 		if err := flow.ctx.Err(); err != nil {
 			return
@@ -665,6 +677,10 @@ func (e *SocketEgress) runUDPReadPump(flowID uint64, flow *socketFlow) {
 			return
 		}
 		n, err := flow.conn.Read(buffer)
+		if n < 0 || n > len(buffer) {
+			e.queueFlowClose(flow, flowID, protocol.CloseResetByPeer)
+			return
+		}
 		if n > e.limits.MaxUDPDatagramBytes {
 			e.queueFlowClose(flow, flowID, protocol.CloseResourceLimit)
 			return

@@ -41,6 +41,27 @@ func (c *closeErrorConn) Close() error {
 	return c.err
 }
 
+type invalidReadSocketConn struct {
+	net.Conn
+	readCount int
+}
+
+func (c *invalidReadSocketConn) Read([]byte) (int, error) {
+	return c.readCount, nil
+}
+
+type observingReadSocketConn struct {
+	net.Conn
+	payload []byte
+	buffer  []byte
+}
+
+func (c *observingReadSocketConn) Read(buffer []byte) (int, error) {
+	c.buffer = buffer
+	copy(buffer, c.payload)
+	return len(c.payload), io.EOF
+}
+
 func (d *recordingContextDialer) DialContext(_ context.Context, network, address string) (net.Conn, error) {
 	d.calls = append(d.calls, socketDialCall{network: network, address: address})
 	if d.err != nil {
@@ -750,6 +771,86 @@ func socketEgressDNSQuery(t testing.TB, domain string, queryType uint16) []byte 
 	}
 	query = append(query, 0, byte(queryType>>8), byte(queryType), 0, 1)
 	return query
+}
+
+func TestSocketEgressTCPReadPumpRejectsInvalidReadLength(t *testing.T) {
+	local, peer := net.Pipe()
+	defer peer.Close()
+	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink:     &recordingFrameSink{},
+		Policy:   ExitPolicy{AllowPrivate: true},
+		Dialer:   &recordingContextDialer{},
+		Resolver: &recordingIPResolver{},
+		Limits:   validSocketEgressLimits(1),
+	})
+	if err != nil {
+		t.Fatalf("NewSocketEgress failed: %v", err)
+	}
+	defer egress.Close()
+	flowState := coreflow.FlowState{
+		FlowID:     79,
+		Kind:       coreflow.FlowKindTCPStream,
+		TargetKind: coreflow.TargetKindIPv4,
+		TargetHost: []byte{127, 0, 0, 1},
+		TargetPort: 443,
+	}
+	flow, err := egress.reserveFlow(flowState)
+	if err != nil {
+		t.Fatalf("reserveFlow failed: %v", err)
+	}
+	if err := egress.installFlow(flowState.FlowID, flow, &invalidReadSocketConn{Conn: local, readCount: flow.bufferBytes + 1}, selectedSocketTarget{}, context.Background()); err != nil {
+		t.Fatalf("installFlow failed: %v", err)
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("runTCPReadPump panicked on invalid read length: %v", recovered)
+		}
+	}()
+
+	egress.runTCPReadPump(flowState.FlowID, flow)
+}
+
+func TestSocketEgressTCPReadPumpZeroesTerminatedReadBuffer(t *testing.T) {
+	local, peer := net.Pipe()
+	defer peer.Close()
+	sink := &channelFrameSink{blocks: make(chan protocol.FrameBlock, 2)}
+	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
+		Sink:     sink,
+		Policy:   ExitPolicy{AllowPrivate: true},
+		Dialer:   &recordingContextDialer{},
+		Resolver: &recordingIPResolver{},
+		Limits:   validSocketEgressLimits(1),
+	})
+	if err != nil {
+		t.Fatalf("NewSocketEgress failed: %v", err)
+	}
+	defer egress.Close()
+	flowState := coreflow.FlowState{
+		FlowID:     80,
+		Kind:       coreflow.FlowKindTCPStream,
+		TargetKind: coreflow.TargetKindIPv4,
+		TargetHost: []byte{127, 0, 0, 1},
+		TargetPort: 443,
+	}
+	flow, err := egress.reserveFlow(flowState)
+	if err != nil {
+		t.Fatalf("reserveFlow failed: %v", err)
+	}
+	conn := &observingReadSocketConn{Conn: local, payload: []byte{0x45, 0x11, 0x22, 0x33}}
+	if err := egress.installFlow(flowState.FlowID, flow, conn, selectedSocketTarget{}, context.Background()); err != nil {
+		t.Fatalf("installFlow failed: %v", err)
+	}
+
+	egress.runTCPReadPump(flowState.FlowID, flow)
+
+	if len(conn.buffer) != flow.bufferBytes {
+		t.Fatalf("observed read buffer length = %d, want %d", len(conn.buffer), flow.bufferBytes)
+	}
+	for index, value := range conn.buffer {
+		if value != 0 {
+			t.Fatalf("terminated read buffer byte %d = %x, want zero", index, value)
+		}
+	}
 }
 
 func TestSocketEgressTCPRoundTripAndEOF(t *testing.T) {

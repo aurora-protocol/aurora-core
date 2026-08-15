@@ -3,6 +3,7 @@ package admission
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -22,6 +23,12 @@ type RetentionFileReplayCache struct {
 	path      string
 	lock      *os.File
 	seen      map[string]uint64
+	// loaded identifies the data file region already parsed into seen. Records
+	// are only ever appended between compactions, so a reload parses just the
+	// appended tail; a compaction replaces the file and forces a full reload.
+	loadedInfo  os.FileInfo
+	loadedSize  int64
+	minDeadline uint64
 }
 
 func NewRetentionFileReplayCacheAt(directory *os.File, name string, nowUnix uint64) (*RetentionFileReplayCache, error) {
@@ -36,7 +43,7 @@ func NewRetentionFileReplayCacheAt(directory *os.File, name string, nowUnix uint
 		_ = lock.Close()
 		return nil, err
 	}
-	cache := &RetentionFileReplayCache{directory: directory, name: name, path: filepath.Join(directory.Name(), name), lock: lock, seen: make(map[string]uint64)}
+	cache := &RetentionFileReplayCache{directory: directory, name: name, path: filepath.Join(directory.Name(), name), lock: lock, seen: make(map[string]uint64), minDeadline: math.MaxUint64}
 	if err := cache.withLock(func() error {
 		expired, err := cache.load(nowUnix)
 		if err != nil {
@@ -81,6 +88,9 @@ func (c *RetentionFileReplayCache) InsertIfAbsentUntil(key []byte, retainUntilUn
 			return nil
 		}
 		c.seen[entry] = retainUntilUnix
+		if retainUntilUnix < c.minDeadline {
+			c.minDeadline = retainUntilUnix
+		}
 		inserted = true
 		if expired {
 			return c.rewrite()
@@ -142,40 +152,100 @@ func (c *RetentionFileReplayCache) load(nowUnix uint64) (bool, error) {
 	if err := file.Chmod(0o600); err != nil {
 		return false, err
 	}
-	seen := make(map[string]uint64)
-	expired := false
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		fields := strings.Split(line, "\t")
-		if len(fields) > 2 || len(fields) == 2 && fields[1] == "" {
-			return false, fmt.Errorf("admission: retention replay cache %s has malformed entry", c.path)
-		}
-		key, err := hex.DecodeString(fields[0])
-		if err != nil || len(key) == 0 || hex.EncodeToString(key) != fields[0] {
-			return false, fmt.Errorf("admission: retention replay cache %s has malformed key", c.path)
-		}
-		deadline := uint64(math.MaxUint64)
-		if len(fields) == 2 {
-			deadline, err = strconv.ParseUint(fields[1], 10, 64)
-			if err != nil || deadline == 0 || strconv.FormatUint(deadline, 10) != fields[1] {
-				return false, fmt.Errorf("admission: retention replay cache %s has malformed retention deadline", c.path)
-			}
-		}
-		if deadline > nowUnix {
-			seen[string(key)] = deadline
-		} else {
-			expired = true
-		}
-	}
-	if err := scanner.Err(); err != nil {
+	info, err := file.Stat()
+	if err != nil {
 		return false, err
 	}
-	c.seen = seen
-	return expired, nil
+	offset := c.loadedSize
+	if c.loadedInfo == nil || !os.SameFile(c.loadedInfo, info) || info.Size() < offset {
+		// The file was replaced or truncated behind this handle; reparse it all.
+		c.seen = make(map[string]uint64)
+		c.minDeadline = math.MaxUint64
+		offset = 0
+	}
+	if offset > 0 {
+		if _, err := file.Seek(offset, io.SeekStart); err != nil {
+			return false, err
+		}
+	}
+	consumed, err := c.consume(file, offset)
+	if err != nil {
+		return false, err
+	}
+	c.loadedInfo = info
+	c.loadedSize = consumed
+	if c.minDeadline > nowUnix {
+		return false, nil
+	}
+	c.expireLoaded(nowUnix)
+	return true, nil
+}
+
+// consume parses records from the current file position and reports the offset
+// past the last newline-terminated record. A partial trailing record is parsed
+// but not consumed, so a completed record is never skipped.
+func (c *RetentionFileReplayCache) consume(file *os.File, offset int64) (int64, error) {
+	reader := bufio.NewReader(file)
+	for {
+		line, readErr := reader.ReadString('\n')
+		if len(line) > 0 {
+			terminated := readErr == nil
+			if record := strings.TrimSuffix(line, "\n"); record != "" {
+				key, deadline, err := c.parseRecord(record)
+				if err != nil {
+					return 0, err
+				}
+				c.seen[key] = deadline
+				if deadline < c.minDeadline {
+					c.minDeadline = deadline
+				}
+			}
+			if terminated {
+				offset += int64(len(line))
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return offset, nil
+			}
+			return 0, readErr
+		}
+	}
+}
+
+func (c *RetentionFileReplayCache) parseRecord(record string) (string, uint64, error) {
+	fields := strings.Split(record, "\t")
+	if len(fields) > 2 || len(fields) == 2 && fields[1] == "" {
+		return "", 0, fmt.Errorf("admission: retention replay cache %s has malformed entry", c.path)
+	}
+	key, err := hex.DecodeString(fields[0])
+	if err != nil || len(key) == 0 || hex.EncodeToString(key) != fields[0] {
+		return "", 0, fmt.Errorf("admission: retention replay cache %s has malformed key", c.path)
+	}
+	deadline := uint64(math.MaxUint64)
+	if len(fields) == 2 {
+		deadline, err = strconv.ParseUint(fields[1], 10, 64)
+		if err != nil || deadline == 0 || strconv.FormatUint(deadline, 10) != fields[1] {
+			return "", 0, fmt.Errorf("admission: retention replay cache %s has malformed retention deadline", c.path)
+		}
+	}
+	return string(key), deadline, nil
+}
+
+// expireLoaded drops records whose retention deadline has passed and refreshes
+// the earliest remaining deadline.
+func (c *RetentionFileReplayCache) expireLoaded(nowUnix uint64) {
+	earliest := uint64(math.MaxUint64)
+	for key, deadline := range c.seen {
+		if deadline <= nowUnix {
+			delete(c.seen, key)
+			continue
+		}
+		if deadline < earliest {
+			earliest = deadline
+		}
+	}
+	c.minDeadline = earliest
 }
 
 func (c *RetentionFileReplayCache) rewrite() error {
@@ -215,6 +285,9 @@ func (c *RetentionFileReplayCache) rewrite() error {
 	if err := replaceRetentionReplayCacheFile(c.directory, temporaryName, c.name); err != nil {
 		return err
 	}
+	// The compacted file is a new directory entry, so the next load reparses it.
+	c.loadedInfo = nil
+	c.loadedSize = 0
 	return syncRetentionReplayCacheDirectory(c.directory)
 }
 
@@ -235,5 +308,10 @@ func (c *RetentionFileReplayCache) append(key string, deadline uint64) error {
 	if written != len(line) {
 		return io.ErrShortWrite
 	}
-	return file.Sync()
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	// The record is already resident, so the next load starts past it.
+	c.loadedSize += int64(len(line))
+	return nil
 }

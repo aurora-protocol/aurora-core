@@ -94,6 +94,7 @@ func NewVerifierHTTPHandler(service *Service) http.Handler {
 			writeError(w, http.StatusBadRequest, "invalid verifier request")
 			return
 		}
+		defer zeroIssuerVerifierRequest(&req)
 		if rejectCanceledRequest(w, r) {
 			return
 		}
@@ -510,17 +511,54 @@ func decodeVerifierRequest(r *http.Request) (protocol.IssuerVerifierRequest, err
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maximumVerifierRequestBodyBytes+1))
 	if err != nil {
+		zeroIssuerdBytes(body)
 		return protocol.IssuerVerifierRequest{}, err
 	}
 	if len(body) > int(maximumVerifierRequestBodyBytes) {
+		zeroIssuerdBytes(body)
 		return protocol.IssuerVerifierRequest{}, errVerifierRequestTooLarge
 	}
+	return decodeVerifierRequestBody(body)
+}
+
+func decodeVerifierRequestBody(body []byte) (protocol.IssuerVerifierRequest, error) {
+	defer zeroIssuerdBytes(body)
 	reader := wire.NewReader(body)
 	req := protocol.DecodeIssuerVerifierRequest(reader)
 	if reader.Err() != nil || !reader.EOF() {
+		zeroIssuerVerifierRequest(&req)
 		return protocol.IssuerVerifierRequest{}, fmt.Errorf("issuerd: invalid verifier request")
 	}
 	return req, nil
+}
+
+func zeroIssuerVerifierRequest(request *protocol.IssuerVerifierRequest) {
+	if request == nil {
+		return
+	}
+	for _, field := range [][]byte{
+		request.ServiceID,
+		request.IssuerID,
+		request.IssuerMetadataHash,
+		request.RelayDescriptorHash,
+		request.RelayBucketID,
+		request.TokenKeyID,
+		request.TokenNonce,
+		request.ChallengeDigest,
+		request.AuthenticatorInputHash,
+		request.TokenAuthenticator,
+		request.TokenSpentKey,
+		request.RequestNonce,
+	} {
+		zeroIssuerdBytes(field)
+	}
+	*request = protocol.IssuerVerifierRequest{}
+}
+
+func zeroIssuerdBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
 }
 
 func decodeJSONBody(r *http.Request, out any) error {

@@ -56,6 +56,51 @@ func TestHTTPDaemonReadinessHarnessCoversLiveIssuerSurface(t *testing.T) {
 	}
 }
 
+func TestDecodeVerifierRequestBodyOwnsAndScrubsInput(t *testing.T) {
+	service, err := NewHarnessService(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifierService := service.PublishIssuerMetadata().VerifierServices[0]
+	expected := verifierHTTPTestRequest(t, service, verifierService)
+	encoded, err := protocol.Encode(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeVerifierRequestBody(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded.TokenAuthenticator, expected.TokenAuthenticator) || !bytes.Equal(decoded.RequestNonce, expected.RequestNonce) {
+		t.Fatalf("decoded verifier request = %#v", decoded)
+	}
+	for index, value := range encoded {
+		if value != 0 {
+			t.Fatalf("verifier request input byte %d = %x after decode, want zero", index, value)
+		}
+	}
+	heldAuthenticator := decoded.TokenAuthenticator
+	heldNonce := decoded.RequestNonce
+	zeroIssuerVerifierRequest(&decoded)
+	for _, field := range [][]byte{heldAuthenticator, heldNonce} {
+		for index, value := range field {
+			if value != 0 {
+				t.Fatalf("decoded verifier request byte %d = %x after release, want zero", index, value)
+			}
+		}
+	}
+
+	malformed := []byte{0xff, 0xee, 0xdd}
+	if _, err := decodeVerifierRequestBody(malformed); err == nil {
+		t.Fatal("malformed verifier request was accepted")
+	}
+	for index, value := range malformed {
+		if value != 0 {
+			t.Fatalf("malformed verifier request byte %d = %x after decode, want zero", index, value)
+		}
+	}
+}
+
 func TestHTTPDaemonPublishesMetadataIssuesVerifiesAndSpends(t *testing.T) {
 	service, err := NewHarnessService(200)
 	if err != nil {

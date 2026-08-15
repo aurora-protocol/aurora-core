@@ -182,7 +182,7 @@ func (r *PacketTUNRuntime) writePackets(ctx context.Context, packets [][]byte) e
 	return nil
 }
 
-// Close closes the packet device and unblocks any pending local packet read.
+// Close closes the packet device and releases the adapter-owned packet state.
 func (r *PacketTUNRuntime) Close() error {
 	if r == nil {
 		return nil
@@ -190,6 +190,7 @@ func (r *PacketTUNRuntime) Close() error {
 	r.closeOnce.Do(func() {
 		close(r.done)
 		r.closeErr = r.device.Close()
+		r.adapter.Close()
 	})
 	return r.closeErr
 }

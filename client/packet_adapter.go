@@ -51,6 +51,9 @@ const (
 	tcpFlagACK                               = 0x10
 )
 
+// ErrPacketAdapterClosed reports packet processing attempted after adapter shutdown.
+var ErrPacketAdapterClosed = errors.New("client: packet adapter is closed")
+
 // LocalDNSAnswers resolves a captured local DNS query without exposing it to a public resolver.
 type LocalDNSAnswers func(context.Context, []byte) ([]string, error)
 
@@ -76,6 +79,7 @@ type PacketAdapter struct {
 	udpMode       transport.UDPMode
 	random        io.Reader
 	dnsAnswers    LocalDNSAnswers
+	closed        bool
 	nextFlowID    uint64
 	nextPacketID  uint16
 	flowsByTuple  map[packetAdapterTuple]*packetAdapterFlow
@@ -239,6 +243,37 @@ func NewPacketAdapter(application *session.Application, options PacketAdapterOpt
 	}, nil
 }
 
+// Close clears adapter-owned packet state. It does not close the application session.
+func (a *PacketAdapter) Close() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return
+	}
+	a.closed = true
+	zeroPacketAdapterPacketList(a.localPackets)
+	a.localPackets = nil
+	for key, set := range a.ipv4Fragments {
+		a.discardIPv4FragmentSetLocked(key, set)
+	}
+	for key, set := range a.ipv6Fragments {
+		a.discardIPv6FragmentSetLocked(key, set)
+	}
+	for flowID := range a.flowsByID {
+		_ = a.proxy.Close(flowID)
+	}
+	a.flowsByTuple = nil
+	a.flowsByID = nil
+	a.dnsRequests = nil
+	a.application = nil
+	a.proxy = nil
+	a.random = nil
+	a.dnsAnswers = nil
+}
+
 // Ingress captures one local packet and queues the corresponding encrypted flow frames.
 func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Time) error {
 	if a == nil {
@@ -254,13 +289,22 @@ func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Ti
 		return fmt.Errorf("client: packet adapter requires a valid time")
 	}
 	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return ErrPacketAdapterClosed
+	}
 	a.expireIPv4FragmentsLocked(now)
 	a.expireIPv6FragmentsLocked(now)
+	hasDNSAnswers := a.dnsAnswers != nil
 	a.mu.Unlock()
 	if fragment, fragmented, err := parsePacketAdapterIPv4Fragment(encoded, a.maximumPacket); err != nil {
 		return err
 	} else if fragmented {
 		a.mu.Lock()
+		if a.closed {
+			a.mu.Unlock()
+			return ErrPacketAdapterClosed
+		}
 		reassembled, err := a.ingressIPv4FragmentLocked(fragment, now)
 		a.mu.Unlock()
 		if err != nil {
@@ -276,6 +320,10 @@ func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Ti
 		return err
 	} else if fragmented {
 		a.mu.Lock()
+		if a.closed {
+			a.mu.Unlock()
+			return ErrPacketAdapterClosed
+		}
 		reassembled, err := a.ingressIPv6FragmentLocked(fragment, now)
 		a.mu.Unlock()
 		if err != nil {
@@ -292,13 +340,16 @@ func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Ti
 		return err
 	}
 	if packet.protocol == packetAdapterUDP && packet.udp.destinationPort == packetAdapterDNSPort {
-		if a.dnsAnswers != nil {
+		if hasDNSAnswers {
 			return a.ingressDNS(ctx, packet, now)
 		}
 		return a.ingressRelayedDNS(ctx, packet, now)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.closed {
+		return ErrPacketAdapterClosed
+	}
 	switch packet.protocol {
 	case packetAdapterTCP:
 		return a.ingressTCPLocked(ctx, packet, now)
@@ -311,15 +362,25 @@ func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Ti
 
 // NextEncryptedPacket waits for one encrypted packet queued by Ingress.
 func (a *PacketAdapter) NextEncryptedPacket(ctx context.Context) ([]byte, error) {
-	if a == nil || a.application == nil {
+	if a == nil {
 		return nil, fmt.Errorf("client: packet adapter application is unavailable")
 	}
-	return a.application.NextPacket(ctx)
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return nil, ErrPacketAdapterClosed
+	}
+	application := a.application
+	a.mu.Unlock()
+	if application == nil {
+		return nil, fmt.Errorf("client: packet adapter application is unavailable")
+	}
+	return application.NextPacket(ctx)
 }
 
 // HandleEncryptedPacket decrypts a relay packet and returns packets for the local tunnel.
 func (a *PacketAdapter) HandleEncryptedPacket(ctx context.Context, encoded []byte, now time.Time) ([][]byte, error) {
-	if a == nil || a.application == nil {
+	if a == nil {
 		return nil, fmt.Errorf("client: packet adapter application is unavailable")
 	}
 	if ctx == nil {
@@ -328,10 +389,21 @@ func (a *PacketAdapter) HandleEncryptedPacket(ctx context.Context, encoded []byt
 	if now.IsZero() || now.Unix() < 0 {
 		return nil, fmt.Errorf("client: packet adapter requires a valid time")
 	}
-	if len(encoded) == 0 || len(encoded) > a.maximumPacket+64 {
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return nil, ErrPacketAdapterClosed
+	}
+	application := a.application
+	maximumPacket := a.maximumPacket
+	a.mu.Unlock()
+	if application == nil {
+		return nil, fmt.Errorf("client: packet adapter application is unavailable")
+	}
+	if len(encoded) == 0 || len(encoded) > maximumPacket+64 {
 		return nil, fmt.Errorf("client: encrypted packet size is invalid")
 	}
-	blocks, err := a.application.HandlePacket(ctx, now, encoded)
+	blocks, err := application.HandlePacket(ctx, now, encoded)
 	if err != nil {
 		return nil, err
 	}
@@ -342,7 +414,7 @@ func (a *PacketAdapter) HandleEncryptedPacket(ctx context.Context, encoded []byt
 // HandleFrameBlocks converts decrypted relay frames to packets for the local tunnel.
 // Callers retain ownership of blocks and must not mutate them until this method returns.
 func (a *PacketAdapter) HandleFrameBlocks(ctx context.Context, blocks []protocol.FrameBlock, now time.Time) ([][]byte, error) {
-	if a == nil || a.application == nil {
+	if a == nil {
 		return nil, fmt.Errorf("client: packet adapter application is unavailable")
 	}
 	if ctx == nil {
@@ -361,6 +433,9 @@ func (a *PacketAdapter) HandleFrameBlocks(ctx context.Context, blocks []protocol
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.closed || a.application == nil {
+		return nil, ErrPacketAdapterClosed
+	}
 	a.expireDNSRequestsLocked(now)
 	var local [][]byte
 	for _, block := range blocks {
@@ -568,15 +643,25 @@ func (a *PacketAdapter) ingressUDPLocked(ctx context.Context, packet packetAdapt
 }
 
 func (a *PacketAdapter) ingressDNS(ctx context.Context, packet packetAdapterIPPacket, now time.Time) error {
-	if a.dnsAnswers == nil {
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return ErrPacketAdapterClosed
+	}
+	dnsAnswers := a.dnsAnswers
+	a.mu.Unlock()
+	if dnsAnswers == nil {
 		return fmt.Errorf("client: packet adapter local DNS answers are unavailable")
 	}
-	answers, err := a.dnsAnswers(ctx, append([]byte(nil), packet.udp.payload...))
+	answers, err := dnsAnswers(ctx, append([]byte(nil), packet.udp.payload...))
 	if err != nil {
 		return fmt.Errorf("client: packet adapter local DNS answer: %w", err)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.closed {
+		return ErrPacketAdapterClosed
+	}
 	if len(a.localPackets) >= a.maximumLocal {
 		return session.ErrBackpressure
 	}
@@ -612,6 +697,9 @@ func (a *PacketAdapter) ingressRelayedDNS(ctx context.Context, packet packetAdap
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.closed {
+		return ErrPacketAdapterClosed
+	}
 	a.expireDNSRequestsLocked(now)
 	if a.flowCountLocked() >= a.maximumFlows {
 		return fmt.Errorf("client: packet adapter flow limit reached")

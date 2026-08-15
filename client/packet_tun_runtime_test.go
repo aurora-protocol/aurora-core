@@ -119,6 +119,32 @@ func TestPacketTUNRuntimeCloseUnblocksRead(t *testing.T) {
 	}
 }
 
+func TestPacketTUNRuntimeCloseClearsAdapterPacketBuffers(t *testing.T) {
+	runtime, clientApplication, relayApplication, _ := packetTUNRuntimeFixture(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+
+	now := time.Unix(1_700_000_000, 0)
+	syn := packetAdapterTCPv4(t, [4]byte{10, 77, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, 100, 0, tcpFlagSYN, nil)
+	if err := runtime.adapter.Ingress(context.Background(), syn, now); err != nil {
+		t.Fatalf("ingress TCP SYN: %v", err)
+	}
+	if len(runtime.adapter.localPackets) != 1 {
+		t.Fatalf("queued local packets = %d, want 1", len(runtime.adapter.localPackets))
+	}
+	queued := runtime.adapter.localPackets[0]
+
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(runtime.adapter.localPackets) != 0 || !bytes.Equal(queued, make([]byte, len(queued))) {
+		t.Fatal("runtime close did not clear adapter packet buffers")
+	}
+	if err := runtime.adapter.Ingress(context.Background(), syn, now); !errors.Is(err, ErrPacketAdapterClosed) {
+		t.Fatalf("adapter ingress after runtime close = %v, want %v", err, ErrPacketAdapterClosed)
+	}
+}
+
 func TestPacketTUNRuntimeCloseUnblocksWrite(t *testing.T) {
 	runtime, clientApplication, relayApplication, device := packetTUNRuntimeFixture(t)
 	defer clientApplication.Close()

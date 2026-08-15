@@ -84,6 +84,12 @@ func FirstHopRouteInstanceID(selectedSuite uint64, preludeTranscriptHash, relayD
 }
 
 func PacketAD(selectedSuite uint64, routeInstanceID uint64, hopLayer, direction, keyPhase uint8, packetNumber uint64) ([]byte, error) {
+	return AppendPacketAD(nil, selectedSuite, routeInstanceID, hopLayer, direction, keyPhase, packetNumber)
+}
+
+// AppendPacketAD appends the packet associated data to dst. A caller that
+// already owns digest-sized storage avoids an allocation per packet.
+func AppendPacketAD(dst []byte, selectedSuite uint64, routeInstanceID uint64, hopLayer, direction, keyPhase uint8, packetNumber uint64) ([]byte, error) {
 	if direction > 1 {
 		return nil, fmt.Errorf("crypto: reserved packet direction 0x%x", direction)
 	}
@@ -99,5 +105,5 @@ func PacketAD(selectedSuite uint64, routeInstanceID uint64, hopLayer, direction,
 	if err != nil {
 		return nil, err
 	}
-	return SuiteHash(selectedSuite, preimage)
+	return AppendSuiteHash(dst, selectedSuite, preimage)
 }

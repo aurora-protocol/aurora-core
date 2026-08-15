@@ -40,25 +40,33 @@ func SHA256(b []byte) []byte {
 }
 
 func SuiteHash(suite uint64, parts ...[]byte) ([]byte, error) {
+	return AppendSuiteHash(nil, suite, parts...)
+}
+
+// AppendSuiteHash appends the suite hash of parts to dst. A caller that already
+// owns storage large enough for the digest avoids an allocation per hash.
+func AppendSuiteHash(dst []byte, suite uint64, parts ...[]byte) ([]byte, error) {
+	// Each branch keeps its concrete digest type. Assigning them to a shared
+	// hash.Hash variable makes the digest escape and allocate on every call.
 	switch suite {
 	case registry.SuiteHybrid768AESGCM, registry.SuiteHybrid768P256AESGCM, registry.SuiteHybrid768ChaCha20, registry.SuiteHybrid768P256ChaCha20:
 		h := sha512.New384()
-		for _, p := range parts {
-			h.Write(p)
+		for _, part := range parts {
+			h.Write(part)
 		}
-		return h.Sum(nil), nil
+		return h.Sum(dst), nil
 	case registry.SuiteHybrid1024AESGCM, registry.SuiteHybrid1024ChaCha20:
 		h := sha512.New()
-		for _, p := range parts {
-			h.Write(p)
+		for _, part := range parts {
+			h.Write(part)
 		}
-		return h.Sum(nil), nil
+		return h.Sum(dst), nil
 	case registry.SuiteLabClassical:
 		h := sha256.New()
-		for _, p := range parts {
-			h.Write(p)
+		for _, part := range parts {
+			h.Write(part)
 		}
-		return h.Sum(nil), nil
+		return h.Sum(dst), nil
 	default:
 		return nil, fmt.Errorf("crypto: unsupported suite 0x%x", suite)
 	}

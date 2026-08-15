@@ -125,6 +125,33 @@ func TestSealEncodedRejectsFrameForOtherDirection(t *testing.T) {
 	}
 }
 
+func TestSealEncodedClearsNonceScratchOnRekey(t *testing.T) {
+	frame, err := protocol.NewStreamDataFrame(7, bytes.Repeat([]byte{0x5a}, 64), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}
+	protector := sealEncodedProtector(t, 0x42, 0)
+	if _, err := protector.SealEncoded(block); err != nil {
+		t.Fatalf("seal encoded: %v", err)
+	}
+	if protector.nonceScratch == ([12]byte{}) {
+		t.Fatal("sealing left the nonce scratch empty")
+	}
+	// A retained nonce discloses the static IV it came from, so replacing the
+	// traffic material must not leave the previous nonce resident.
+	if err := protector.ReplaceMaterial(bytesOf(0x55, 32), bytesOf(0x66, 12)); err != nil {
+		t.Fatalf("replace material: %v", err)
+	}
+	if protector.nonceScratch != ([12]byte{}) {
+		t.Fatalf("nonce scratch retained %x after rekey", protector.nonceScratch)
+	}
+	protector.Destroy()
+	if protector.nonceScratch != ([12]byte{}) || protector.adScratch != ([64]byte{}) {
+		t.Fatal("destroy left seal scratch resident")
+	}
+}
+
 func BenchmarkProtectorSealEncoded1200(b *testing.B) {
 	protector, block := benchmarkProtectorAndBlock(b)
 	b.ReportAllocs()

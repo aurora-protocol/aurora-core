@@ -109,6 +109,12 @@ type Protector struct {
 	aead        *auroracrypto.SuiteAEAD
 	cachedSuite uint64
 	cachedKey   [32]byte
+	// Sealing already requires exclusive use of a protector because it advances
+	// the packet number, so the associated data and nonce for each sealed packet
+	// can reuse this storage instead of allocating. Opening keeps a value
+	// receiver so it stays safe for concurrent use, and allocates instead.
+	adScratch    [64]byte
+	nonceScratch [12]byte
 }
 
 // NewProtector returns a protector that owns copies of its traffic material.
@@ -148,6 +154,8 @@ func (p *Protector) ReplaceMaterial(key, staticIV []byte) error {
 	ivCopy := append([]byte(nil), staticIV...)
 	destroyBytes(p.Key)
 	destroyBytes(p.StaticIV)
+	// A retained nonce discloses the static IV it was derived from.
+	p.nonceScratch = [12]byte{}
 	p.clearAEAD()
 	p.Key = keyCopy
 	p.StaticIV = ivCopy
@@ -248,11 +256,11 @@ func (p *Protector) SealEncoded(block protocol.FrameBlock) ([]byte, error) {
 		return p.sealEncodedByCopy(block)
 	}
 
-	aad, err := auroracrypto.PacketAD(p.Suite, p.RouteInstanceID, p.HopLayer, p.Direction, p.KeyPhase, packetNumber)
+	aad, err := auroracrypto.AppendPacketAD(p.adScratch[:0], p.Suite, p.RouteInstanceID, p.HopLayer, p.Direction, p.KeyPhase, packetNumber)
 	if err != nil {
 		return nil, err
 	}
-	nonce, err := auroracrypto.XORNonce96(p.StaticIV, packetNumber)
+	nonce, err := auroracrypto.AppendXORNonce96(p.nonceScratch[:0], p.StaticIV, packetNumber)
 	if err != nil {
 		return nil, err
 	}

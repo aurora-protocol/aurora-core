@@ -145,13 +145,18 @@ func aes256gcm(key []byte) (cipher.AEAD, error) {
 }
 
 func XORNonce96(staticIV []byte, n uint64) ([]byte, error) {
+	return AppendXORNonce96(nil, staticIV, n)
+}
+
+// AppendXORNonce96 appends the packet nonce to dst. A caller that already owns
+// nonce-sized storage avoids an allocation per packet.
+func AppendXORNonce96(dst []byte, staticIV []byte, n uint64) ([]byte, error) {
 	if len(staticIV) != 12 {
 		return nil, fmt.Errorf("crypto: static IV length %d, want 12", len(staticIV))
 	}
-	out := make([]byte, 12)
-	copy(out, staticIV)
+	out := append(dst, staticIV...)
 	for i := 0; i < 8; i++ {
-		out[11-i] ^= byte(n >> (8 * i))
+		out[len(out)-1-i] ^= byte(n >> (8 * i))
 	}
 	return out, nil
 }

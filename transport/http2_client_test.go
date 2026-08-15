@@ -634,6 +634,31 @@ func TestHTTP2ClientCarrierLifecycleSettlesAfterRepeatedClose(t *testing.T) {
 	}
 }
 
+func TestHTTP2ClientCarrierClearsBindingAfterClose(t *testing.T) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	}))
+	server.EnableHTTP2 = true
+	server.TLS = &tls.Config{MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	opener := newLiveHTTP2TestOpener(t, server, http.StatusOK, nil, 1024)
+	carrier, err := opener.Open(context.Background(), bytes.Repeat([]byte{0x75}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding := carrier.Binding(); len(binding.HandshakeBindingContext) == 0 {
+		t.Fatal("open carrier did not expose its handshake binding")
+	}
+	if err := carrier.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if binding := carrier.Binding(); len(binding.OuterExporterValue) != 0 || len(binding.TLSExporterChannelID) != 0 || len(binding.ConnectionIDHash) != 0 || len(binding.CoverStreamBinding) != 0 || len(binding.HandshakeBindingContext) != 0 {
+		t.Fatal("closed carrier retained handshake binding material")
+	}
+}
+
 func TestHTTP2ClientCarrierBuildsAuthenticatedStreamingRequest(t *testing.T) {
 	tpl := transportTemplate(registry.MethodWebH2Stream)
 	tpl.PublicNameHash = bytes.Repeat([]byte{0x21}, 48)

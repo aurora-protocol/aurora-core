@@ -82,6 +82,18 @@ func TestRunSessionReportsBoundedFullDuplexEvidence(t *testing.T) {
 	if result.GoroutineDelta > 2 {
 		t.Fatalf("goroutine delta = %d, want <= 2", result.GoroutineDelta)
 	}
+	if result.HeapAllocBefore == 0 || result.HeapAllocAfter == 0 || result.TotalAllocated == 0 {
+		t.Fatalf("heap metrics = before %d after %d total %d", result.HeapAllocBefore, result.HeapAllocAfter, result.TotalAllocated)
+	}
+	// A session cannot carry a message for less than the payload it copies, and
+	// a per-message cost far above it means the packet path regressed.
+	perMessage := result.AllocatedPerMessage
+	if perMessage < float64(options.PayloadBytes) {
+		t.Fatalf("allocated %.0f bytes per message, below the %d byte payload", perMessage, options.PayloadBytes)
+	}
+	if limit := float64(options.PayloadBytes) * 32; perMessage > limit {
+		t.Fatalf("allocated %.0f bytes per message, above the %.0f byte ceiling", perMessage, limit)
+	}
 }
 
 func TestRunSessionHonorsCanceledContext(t *testing.T) {

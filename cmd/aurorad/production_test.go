@@ -115,6 +115,22 @@ func TestZeroMLDSA65PrivateKeyClearsPrivateMaterial(t *testing.T) {
 	}
 }
 
+func TestZeroPrivatePEMBlockClearsDecodedPrivateMaterial(t *testing.T) {
+	encoded := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: bytes.Repeat([]byte{0x81}, 48)})
+	block, rest := pem.Decode(encoded)
+	if block == nil || len(rest) != 0 {
+		t.Fatal("decode private PEM block")
+	}
+	decoded := block.Bytes
+	zeroPrivatePEMBlock(block)
+	if block.Type != "" || len(block.Bytes) != 0 || len(block.Headers) != 0 {
+		t.Fatal("PEM block retained metadata after zeroization")
+	}
+	if !bytes.Equal(decoded, make([]byte, len(decoded))) {
+		t.Fatal("PEM block retained decoded private material after zeroization")
+	}
+}
+
 func TestRunServeStartsAndStopsProductionService(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("production serving requires Linux")

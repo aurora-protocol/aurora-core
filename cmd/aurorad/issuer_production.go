@@ -280,6 +280,7 @@ func loadProductionBlindRSAKey(path string) (*rsa.PrivateKey, error) {
 	if block == nil || len(bytes.TrimSpace(rest)) != 0 {
 		return nil, fmt.Errorf("issuer: Blind RSA key must contain one PEM block")
 	}
+	defer zeroPrivatePEMBlock(block)
 	var privateKey *rsa.PrivateKey
 	switch block.Type {
 	case "RSA PRIVATE KEY":

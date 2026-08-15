@@ -479,6 +479,7 @@ func loadClassicalTranscriptSigner(path string) (handshake.TranscriptSigner, err
 	if block == nil || len(bytes.TrimSpace(rest)) != 0 {
 		return nil, fmt.Errorf("server: classical signer key must contain one PEM block")
 	}
+	defer zeroPrivatePEMBlock(block)
 	var key any
 	switch block.Type {
 	case "EC PRIVATE KEY":
@@ -724,6 +725,14 @@ func zeroProductionBytes(bytes []byte) {
 	for index := range bytes {
 		bytes[index] = 0
 	}
+}
+
+func zeroPrivatePEMBlock(block *pem.Block) {
+	if block == nil {
+		return
+	}
+	zeroProductionBytes(block.Bytes)
+	*block = pem.Block{}
 }
 
 // big.Int retains its backing words when a containing key struct is reset.

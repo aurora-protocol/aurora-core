@@ -54,7 +54,14 @@ type SessionResult struct {
 	LatencyP95        time.Duration `json:"latency_p95_ns"`
 	PeakQueuedPackets int           `json:"peak_queued_packets"`
 	PeakQueuedBytes   int           `json:"peak_queued_bytes"`
-	GoroutinesBefore  int           `json:"goroutines_before"`
+	HeapAllocBefore   uint64        `json:"heap_alloc_before"`
+	HeapAllocAfter    uint64        `json:"heap_alloc_after"`
+	TotalAllocated    uint64        `json:"total_allocated"`
+	// AllocatedPerMessage reports how much the session allocated for each
+	// message it carried, which is the figure that changes when the packet
+	// path allocates differently.
+	AllocatedPerMessage float64 `json:"allocated_per_message"`
+	GoroutinesBefore    int     `json:"goroutines_before"`
 	GoroutinesAfter   int           `json:"goroutines_after"`
 	GoroutineDelta    int           `json:"goroutine_delta"`
 	Errors            int           `json:"errors"`
@@ -71,7 +78,12 @@ func RunSession(ctx context.Context, options SessionOptions) (SessionResult, err
 		return SessionResult{Errors: 1}, err
 	}
 
-	result := SessionResult{GoroutinesBefore: runtime.NumGoroutine()}
+	var memoryBefore runtime.MemStats
+	runtime.ReadMemStats(&memoryBefore)
+	result := SessionResult{
+		HeapAllocBefore:  memoryBefore.HeapAlloc,
+		GoroutinesBefore: runtime.NumGoroutine(),
+	}
 	client, relay, err := newSessionEvidencePair(options)
 	if err != nil {
 		result.Errors = 1
@@ -136,6 +148,11 @@ func RunSession(ctx context.Context, options SessionOptions) (SessionResult, err
 	}
 	finish := time.Now()
 
+	var memoryAfter runtime.MemStats
+	runtime.ReadMemStats(&memoryAfter)
+	result.HeapAllocAfter = memoryAfter.HeapAlloc
+	result.TotalAllocated = memoryAfter.TotalAlloc - memoryBefore.TotalAlloc
+
 	clientStats := client.Stats()
 	relayStats := relay.Stats()
 	result.MessagesSent = int(state.sent.Load())
@@ -151,6 +168,9 @@ func RunSession(ctx context.Context, options SessionOptions) (SessionResult, err
 		seconds := result.Duration.Seconds()
 		result.MessagesPerSecond = float64(result.MessagesReceived) / seconds
 		result.BytesPerSecond = float64(result.PayloadBytes) / seconds
+	}
+	if result.MessagesReceived > 0 {
+		result.AllocatedPerMessage = float64(result.TotalAllocated) / float64(result.MessagesReceived)
 	}
 
 	if !completed && runErr == nil {

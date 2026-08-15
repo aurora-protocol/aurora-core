@@ -135,7 +135,7 @@ func TestSealEncodedClearsNonceScratchOnRekey(t *testing.T) {
 	if _, err := protector.SealEncoded(block); err != nil {
 		t.Fatalf("seal encoded: %v", err)
 	}
-	if protector.nonceScratch == ([12]byte{}) {
+	if protector.seal == nil || protector.seal.nonce == ([12]byte{}) {
 		t.Fatal("sealing left the nonce scratch empty")
 	}
 	// A retained nonce discloses the static IV it came from, so replacing the
@@ -143,12 +143,22 @@ func TestSealEncodedClearsNonceScratchOnRekey(t *testing.T) {
 	if err := protector.ReplaceMaterial(bytesOf(0x55, 32), bytesOf(0x66, 12)); err != nil {
 		t.Fatalf("replace material: %v", err)
 	}
-	if protector.nonceScratch != ([12]byte{}) {
-		t.Fatalf("nonce scratch retained %x after rekey", protector.nonceScratch)
+	if protector.seal.nonce != ([12]byte{}) {
+		t.Fatalf("nonce scratch retained %x after rekey", protector.seal.nonce)
+	}
+
+	// Destroy drops the pointer, so the scratch it referenced must be cleared
+	// before that happens or the nonce stays resident on the heap.
+	if _, err := protector.SealEncoded(block); err != nil {
+		t.Fatalf("seal encoded after rekey: %v", err)
+	}
+	scratch := protector.seal
+	if scratch.nonce == ([12]byte{}) {
+		t.Fatal("second seal left the nonce scratch empty")
 	}
 	protector.Destroy()
-	if protector.nonceScratch != ([12]byte{}) || protector.adScratch != ([64]byte{}) {
-		t.Fatal("destroy left seal scratch resident")
+	if scratch.nonce != ([12]byte{}) || scratch.ad != ([64]byte{}) {
+		t.Fatalf("destroy left seal scratch resident: nonce=%x", scratch.nonce)
 	}
 }
 

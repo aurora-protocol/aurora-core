@@ -111,10 +111,22 @@ type Protector struct {
 	cachedKey   [32]byte
 	// Sealing already requires exclusive use of a protector because it advances
 	// the packet number, so the associated data and nonce for each sealed packet
-	// can reuse this storage instead of allocating. Opening keeps a value
-	// receiver so it stays safe for concurrent use, and allocates instead.
-	adScratch    [64]byte
-	nonceScratch [12]byte
+	// reuse this storage instead of allocating. It is held behind a pointer
+	// because Open takes a protector by value to stay safe for concurrent use,
+	// and would otherwise copy the whole scratch on every opened packet.
+	seal *sealScratch
+}
+
+type sealScratch struct {
+	ad    [64]byte
+	nonce [12]byte
+}
+
+func (s *sealScratch) destroy() {
+	if s == nil {
+		return
+	}
+	*s = sealScratch{}
 }
 
 // NewProtector returns a protector that owns copies of its traffic material.
@@ -155,7 +167,7 @@ func (p *Protector) ReplaceMaterial(key, staticIV []byte) error {
 	destroyBytes(p.Key)
 	destroyBytes(p.StaticIV)
 	// A retained nonce discloses the static IV it was derived from.
-	p.nonceScratch = [12]byte{}
+	p.seal.destroy()
 	p.clearAEAD()
 	p.Key = keyCopy
 	p.StaticIV = ivCopy
@@ -172,6 +184,8 @@ func (p *Protector) Destroy() {
 	}
 	destroyBytes(p.Key)
 	destroyBytes(p.StaticIV)
+	// The struct reset only drops the pointer, so clear the scratch first.
+	p.seal.destroy()
 	p.clearAEAD()
 	*p = Protector{}
 }
@@ -256,11 +270,14 @@ func (p *Protector) SealEncoded(block protocol.FrameBlock) ([]byte, error) {
 		return p.sealEncodedByCopy(block)
 	}
 
-	aad, err := auroracrypto.AppendPacketAD(p.adScratch[:0], p.Suite, p.RouteInstanceID, p.HopLayer, p.Direction, p.KeyPhase, packetNumber)
+	if p.seal == nil {
+		p.seal = &sealScratch{}
+	}
+	aad, err := auroracrypto.AppendPacketAD(p.seal.ad[:0], p.Suite, p.RouteInstanceID, p.HopLayer, p.Direction, p.KeyPhase, packetNumber)
 	if err != nil {
 		return nil, err
 	}
-	nonce, err := auroracrypto.AppendXORNonce96(p.nonceScratch[:0], p.StaticIV, packetNumber)
+	nonce, err := auroracrypto.AppendXORNonce96(p.seal.nonce[:0], p.StaticIV, packetNumber)
 	if err != nil {
 		return nil, err
 	}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/issuerd"
+	"github.com/aurora-protocol/aurora-core/relay"
 )
 
 func TestHarnessHandlerServesCoverAndIssuerEndpoints(t *testing.T) {
@@ -87,6 +88,47 @@ func TestHarnessHandlerUsesInjectedSpentTokenCacheForIssuerHTTP(t *testing.T) {
 	}
 }
 
+func TestServeCoverCarrierScrubsIssueRequestInputsAfterDispatch(t *testing.T) {
+	issuer := &retainingCarrierIssuer{}
+	payload, err := EncodeCarrierIssueRequest(repeatedByte(0x41, carrierTokenNonceLen), repeatedByte(0x42, carrierRedemptionContextLen), 250)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, DefaultPacketExchangePath, bytes.NewReader(EncodeCarrier(CarrierBlindRSAIssueReq, payload)))
+	response := httptest.NewRecorder()
+	serveCoverCarrier(response, request, relay.StaticOrigin{}, http.NotFoundHandler(), nil, issuer)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("carrier issue response status = %d, want %d", response.Code, http.StatusOK)
+	}
+	for _, value := range issuer.issueTokenNonce {
+		if value != 0 {
+			t.Fatal("issuer retained token nonce after carrier dispatch")
+		}
+	}
+	for _, value := range issuer.issueRedemptionContext {
+		if value != 0 {
+			t.Fatal("issuer retained redemption context after carrier dispatch")
+		}
+	}
+}
+
+func TestServeCoverCarrierScrubsSpendRequestInputAfterDispatch(t *testing.T) {
+	issuer := &retainingCarrierIssuer{}
+	request := httptest.NewRequest(http.MethodPost, DefaultPacketExchangePath, bytes.NewReader(EncodeCarrier(CarrierTokenSpendReq, repeatedByte(0x43, 96))))
+	response := httptest.NewRecorder()
+	serveCoverCarrier(response, request, relay.StaticOrigin{}, http.NotFoundHandler(), nil, issuer)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("carrier spend response status = %d, want %d", response.Code, http.StatusOK)
+	}
+	for _, value := range issuer.spentProof {
+		if value != 0 {
+			t.Fatal("issuer retained admission proof after carrier dispatch")
+		}
+	}
+}
+
 func TestPacketBatchCodecMatchesInteroperabilityVector(t *testing.T) {
 	batch := PacketBatch{
 		Packets:         [][]byte{{0x45, 0x00, 0x00, 0x14}},
@@ -107,6 +149,27 @@ func TestPacketBatchCodecMatchesInteroperabilityVector(t *testing.T) {
 	if len(decoded.Packets) != 1 || !bytes.Equal(decoded.Packets[0], batch.Packets[0]) || decoded.ProtocolNumbers[0] != 2 {
 		t.Fatalf("decoded packet batch mismatch: %+v", decoded)
 	}
+}
+
+type retainingCarrierIssuer struct {
+	issueTokenNonce        []byte
+	issueRedemptionContext []byte
+	spentProof             []byte
+}
+
+func (*retainingCarrierIssuer) IssuerMetadata() ([]byte, []byte, error) {
+	return nil, nil, errors.New("issuer metadata is unavailable")
+}
+
+func (c *retainingCarrierIssuer) IssueBlindRSA(tokenNonce, redemptionContextHash []byte, _ uint64) ([]byte, error) {
+	c.issueTokenNonce = tokenNonce
+	c.issueRedemptionContext = redemptionContextHash
+	return []byte("proof"), nil
+}
+
+func (c *retainingCarrierIssuer) SpendToken(admissionProof []byte) ([]byte, error) {
+	c.spentProof = admissionProof
+	return repeatedByte(0x44, carrierSpentKeyLen), nil
 }
 
 func TestPacketBatchCodecRejectsEmptyPacketEntry(t *testing.T) {

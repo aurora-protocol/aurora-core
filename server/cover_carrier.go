@@ -60,7 +60,8 @@ const (
 
 // IssuerCarrier is the minimal issuer capability the cover carrier forwards to.
 // The relay carries issuance over its cover surface and delegates the actual
-// admission logic to the issuer trust domain; it never reimplements it.
+// admission logic to the issuer trust domain; it never reimplements it. Request
+// slices are borrowed only for the duration of each method call.
 type IssuerCarrier interface {
 	IssuerMetadata() (encoded []byte, hash []byte, err error)
 	IssueBlindRSA(tokenNonce, redemptionContextHash []byte, expiryUnix uint64) (admissionProof []byte, err error)
@@ -146,6 +147,7 @@ func serveCoverCarrier(w http.ResponseWriter, r *http.Request, origin relay.Orig
 		serveCoverFailure(w, r, origin, coverOrigin)
 		return
 	}
+	defer zeroCarrierPayload(payload)
 	switch carrierType {
 	case CarrierPacketBatch:
 		serveCarrierPacketBatch(w, r, origin, coverOrigin, exchanger, payload)
@@ -172,9 +174,11 @@ func readCarrierRequest(body io.Reader) (CarrierType, []byte, error) {
 	}
 	payload, err := io.ReadAll(io.LimitReader(body, int64(maximumPayloadBytes)+1))
 	if err != nil {
+		zeroCarrierPayload(payload)
 		return 0, nil, fmt.Errorf("server: read carrier payload: %w", err)
 	}
 	if len(payload) > maximumPayloadBytes {
+		zeroCarrierPayload(payload)
 		return 0, nil, fmt.Errorf("server: carrier payload exceeds limit")
 	}
 	return carrierType, payload, nil
@@ -237,6 +241,8 @@ func serveCarrierBlindRSAIssue(w http.ResponseWriter, r *http.Request, origin re
 		serveCoverFailure(w, r, origin, coverOrigin)
 		return
 	}
+	defer zeroCarrierPayload(tokenNonce)
+	defer zeroCarrierPayload(redemptionContextHash)
 	proof, err := issuer.IssueBlindRSA(tokenNonce, redemptionContextHash, expiryUnix)
 	if err != nil {
 		serveCoverFailure(w, r, origin, coverOrigin)
@@ -294,4 +300,10 @@ func doCarrierExchangeHandler(handler http.Handler, reqType CarrierType, payload
 		return 0, nil, resp
 	}
 	return respType, respPayload, resp
+}
+
+func zeroCarrierPayload(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
 }

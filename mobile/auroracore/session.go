@@ -885,6 +885,16 @@ func zeroNativeAdmissionProof(value *protocol.AdmissionProof) {
 	*value = protocol.AdmissionProof{}
 }
 
+func zeroNativeTokenMetadata(value *protocol.AuroraTokenMetadata) {
+	if value == nil {
+		return
+	}
+	for _, field := range [][]byte{value.RFC9577ChallengeDigest, value.RFC9577TokenKeyID, value.IssuerName, value.OriginInfo, value.IssuerMetadataHash} {
+		zeroNativeBytes(field)
+	}
+	*value = protocol.AuroraTokenMetadata{}
+}
+
 func zeroNativeReplayProof(value *protocol.ReplayProof) {
 	if value == nil {
 		return

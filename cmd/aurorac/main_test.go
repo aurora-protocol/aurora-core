@@ -237,6 +237,50 @@ func TestExchangeIssuerWorkRejectsRedirectAndInvalidContentType(t *testing.T) {
 	}
 }
 
+func TestExchangeIssuerWorkClosesResponseWhenCanceled(t *testing.T) {
+	body := newIssuerBlockingResponseBody()
+	restore := setNewIssuerHTTPClientForTest(func() *http.Client {
+		return &http.Client{Transport: issuerRoundTripper(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": {"application/octet-stream"}},
+				Body:       body,
+			}, nil
+		})}
+	})
+	defer restore()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := exchangeIssuerWork(ctx, time.Second, client.IssuerWork{
+			IssuerURL:         "https://issuer.example",
+			IssuerCarrierPath: "/assets/issue/42",
+			RequestBody:       []byte("issuer request"),
+		})
+		result <- err
+	}()
+	select {
+	case <-body.started:
+	case <-time.After(time.Second):
+		t.Fatal("issuer response body was not read")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("issuer cancellation error = %v, want context.Canceled", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		_ = body.Close()
+		<-result
+		t.Fatal("issuer response body remained open after cancellation")
+	}
+	if !body.Closed() {
+		t.Fatal("issuer response body was not closed after cancellation")
+	}
+}
+
 func TestIssuerWorkURLRejectsNonCanonicalInputs(t *testing.T) {
 	for _, work := range []client.IssuerWork{
 		{IssuerURL: "https://user@issuer.example", IssuerCarrierPath: "/assets/issue/42", RequestBody: []byte("issuer request")},
@@ -693,6 +737,37 @@ type issuerRoundTripper func(*http.Request) (*http.Response, error)
 
 func (roundTrip issuerRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	return roundTrip(request)
+}
+
+type issuerBlockingResponseBody struct {
+	started   chan struct{}
+	closed    chan struct{}
+	startOnce sync.Once
+	closeOnce sync.Once
+}
+
+func newIssuerBlockingResponseBody() *issuerBlockingResponseBody {
+	return &issuerBlockingResponseBody{started: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (b *issuerBlockingResponseBody) Read([]byte) (int, error) {
+	b.startOnce.Do(func() { close(b.started) })
+	<-b.closed
+	return 0, context.Canceled
+}
+
+func (b *issuerBlockingResponseBody) Close() error {
+	b.closeOnce.Do(func() { close(b.closed) })
+	return nil
+}
+
+func (b *issuerBlockingResponseBody) Closed() bool {
+	select {
+	case <-b.closed:
+		return true
+	default:
+		return false
+	}
 }
 
 type tunComponentDevice struct {

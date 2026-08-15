@@ -1003,7 +1003,7 @@ func (r *TCPProxyRuntime) runLocalWritePump(flow *tcpProxyFlow) {
 				continue
 			}
 			payloadBytes := len(payload)
-			_, err := flow.conn.Write(payload)
+			count, err := flow.conn.Write(payload)
 			zeroTCPProxyBytes(payload)
 			flow.mu.Lock()
 			flow.pendingWrites -= payloadBytes
@@ -1012,7 +1012,7 @@ func (r *TCPProxyRuntime) runLocalWritePump(flow *tcpProxyFlow) {
 			if flow.releasePendingBytes != nil {
 				flow.releasePendingBytes(payloadBytes)
 			}
-			if err != nil {
+			if err != nil || count != payloadBytes {
 				r.abortFlow(flow.id)
 				return
 			}

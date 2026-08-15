@@ -162,3 +162,25 @@ func TestRetentionFileReplayCacheRejectsDuplicateAcrossInstances(t *testing.T) {
 		t.Fatalf("duplicate decision: inserted=%t err=%v", inserted, err)
 	}
 }
+
+func TestRetentionFileReplayCacheDoesNotExposeEntriesAfterClose(t *testing.T) {
+	directory, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := NewRetentionFileReplayCacheAt(directory, "replay.log", 100)
+	if err != nil {
+		_ = directory.Close()
+		t.Fatal(err)
+	}
+	key := []byte("key")
+	if inserted, err := cache.InsertIfAbsentUntil(key, 200, 100); err != nil || !inserted {
+		t.Fatalf("insert retained key: inserted=%t err=%v", inserted, err)
+	}
+	if err := cache.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if cache.Has(key) {
+		t.Fatal("closed replay cache exposed retained entry")
+	}
+}

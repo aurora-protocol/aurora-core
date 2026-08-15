@@ -204,6 +204,9 @@ func (c *FileReplayCache) Has(key []byte) bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.file == nil {
+		return false
+	}
 	_, ok := c.seen[string(key)]
 	return ok
 }
@@ -215,10 +218,12 @@ func (c *FileReplayCache) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.file == nil {
+		c.seen = nil
 		return nil
 	}
 	err := c.file.Close()
 	c.file = nil
+	c.seen = nil
 	return err
 }
 

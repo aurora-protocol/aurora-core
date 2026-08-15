@@ -96,6 +96,9 @@ func (c *RetentionFileReplayCache) Has(key []byte) bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.directory == nil || c.lock == nil {
+		return false
+	}
 	_, ok := c.seen[string(key)]
 	return ok
 }
@@ -118,6 +121,7 @@ func (c *RetentionFileReplayCache) Close() error {
 			err = closeErr
 		}
 	}
+	c.seen = nil
 	return err
 }
 

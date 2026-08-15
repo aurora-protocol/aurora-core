@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -723,6 +724,16 @@ func zeroProductionBytes(bytes []byte) {
 	for index := range bytes {
 		bytes[index] = 0
 	}
+}
+
+// big.Int retains its backing words when a containing key struct is reset.
+func zeroPrivateBigInt(value *big.Int) {
+	if value == nil {
+		return
+	}
+	words := value.Bits()
+	clear(words)
+	value.SetInt64(0)
 }
 
 func zeroMLDSA65PrivateKey(private *mldsa65.PrivateKey) {

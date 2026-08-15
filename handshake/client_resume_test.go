@@ -33,6 +33,9 @@ func TestClientHandshakeDefersCapsuleUntilProofsArrive(t *testing.T) {
 	if provider.calls.Load() != 0 {
 		t.Fatalf("proof provider calls before request use = %d, want 0", provider.calls.Load())
 	}
+	if cap(handshake.provider.requests) != 0 {
+		t.Fatal("deferred proof request handoff must not queue sensitive request material")
+	}
 	if carrier.streamRequests.Load() != 0 {
 		t.Fatalf("application stream requests before proofs = %d, want 0", carrier.streamRequests.Load())
 	}

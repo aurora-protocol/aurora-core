@@ -215,6 +215,55 @@ func TestProvisionedSessionRejectsCompletionAfterClose(t *testing.T) {
 	}
 }
 
+func TestProvisionedSessionCompletionHonorsCallerCancellation(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	issuer := newProvisionedSessionTestIssuer(t, now)
+	deferred := newBlockingProvisionedSessionHandshake()
+	session, _, err := newProvisionedSession(
+		context.Background(),
+		provisionedSessionTestProvisioning(t, now, issuer),
+		ProvisionedSessionOptions{
+			now:    func() time.Time { return now },
+			random: bytes.NewReader(bytes.Repeat([]byte{0x76}, 64)),
+			start: func(context.Context, NativeProvisioning, time.Time) (provisionedSessionHandshake, handshake.ClientProofRequest, error) {
+				return deferred, provisionedSessionTestRequest(), nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerResponse := provisionedSessionIssuerResponse(t, issuer, provisionedSessionTestRequest(), now)
+	defer zeroProvisionedBytes(issuerResponse)
+	completionContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := session.Complete(completionContext, issuerResponse)
+		result <- err
+	}()
+	select {
+	case <-deferred.started:
+	case <-time.After(time.Second):
+		_ = session.Close()
+		t.Fatal("provisioned completion did not reach the deferred handshake")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("provisioned completion cancellation = %v, want context.Canceled", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		_ = session.Close()
+		<-result
+		t.Fatal("provisioned completion ignored caller cancellation")
+	}
+	if !deferred.Closed() {
+		t.Fatal("caller cancellation left the deferred handshake open")
+	}
+}
+
 func TestProvisionedSessionTransfersEstablishedSessionOnce(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	issuer := newProvisionedSessionTestIssuer(t, now)
@@ -320,6 +369,35 @@ func (h *provisionedSessionTestHandshake) Completed() bool {
 	return h.completed
 }
 
+type blockingProvisionedSessionHandshake struct {
+	mu      sync.Mutex
+	started chan struct{}
+	closed  bool
+}
+
+func newBlockingProvisionedSessionHandshake() *blockingProvisionedSessionHandshake {
+	return &blockingProvisionedSessionHandshake{started: make(chan struct{})}
+}
+
+func (h *blockingProvisionedSessionHandshake) Complete(ctx context.Context, _ protocol.AdmissionProof, _ protocol.ReplayProof) (*handshake.EstablishedSession, error) {
+	close(h.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (h *blockingProvisionedSessionHandshake) Close() error {
+	h.mu.Lock()
+	h.closed = true
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *blockingProvisionedSessionHandshake) Closed() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.closed
+}
+
 func provisionedSessionTestProvisioning(t testing.TB, now time.Time, issuer *issuerd.Service) NativeProvisioning {
 	t.Helper()
 	if issuer == nil {
@@ -373,3 +451,4 @@ type provisionedSessionDiscardWriteCloser struct {
 func (provisionedSessionDiscardWriteCloser) Close() error { return nil }
 
 var _ provisionedSessionHandshake = (*provisionedSessionTestHandshake)(nil)
+var _ provisionedSessionHandshake = (*blockingProvisionedSessionHandshake)(nil)

@@ -193,10 +193,14 @@ func (s *ProvisionedSession) Complete(ctx context.Context, issuerResponse []byte
 			err = fmt.Errorf("client: provisioned session context is unavailable")
 		} else if sessionErr := sessionContext.Err(); sessionErr != nil {
 			err = sessionErr
+		} else if callerErr := ctx.Err(); callerErr != nil {
+			err = callerErr
 		} else {
-			completeContext, cancel := context.WithTimeout(sessionContext, options.CompletionTimeout)
+			completeContext, completeCancel := context.WithTimeout(sessionContext, options.CompletionTimeout)
+			stopCallerCancel := context.AfterFunc(ctx, completeCancel)
 			established, err = deferred.Complete(completeContext, proof, replay)
-			cancel()
+			stopCallerCancel()
+			completeCancel()
 		}
 	}
 	zeroProvisionedAdmissionProof(&proof)

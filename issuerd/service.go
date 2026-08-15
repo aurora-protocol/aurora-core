@@ -414,11 +414,7 @@ func (s *Service) IssueBlindRSA2048(req IssueBlindRSA2048Request) (protocol.Admi
 	if err != nil {
 		return protocol.AdmissionProof{}, err
 	}
-	digest := sha512.Sum384(authenticatorInput)
-	proof.TokenAuthenticator, err = rsa.SignPSS(rand.Reader, s.blindRSAKey, stdcrypto.SHA384, digest[:], &rsa.PSSOptions{
-		SaltLength: 48,
-		Hash:       stdcrypto.SHA384,
-	})
+	proof.TokenAuthenticator, err = signBlindRSAAuthenticator(s.blindRSAKey, authenticatorInput)
 	if err != nil {
 		return protocol.AdmissionProof{}, err
 	}
@@ -437,6 +433,7 @@ func (s *Service) SpendToken(proof protocol.AdmissionProof) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer zeroIssuerdBytes(redemption)
 	spentKey, err := admission.TokenSpentKey(redemption)
 	if err != nil {
 		return nil, err
@@ -530,11 +527,25 @@ func (s *Service) VerifyIssuerVerifierRequest(req protocol.IssuerVerifierRequest
 	if err != nil {
 		return protocol.IssuerVerifierResponse{}, err
 	}
-	resp.ServiceSignature, err = ecdsa.SignASN1(rand.Reader, signer, input)
+	resp.ServiceSignature, err = signIssuerVerifierResponse(signer, input)
 	if err != nil {
 		return protocol.IssuerVerifierResponse{}, err
 	}
 	return resp, nil
+}
+
+func signBlindRSAAuthenticator(key *rsa.PrivateKey, input []byte) ([]byte, error) {
+	defer zeroIssuerdBytes(input)
+	digest := sha512.Sum384(input)
+	return rsa.SignPSS(rand.Reader, key, stdcrypto.SHA384, digest[:], &rsa.PSSOptions{
+		SaltLength: 48,
+		Hash:       stdcrypto.SHA384,
+	})
+}
+
+func signIssuerVerifierResponse(key *ecdsa.PrivateKey, input []byte) ([]byte, error) {
+	defer zeroIssuerdBytes(input)
+	return ecdsa.SignASN1(rand.Reader, key, input)
 }
 
 func (s *Service) AuthorizeRelayClientKey(requestAuthPolicyID uint64, key protocol.PublicKeyRecord) {

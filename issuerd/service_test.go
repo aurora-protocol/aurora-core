@@ -2,6 +2,12 @@ package issuerd
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha512"
 	"encoding/hex"
 	"strings"
 	"testing"
@@ -11,6 +17,49 @@ import (
 	"github.com/aurora-protocol/aurora-core/registry"
 	auroratrust "github.com/aurora-protocol/aurora-core/trust"
 )
+
+func TestSignBlindRSAAuthenticatorScrubsInputAfterSigning(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := bytes.Repeat([]byte{0x41}, 128)
+	digest := sha512.Sum384(input)
+	signature, err := signBlindRSAAuthenticator(key, input)
+	if err != nil {
+		t.Fatalf("signBlindRSAAuthenticator failed: %v", err)
+	}
+	if err := rsa.VerifyPSS(&key.PublicKey, crypto.SHA384, digest[:], signature, &rsa.PSSOptions{SaltLength: 48, Hash: crypto.SHA384}); err != nil {
+		t.Fatalf("Blind RSA signature did not verify: %v", err)
+	}
+	assertIssuerdBytesZeroed(t, input)
+}
+
+func TestSignIssuerVerifierResponseScrubsInputAfterSigning(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := bytes.Repeat([]byte{0x42}, 48)
+	expected := append([]byte(nil), input...)
+	signature, err := signIssuerVerifierResponse(key, input)
+	if err != nil {
+		t.Fatalf("signIssuerVerifierResponse failed: %v", err)
+	}
+	if !ecdsa.VerifyASN1(&key.PublicKey, expected, signature) {
+		t.Fatal("verifier response signature did not verify")
+	}
+	assertIssuerdBytesZeroed(t, input)
+}
+
+func assertIssuerdBytesZeroed(t *testing.T, input []byte) {
+	t.Helper()
+	for index, value := range input {
+		if value != 0 {
+			t.Fatalf("issuer signing input byte %d = %x after signing, want zero", index, value)
+		}
+	}
+}
 
 func TestServiceReadinessHarnessCoversIssuerDuties(t *testing.T) {
 	report, err := RunServiceReadinessHarness(200)

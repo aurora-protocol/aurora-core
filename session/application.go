@@ -471,7 +471,15 @@ func (a *Application) queueBlock(ctx context.Context, block protocol.FrameBlock,
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := protocol.ValidateFrameBlockForDirection(block, a.write.Direction); err != nil {
+	a.mu.Lock()
+	if a.terminal != nil {
+		err := a.terminal
+		a.mu.Unlock()
+		return err
+	}
+	writeDirection := a.write.Direction
+	a.mu.Unlock()
+	if err := protocol.ValidateFrameBlockForDirection(block, writeDirection); err != nil {
 		return err
 	}
 	reservation, err := encodedPacketReservation(block)

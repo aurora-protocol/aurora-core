@@ -11,6 +11,7 @@ import (
 	"crypto/sha512"
 	"encoding/asn1"
 	"errors"
+	"math"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -663,6 +664,33 @@ func TestHTTPGatewayForwardsOriginPassThroughRoute(t *testing.T) {
 	}
 }
 
+func TestHTTPGatewayScrubsOwnedBodyAfterHandling(t *testing.T) {
+	origin := &recordingHTTPOrigin{recordingOrigin: recordingOrigin{normal: Response{Status: 200, Body: []byte("cover")}}}
+	handler := HTTPGatewayHandler{
+		Gateway:  Gateway{Origin: origin},
+		Template: coverTemplateForRelayTest(),
+		Routes: []HTTPGatewayRoute{{
+			Path:    "/assets/app.bin",
+			ClassID: 2,
+			Kind:    CoverRequestOrdinary,
+		}},
+	}
+	body := []byte("ordinary-origin-body")
+	req := httptest.NewRequest(http.MethodPost, "https://cover.example/assets/app.bin", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	handler.serveMatchedRoute(rec, req, handler.Routes[0], body)
+
+	if rec.Code != http.StatusNoContent || origin.httpForwarded != 1 || string(origin.lastHTTPBody) != "ordinary-origin-body" {
+		t.Fatalf("HTTP gateway did not forward owned request body before scrub: code=%d origin=%+v", rec.Code, origin)
+	}
+	for index, value := range body {
+		if value != 0 {
+			t.Fatalf("owned HTTP request body byte %d = %x, want zero", index, value)
+		}
+	}
+}
+
 func TestHTTPGatewayOwnedFailureConsumesBodyAtHTTPBoundary(t *testing.T) {
 	origin := &recordingHTTPOrigin{recordingOrigin: recordingOrigin{normal: Response{Status: 200, Body: []byte("cover")}}}
 	handler := HTTPGatewayHandler{
@@ -738,6 +766,20 @@ func TestHTTPGatewayOversizeBodyMapsToCoverOriginWithoutForwarding(t *testing.T)
 	}
 	if origin.httpForwarded != 0 || origin.forwarded != 0 {
 		t.Fatalf("oversize body was forwarded upstream: %+v", origin)
+	}
+}
+
+func TestHTTPGatewayReadRequestBodySupportsMaxInt64Limit(t *testing.T) {
+	handler := HTTPGatewayHandler{MaxBodyBytes: math.MaxInt64}
+	req := httptest.NewRequest(http.MethodPost, "https://cover.example/assets/app.bin", strings.NewReader("body"))
+
+	body, err := handler.readRequestBody(req)
+	if err != nil {
+		t.Fatalf("read body at MaxInt64 limit: %v", err)
+	}
+	defer zeroHTTPGatewayBody(body)
+	if string(body) != "body" {
+		t.Fatalf("body at MaxInt64 limit = %q, want %q", body, "body")
 	}
 }
 

@@ -3,6 +3,7 @@ package relay
 import (
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 
 	"github.com/aurora-protocol/aurora-core/failure"
@@ -45,8 +46,7 @@ func (h HTTPGatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeHTTPGatewayResponse(w, h.Gateway.HandleFailure(failure.MalformedPrelude))
 		return
 	}
-	resp := h.handleMatchedRoute(r, route, body)
-	writeHTTPGatewayResponse(w, resp)
+	h.serveMatchedRoute(w, r, route, body)
 }
 
 func (h HTTPGatewayHandler) matchRoute(path string) (HTTPGatewayRoute, bool) {
@@ -64,14 +64,25 @@ func (h HTTPGatewayHandler) readRequestBody(r *http.Request) ([]byte, error) {
 		maxBodyBytes = defaultHTTPGatewayMaxBodyBytes
 	}
 	defer r.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+	readLimit := maxBodyBytes
+	if readLimit < math.MaxInt64 {
+		readLimit++
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, readLimit))
 	if err != nil {
+		zeroHTTPGatewayBody(body)
 		return nil, err
 	}
 	if int64(len(body)) > maxBodyBytes {
+		zeroHTTPGatewayBody(body)
 		return nil, fmt.Errorf("relay: cover request body exceeds envelope")
 	}
 	return body, nil
+}
+
+func (h HTTPGatewayHandler) serveMatchedRoute(w http.ResponseWriter, r *http.Request, route HTTPGatewayRoute, body []byte) {
+	defer zeroHTTPGatewayBody(body)
+	writeHTTPGatewayResponse(w, h.handleMatchedRoute(r, route, body))
 }
 
 func (h HTTPGatewayHandler) handleMatchedRoute(r *http.Request, route HTTPGatewayRoute, body []byte) Response {
@@ -100,6 +111,12 @@ func (h HTTPGatewayHandler) handleMatchedRoute(r *http.Request, route HTTPGatewa
 		Body:     body,
 		Failure:  route.Failure,
 	})
+}
+
+func zeroHTTPGatewayBody(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
 }
 
 func writeHTTPGatewayResponse(w http.ResponseWriter, resp Response) {

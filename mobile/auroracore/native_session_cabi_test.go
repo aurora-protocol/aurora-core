@@ -24,6 +24,8 @@ const (
 	nativeIntegrationCallTimeout     = 4 * time.Second
 	nativeIntegrationCloseTimeout    = 4 * time.Second
 	nativeIntegrationOversizedCall   = 1<<31 - 1
+	nativeIntegrationOversizedFree   = nativeIntegrationOversizedCall - 1
+	nativeIntegrationDuplicateFree   = nativeIntegrationOversizedFree - 1
 )
 
 type nativeIntegrationCaller interface {
@@ -148,6 +150,34 @@ func TestNativeIntegrationCABIRejectsOversizedLengthBeforeRead(t *testing.T) {
 	}
 	if status != statusError || len(payload) != 0 {
 		t.Fatalf("oversized native input = status %d payload %x", status, payload)
+	}
+}
+
+func TestNativeIntegrationCABIUsesRecordedOutputLengthForRelease(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skipf("native archive process test is unsupported on %s", runtime.GOOS)
+	}
+	caller := newNativeIntegrationCABICaller(t)
+	status, payload, err := caller.call(nativeIntegrationOversizedFree, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != statusError || len(payload) != 0 {
+		t.Fatalf("oversized native release = status %d payload %x", status, payload)
+	}
+}
+
+func TestNativeIntegrationCABIRejectsDuplicateOutputRelease(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skipf("native archive process test is unsupported on %s", runtime.GOOS)
+	}
+	caller := newNativeIntegrationCABICaller(t)
+	status, payload, err := caller.call(nativeIntegrationDuplicateFree, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != statusError || len(payload) != 0 {
+		t.Fatalf("duplicate native release = status %d payload %x", status, payload)
 	}
 }
 

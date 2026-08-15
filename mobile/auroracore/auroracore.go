@@ -155,22 +155,34 @@ func nativeCallInputLengthValid(length int) bool {
 //
 //export AuroraCoreFree
 func AuroraCoreFree(p *C.uint8_t) {
-	if p != nil {
-		C.free(unsafe.Pointer(p))
-	}
+	releaseNativeOutput(unsafe.Pointer(p), false)
 }
 
 // AuroraCoreZeroFree scrubs and releases an output buffer from AuroraCoreCall.
+// The length parameter is retained for ABI compatibility; Core uses the length
+// recorded when it allocated the output rather than trusting caller input.
 //
 //export AuroraCoreZeroFree
-func AuroraCoreZeroFree(p *C.uint8_t, length C.int) {
-	if p == nil {
+func AuroraCoreZeroFree(p *C.uint8_t, _ C.int) {
+	releaseNativeOutput(unsafe.Pointer(p), true)
+}
+
+func releaseNativeOutput(p unsafe.Pointer, scrub bool) {
+	length, ok := takeNativeOutput(p)
+	if !ok {
 		return
 	}
-	if length > 0 {
-		C.aurora_core_secure_zero(unsafe.Pointer(p), C.size_t(length))
+	if scrub {
+		zeroNativeOutput(p, length)
 	}
-	C.free(unsafe.Pointer(p))
+	C.free(p)
+}
+
+func zeroNativeOutput(p unsafe.Pointer, length int) {
+	if p == nil || length <= 0 {
+		return
+	}
+	C.aurora_core_secure_zero(p, C.size_t(length))
 }
 
 func cBytes(b []byte, outLen *C.int) *C.uint8_t {
@@ -183,6 +195,7 @@ func cBytes(b []byte, outLen *C.int) *C.uint8_t {
 	if len(b) > 0 {
 		C.memmove(p, unsafe.Pointer(&b[0]), C.size_t(len(b)))
 	}
+	registerNativeOutput(p, len(b))
 	return (*C.uint8_t)(p)
 }
 

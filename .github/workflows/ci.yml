@@ -106,6 +106,21 @@ jobs:
       - name: Protocol fuzz smoke
         timeout-minutes: 5
         run: go test -timeout 3m ./protocol -run '^$' -fuzz '^FuzzDecodeProtocolStructs$' -fuzztime=10s
+      - name: Network decoder fuzz smoke
+        timeout-minutes: 8
+        run: |
+          go test -timeout 2m ./packet -run '^$' -fuzz '^FuzzDecodeAuroraPacket$' -fuzztime=10s
+          go test -timeout 2m ./packet -run '^$' -fuzz '^FuzzDecodeAuroraPacketView$' -fuzztime=10s
+          go test -timeout 2m ./server -run '^$' -fuzz '^FuzzDecodePacketBatch$' -fuzztime=10s
+          go test -timeout 2m ./transport -run '^$' -fuzz '^FuzzRecordReader$' -fuzztime=10s
+          go test -timeout 2m ./relay -run '^$' -fuzz '^FuzzSocketDNSQuestionResponseRoundTrip$' -fuzztime=10s
+          go test -timeout 2m ./relay -run '^$' -fuzz '^FuzzSocketEgressFlowOpen$' -fuzztime=10s
+          go test -timeout 2m ./client -run '^$' -fuzz '^FuzzPacketAdapterIngress$' -fuzztime=10s
+      - name: Native ABI fuzz smoke
+        timeout-minutes: 5
+        run: |
+          go test -timeout 2m ./mobile/auroracore -run '^$' -fuzz '^FuzzNativeDispatchCodecOperations$' -fuzztime=10s
+          go test -timeout 2m ./mobile/auroracore -run '^$' -fuzz '^FuzzNativeDispatchUnknownOperations$' -fuzztime=10s
       - name: Benchmark health
         timeout-minutes: 7
         shell: bash

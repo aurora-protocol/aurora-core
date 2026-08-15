@@ -54,10 +54,14 @@ func MaximumRetentionDeadline(values ...uint64) (uint64, error) {
 type MemoryReplayCache struct {
 	mu   sync.Mutex
 	seen map[string]uint64
+	// minDeadline is the earliest retention deadline held, so expired records
+	// can be dropped without scanning until one of them has actually expired.
+	// Records inserted without retention are permanent and never contribute.
+	minDeadline uint64
 }
 
 func NewMemoryReplayCache() *MemoryReplayCache {
-	return &MemoryReplayCache{seen: make(map[string]uint64)}
+	return &MemoryReplayCache{seen: make(map[string]uint64), minDeadline: math.MaxUint64}
 }
 
 func (*MemoryReplayCache) Durable() bool { return false }
@@ -85,6 +89,12 @@ func (c *MemoryReplayCache) InsertIfAbsentUntil(key []byte, retainUntilUnix, now
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// One-time credentials are rarely presented twice, so a record that is only
+	// dropped when its own key returns would be retained for the process
+	// lifetime. Reclaim every expired record once the earliest one has passed.
+	if c.minDeadline <= nowUnix {
+		c.expireLocked(nowUnix)
+	}
 	k := string(key)
 	if previous, ok := c.seen[k]; ok {
 		if previous == 0 || previous > nowUnix {
@@ -93,7 +103,27 @@ func (c *MemoryReplayCache) InsertIfAbsentUntil(key []byte, retainUntilUnix, now
 		delete(c.seen, k)
 	}
 	c.seen[k] = retainUntilUnix
+	if retainUntilUnix < c.minDeadline {
+		c.minDeadline = retainUntilUnix
+	}
 	return true, nil
+}
+
+func (c *MemoryReplayCache) expireLocked(nowUnix uint64) {
+	earliest := uint64(math.MaxUint64)
+	for key, deadline := range c.seen {
+		if deadline == 0 {
+			continue
+		}
+		if deadline <= nowUnix {
+			delete(c.seen, key)
+			continue
+		}
+		if deadline < earliest {
+			earliest = deadline
+		}
+	}
+	c.minDeadline = earliest
 }
 
 func (c *MemoryReplayCache) Has(key []byte) bool {

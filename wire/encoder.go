@@ -15,6 +15,22 @@ func NewEncoder() *Encoder {
 	return &Encoder{}
 }
 
+// NewEncoderWithBuffer appends to buf, preserving its contents and storage. It
+// lets a caller that already owns correctly sized storage encode into it
+// without a second allocation and copy.
+func NewEncoderWithBuffer(buf []byte) *Encoder {
+	return &Encoder{buf: buf}
+}
+
+// Buffer returns the accumulated bytes without copying them. The encoder's
+// storage is shared with the result, so callers must own it exclusively.
+func (e *Encoder) Buffer() ([]byte, error) {
+	if e.err != nil {
+		return nil, e.err
+	}
+	return e.buf, nil
+}
+
 func Encode(v Encodable) ([]byte, error) {
 	return encode(v, -1, 0)
 }

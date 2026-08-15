@@ -502,18 +502,12 @@ func (a *Application) sealCurrentWriteBlockLocked(block protocol.FrameBlock) ([]
 		return nil, 0, 0, 0, fmt.Errorf("session: packet number exceeds canonical range")
 	}
 	a.write.NextPacket = nextPacket
-	pkt, err := a.write.Seal(block)
+	encoded, err := a.write.SealEncoded(block)
 	if err != nil {
 		a.write.NextPacket = nextPacket
 		return nil, 0, 0, 0, err
 	}
-	sealedNext := a.write.NextPacket
-	encoded, err := packet.EncodeAuroraPacket(pkt)
-	if err != nil {
-		a.write.NextPacket = nextPacket
-		return nil, 0, 0, 0, err
-	}
-	return encoded, phase, nextPacket, sealedNext, nil
+	return encoded, phase, nextPacket, a.write.NextPacket, nil
 }
 
 func (a *Application) validateWriteProtectorLocked() error {

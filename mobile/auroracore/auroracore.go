@@ -34,10 +34,10 @@ import (
 	"unsafe"
 
 	"github.com/aurora-protocol/aurora-core/client"
-	"github.com/aurora-protocol/aurora-core/issuerd"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/server"
 	"github.com/aurora-protocol/aurora-core/session"
+	"github.com/aurora-protocol/aurora-core/wire"
 )
 
 // Operation codes for AuroraCoreCall. Kept stable as part of the ABI contract.
@@ -628,13 +628,29 @@ func decodeNativeProvisioningReservation(encoded []byte) (nativeProvisioningRese
 // portable core, returning the wallet-relevant fields as JSON. This is the
 // logic the spec forbids the platform adapter from reimplementing.
 func parseAdmissionProof(in []byte) ([]byte, error) {
-	proof, err := issuerd.DecodeAdmissionProofBytes(in)
-	if err != nil {
+	reader := wire.NewReader(in)
+	proof := protocol.DecodeAdmissionProof(reader)
+	if err := reader.Err(); err != nil {
+		zeroNativeAdmissionProof(&proof)
 		return nil, err
 	}
-	meta, err := protocol.DecodeAuroraTokenMetadataBytes(proof.TokenPublicMetadata)
-	if err != nil {
+	if !reader.EOF() {
+		zeroNativeAdmissionProof(&proof)
+		return nil, fmt.Errorf("auroracore: trailing admission proof bytes")
+	}
+	return encodeParsedAdmissionProof(proof)
+}
+
+func encodeParsedAdmissionProof(proof protocol.AdmissionProof) ([]byte, error) {
+	defer zeroNativeAdmissionProof(&proof)
+	reader := wire.NewReader(proof.TokenPublicMetadata)
+	meta := protocol.DecodeAuroraTokenMetadata(reader)
+	defer zeroNativeTokenMetadata(&meta)
+	if err := reader.Err(); err != nil {
 		return nil, err
+	}
+	if !reader.EOF() {
+		return nil, fmt.Errorf("auroracore: trailing token metadata bytes")
 	}
 	if err := meta.ValidateForProof(proof, meta.IssuerMetadataHash); err != nil {
 		return nil, err

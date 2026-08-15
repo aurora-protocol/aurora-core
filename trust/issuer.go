@@ -100,11 +100,26 @@ func AuthenticatorInputHash(authenticatorInput []byte) []byte {
 }
 
 func IssuerVerifierRequestHash(r protocol.IssuerVerifierRequest) ([]byte, error) {
-	encoded, err := protocol.Encode(r)
+	encodedLength, known := r.EncodedLen()
+	if !known {
+		return nil, fmt.Errorf("trust: issuer verifier request has invalid encoding lengths")
+	}
+	encoded, err := wire.EncodeWithCapacity(r, encodedLength)
 	if err != nil {
 		return nil, err
 	}
-	return auroracrypto.PreHashLabel("aurora v2.0 issuer verifier request", encoded), nil
+	return hashIssuerVerifierRequestEncoding(encoded), nil
+}
+
+func hashIssuerVerifierRequestEncoding(encoded []byte) []byte {
+	defer zeroTrustBytes(encoded)
+	return auroracrypto.PreHashLabel("aurora v2.0 issuer verifier request", encoded)
+}
+
+func zeroTrustBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
 }
 
 func IssuerVerifierResponseSignatureInput(requestHash []byte, r protocol.IssuerVerifierResponse) ([]byte, error) {

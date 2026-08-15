@@ -26,6 +26,7 @@ import (
 const (
 	maximumJSONRequestBodyBytes     int64 = 1 << 20
 	maximumVerifierRequestBodyBytes int64 = 1 << 20
+	verifierRequestInitialCapacity        = 512
 )
 
 var (
@@ -94,6 +95,7 @@ func NewVerifierHTTPHandler(service *Service) http.Handler {
 			writeError(w, http.StatusBadRequest, "invalid verifier request")
 			return
 		}
+		defer zeroIssuerVerifierRequest(&req)
 		if rejectCanceledRequest(w, r) {
 			return
 		}
@@ -508,19 +510,138 @@ func decodeVerifierRequest(r *http.Request) (protocol.IssuerVerifierRequest, err
 	if r.ContentLength > maximumVerifierRequestBodyBytes {
 		return protocol.IssuerVerifierRequest{}, errVerifierRequestTooLarge
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maximumVerifierRequestBodyBytes+1))
+	body, err := readVerifierRequestBody(r.Body, r.ContentLength)
 	if err != nil {
 		return protocol.IssuerVerifierRequest{}, err
 	}
-	if len(body) > int(maximumVerifierRequestBodyBytes) {
-		return protocol.IssuerVerifierRequest{}, errVerifierRequestTooLarge
+	return decodeVerifierRequestBody(body)
+}
+
+func readVerifierRequestBody(source io.Reader, contentLength int64) ([]byte, error) {
+	maximum := int(maximumVerifierRequestBodyBytes)
+	capacityHint := verifierRequestInitialCapacity
+	if contentLength > 0 && contentLength <= maximumVerifierRequestBodyBytes {
+		capacityHint = int(contentLength)
 	}
+	if capacityHint > maximum {
+		capacityHint = maximum
+	}
+	body := make([]byte, 0, capacityHint)
+	for {
+		if len(body) == cap(body) {
+			var extra [1]byte
+			count, err := source.Read(extra[:])
+			if count > 0 {
+				var appendErr error
+				body, appendErr = appendIssuerdOwnedBytes(body, extra[:count], maximum)
+				zeroIssuerdBytes(extra[:])
+				if appendErr != nil {
+					return nil, appendErr
+				}
+				if err == io.EOF {
+					return body, nil
+				}
+				if err != nil {
+					zeroIssuerdOwnedBytes(body)
+					return nil, err
+				}
+				continue
+			}
+			zeroIssuerdBytes(extra[:])
+			if err == io.EOF {
+				return body, nil
+			}
+			if err != nil {
+				zeroIssuerdOwnedBytes(body)
+				return nil, err
+			}
+			continue
+		}
+		count, err := source.Read(body[len(body):cap(body)])
+		body = body[:len(body)+count]
+		if err == io.EOF {
+			return body, nil
+		}
+		if err != nil {
+			zeroIssuerdOwnedBytes(body)
+			return nil, err
+		}
+	}
+}
+
+func appendIssuerdOwnedBytes(body, input []byte, maximum int) ([]byte, error) {
+	bodyLength := len(body)
+	next, err := reserveIssuerdOwnedBytes(body, bodyLength+len(input), maximum)
+	if err != nil {
+		return nil, err
+	}
+	copy(next[bodyLength:], input)
+	return next, nil
+}
+
+func reserveIssuerdOwnedBytes(body []byte, nextLength, maximum int) ([]byte, error) {
+	if maximum < 0 || nextLength < len(body) || nextLength > maximum {
+		zeroIssuerdOwnedBytes(body)
+		return nil, errVerifierRequestTooLarge
+	}
+	if nextLength <= cap(body) {
+		return body[:nextLength], nil
+	}
+	nextCapacity := cap(body) * 2
+	if nextCapacity < nextLength {
+		nextCapacity = nextLength
+	}
+	if nextCapacity > maximum {
+		nextCapacity = maximum
+	}
+	next := make([]byte, nextLength, nextCapacity)
+	copy(next, body)
+	zeroIssuerdOwnedBytes(body)
+	return next, nil
+}
+
+func decodeVerifierRequestBody(body []byte) (protocol.IssuerVerifierRequest, error) {
+	defer zeroIssuerdBytes(body)
 	reader := wire.NewReader(body)
 	req := protocol.DecodeIssuerVerifierRequest(reader)
 	if reader.Err() != nil || !reader.EOF() {
+		zeroIssuerVerifierRequest(&req)
 		return protocol.IssuerVerifierRequest{}, fmt.Errorf("issuerd: invalid verifier request")
 	}
 	return req, nil
+}
+
+func zeroIssuerVerifierRequest(request *protocol.IssuerVerifierRequest) {
+	if request == nil {
+		return
+	}
+	for _, field := range [][]byte{
+		request.ServiceID,
+		request.IssuerID,
+		request.IssuerMetadataHash,
+		request.RelayDescriptorHash,
+		request.RelayBucketID,
+		request.TokenKeyID,
+		request.TokenNonce,
+		request.ChallengeDigest,
+		request.AuthenticatorInputHash,
+		request.TokenAuthenticator,
+		request.TokenSpentKey,
+		request.RequestNonce,
+	} {
+		zeroIssuerdBytes(field)
+	}
+	*request = protocol.IssuerVerifierRequest{}
+}
+
+func zeroIssuerdBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
+}
+
+func zeroIssuerdOwnedBytes(value []byte) {
+	zeroIssuerdBytes(value[:cap(value)])
 }
 
 func decodeJSONBody(r *http.Request, out any) error {

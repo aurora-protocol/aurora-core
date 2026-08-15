@@ -56,6 +56,109 @@ func TestHTTPDaemonReadinessHarnessCoversLiveIssuerSurface(t *testing.T) {
 	}
 }
 
+func TestDecodeVerifierRequestBodyOwnsAndScrubsInput(t *testing.T) {
+	service, err := NewHarnessService(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifierService := service.PublishIssuerMetadata().VerifierServices[0]
+	expected := verifierHTTPTestRequest(t, service, verifierService)
+	encoded, err := protocol.Encode(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeVerifierRequestBody(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded.TokenAuthenticator, expected.TokenAuthenticator) || !bytes.Equal(decoded.RequestNonce, expected.RequestNonce) {
+		t.Fatalf("decoded verifier request = %#v", decoded)
+	}
+	for index, value := range encoded {
+		if value != 0 {
+			t.Fatalf("verifier request input byte %d = %x after decode, want zero", index, value)
+		}
+	}
+	heldAuthenticator := decoded.TokenAuthenticator
+	heldNonce := decoded.RequestNonce
+	zeroIssuerVerifierRequest(&decoded)
+	for _, field := range [][]byte{heldAuthenticator, heldNonce} {
+		for index, value := range field {
+			if value != 0 {
+				t.Fatalf("decoded verifier request byte %d = %x after release, want zero", index, value)
+			}
+		}
+	}
+
+	malformed := []byte{0xff, 0xee, 0xdd}
+	if _, err := decodeVerifierRequestBody(malformed); err == nil {
+		t.Fatal("malformed verifier request was accepted")
+	}
+	for index, value := range malformed {
+		if value != 0 {
+			t.Fatalf("malformed verifier request byte %d = %x after decode, want zero", index, value)
+		}
+	}
+}
+
+func TestAppendIssuerdOwnedBytesScrubsReplacedBuffer(t *testing.T) {
+	original := []byte{0xa1}
+	if cap(original) != len(original) {
+		t.Fatal("test buffer must grow")
+	}
+	updated, err := appendIssuerdOwnedBytes(original, []byte{0xb2}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(updated, []byte{0xa1, 0xb2}) {
+		t.Fatalf("updated owned bytes = %x", updated)
+	}
+	if original[0] != 0 {
+		t.Fatalf("replaced request buffer byte = %x, want zero", original[0])
+	}
+}
+
+func TestReadVerifierRequestBodyAvoidsFixedScratchAllocation(t *testing.T) {
+	input := bytes.Repeat([]byte{0xa1}, 128)
+	reader := bytes.NewReader(input)
+	allocations := testing.AllocsPerRun(1000, func() {
+		reader.Reset(input)
+		body, err := readVerifierRequestBody(reader, -1)
+		if err != nil {
+			panic(err)
+		}
+		zeroIssuerdOwnedBytes(body)
+	})
+	if allocations > 1 {
+		t.Fatalf("unknown-length verifier request allocations = %.0f, want at most 1", allocations)
+	}
+}
+
+func TestReadVerifierRequestBodyAvoidsGrowAtUnknownLengthEOFBoundary(t *testing.T) {
+	input := bytes.Repeat([]byte{0xa1}, verifierRequestInitialCapacity)
+	reader := bytes.NewReader(input)
+	reader.Reset(input)
+	body, err := readVerifierRequestBody(reader, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap(body) != verifierRequestInitialCapacity {
+		t.Fatalf("unknown-length exact-capacity verifier request capacity = %d, want %d", cap(body), verifierRequestInitialCapacity)
+	}
+	zeroIssuerdOwnedBytes(body)
+	allocations := testing.AllocsPerRun(1000, func() {
+		reader.Reset(input)
+		body, err := readVerifierRequestBody(reader, -1)
+		if err != nil {
+			panic(err)
+		}
+		zeroIssuerdOwnedBytes(body)
+	})
+	if allocations > 2 {
+		t.Fatalf("unknown-length exact-capacity verifier request allocations = %.0f, want at most 2", allocations)
+	}
+}
+
 func TestHTTPDaemonPublishesMetadataIssuesVerifiesAndSpends(t *testing.T) {
 	service, err := NewHarnessService(200)
 	if err != nil {

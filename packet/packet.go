@@ -228,6 +228,101 @@ func (p *Protector) Seal(block protocol.FrameBlock) (AuroraPacket, error) {
 	}, nil
 }
 
+// SealEncoded seals block and returns the complete encoded packet in a single
+// buffer. The packet header is written ahead of the plaintext and the payload
+// is sealed in place, so the encoded packet costs one allocation instead of
+// sealing into one buffer and copying it into another.
+func (p *Protector) SealEncoded(block protocol.FrameBlock) ([]byte, error) {
+	if p == nil {
+		return nil, fmt.Errorf("packet: nil protector")
+	}
+	if p.Direction > 1 {
+		return nil, fmt.Errorf("packet: reserved packet direction 0x%x", p.Direction)
+	}
+	if err := protocol.ValidateFrameBlockForDirection(block, p.Direction); err != nil {
+		return nil, err
+	}
+	packetNumber := p.NextPacket
+	headerLength, plaintextLength, ok := sealedPacketLayout(p.RouteInstanceID, packetNumber, block)
+	if !ok {
+		return p.sealEncodedByCopy(block)
+	}
+
+	aad, err := auroracrypto.PacketAD(p.Suite, p.RouteInstanceID, p.HopLayer, p.Direction, p.KeyPhase, packetNumber)
+	if err != nil {
+		return nil, err
+	}
+	nonce, err := auroracrypto.XORNonce96(p.StaticIV, packetNumber)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := p.cachedAEAD()
+	if err != nil {
+		return nil, err
+	}
+
+	encoder := wire.NewEncoderWithBuffer(make([]byte, 0, headerLength+plaintextLength+packetAuthTagBytes))
+	encoder.WriteVarint(p.RouteInstanceID)
+	encoder.WriteUint8(p.HopLayer)
+	encoder.WriteUint8(p.Direction)
+	encoder.WriteUint8(p.KeyPhase)
+	encoder.WriteVarint(packetNumber)
+	// GCM preserves plaintext length, so the ciphertext length is known here.
+	encoder.WriteUint24(uint32(plaintextLength))
+	block.EncodeTo(encoder)
+	encoded, err := encoder.Buffer()
+	if err != nil {
+		destroyBytes(encoded)
+		return nil, err
+	}
+	if len(encoded) != headerLength+plaintextLength {
+		destroyBytes(encoded)
+		return nil, fmt.Errorf("packet: sealed packet layout mismatch")
+	}
+
+	sealed, err := aead.SealTo(encoded[headerLength:headerLength], nonce, aad, encoded[headerLength:])
+	if err != nil {
+		destroyBytes(encoded)
+		return nil, err
+	}
+	if len(sealed) != plaintextLength+packetAuthTagBytes || &sealed[0] != &encoded[headerLength] {
+		destroyBytes(encoded)
+		destroyBytes(sealed)
+		return nil, fmt.Errorf("packet: sealed payload was not written in place")
+	}
+	p.NextPacket++
+	return encoded[:headerLength+len(sealed)], nil
+}
+
+// sealEncodedByCopy handles blocks whose encoded length is not known ahead of
+// sealing, where the header offset cannot be reserved.
+func (p *Protector) sealEncodedByCopy(block protocol.FrameBlock) ([]byte, error) {
+	pkt, err := p.Seal(block)
+	if err != nil {
+		return nil, err
+	}
+	defer destroyBytes(pkt.sealedPayload)
+	return EncodeAuroraPacket(pkt)
+}
+
+// sealedPacketLayout reports the header and plaintext lengths of the packet
+// that would carry block, when both are known before sealing.
+func sealedPacketLayout(routeInstanceID, packetNumber uint64, block protocol.FrameBlock) (int, int, bool) {
+	plaintextLength, known := block.EncodedLen()
+	if !known || plaintextLength <= 0 || plaintextLength > 0xffffff {
+		return 0, 0, false
+	}
+	routeIDLength, err := wire.VarintLen(routeInstanceID)
+	if err != nil {
+		return 0, 0, false
+	}
+	packetNumberLength, err := wire.VarintLen(packetNumber)
+	if err != nil {
+		return 0, 0, false
+	}
+	return routeIDLength + 3 + packetNumberLength + 3, plaintextLength, true
+}
+
 func encodeFrameBlockForSeal(block protocol.FrameBlock) ([]byte, bool, error) {
 	length, known := block.EncodedLen()
 	if !known || length > int(^uint(0)>>1)-packetAuthTagBytes {

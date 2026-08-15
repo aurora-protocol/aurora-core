@@ -2492,13 +2492,16 @@ func TestLiveFirstHopGracefulShutdownCancelsRelayDependency(t *testing.T) {
 func BenchmarkLiveFirstHopBootstrap(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
+	b.StopTimer()
 	for i := 0; i < b.N; i++ {
 		fixture := newLiveFirstHopFixture(b, time.Now())
 		relayDriver := fixture.newRelayDriver(b)
 		harness := startLiveFirstHopHarness(b, fixture, relayDriver, nil)
+		b.StartTimer()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		established, err := fixture.newClientDriver(b).Connect(ctx, harness.opener)
 		if err != nil {
+			b.StopTimer()
 			cancel()
 			_ = harness.close()
 			b.Fatal(err)
@@ -2507,11 +2510,13 @@ func BenchmarkLiveFirstHopBootstrap(b *testing.B) {
 		case application := <-harness.relayApplications:
 			_ = application.Close()
 		case <-ctx.Done():
+			b.StopTimer()
 			_ = established.Close()
 			cancel()
 			_ = harness.close()
 			b.Fatal(ctx.Err())
 		}
+		b.StopTimer()
 		_ = established.Close()
 		cancel()
 		if err := harness.close(); err != nil {
@@ -2586,6 +2591,7 @@ func BenchmarkLiveFirstHopBootstrapParallel64(b *testing.B) {
 	const connectionCount = 64
 	b.ReportAllocs()
 	b.ResetTimer()
+	b.StopTimer()
 	for i := 0; i < b.N; i++ {
 		fixture := newLiveFirstHopFixture(b, time.Now())
 		credentials := make([]admission.AccessHintCredential, connectionCount)
@@ -2619,6 +2625,7 @@ func BenchmarkLiveFirstHopBootstrapParallel64(b *testing.B) {
 				results <- err
 			}(clientDriver)
 		}
+		b.StartTimer()
 		close(start)
 		wait.Wait()
 		close(results)
@@ -2639,6 +2646,7 @@ func BenchmarkLiveFirstHopBootstrapParallel64(b *testing.B) {
 		if got := harness.connections.Load(); runErr == nil && got != connectionCount {
 			runErr = fmt.Errorf("parallel benchmark accepted %d connections, want %d", got, connectionCount)
 		}
+		b.StopTimer()
 		cancel()
 		if err := harness.close(); runErr == nil && err != nil {
 			runErr = err

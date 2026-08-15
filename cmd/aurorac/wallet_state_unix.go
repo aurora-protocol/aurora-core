@@ -159,6 +159,7 @@ func readProvisioningWalletState(path string, now time.Time) (*provisioningWalle
 	defer file.Close()
 	encoded, err := io.ReadAll(io.LimitReader(file, maximumProvisioningWalletStateBytes+1))
 	if err != nil {
+		zeroProxyBytes(encoded)
 		return nil, fmt.Errorf("client: read wallet state: %w", err)
 	}
 	defer zeroProxyBytes(encoded)

@@ -77,6 +77,8 @@ func TestNativeSessionBeginClosesDeferredHandshakeReturnedWithError(t *testing.T
 func TestNativeSessionBeginReturnsIssuerRequestOnlyAfterPrelude1(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	request := nativeTestProofRequest(now)
+	admissionContextHash := append([]byte(nil), request.AdmissionContextHash...)
+	defer zeroNativeBytes(admissionContextHash)
 	stub := &nativeTestHandshake{}
 	registry := newNativeSessionRegistry(nativeSessionRegistryOptions{
 		now:    func() time.Time { return now },
@@ -97,12 +99,46 @@ func TestNativeSessionBeginReturnsIssuerRequestOnlyAfterPrelude1(t *testing.T) {
 	if err != nil || carrierType != server.CarrierBlindRSAIssueReq {
 		t.Fatalf("unexpected native issuer carrier request: type=%d err=%v", carrierType, err)
 	}
-	tokenNonce, admissionContextHash, expiryUnix, err := server.DecodeCarrierIssueRequest(payload)
+	tokenNonce, decodedAdmissionContextHash, expiryUnix, err := server.DecodeCarrierIssueRequest(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tokenNonce) != 32 || !bytes.Equal(admissionContextHash, request.AdmissionContextHash) || expiryUnix <= uint64(now.Unix()) || expiryUnix >= request.ReplayEpochValidUntil {
-		t.Fatalf("unexpected native issuer request: nonce=%d context=%x expiry=%d", len(tokenNonce), admissionContextHash, expiryUnix)
+	if len(tokenNonce) != 32 || !bytes.Equal(decodedAdmissionContextHash, admissionContextHash) || expiryUnix <= uint64(now.Unix()) || expiryUnix >= request.ReplayEpochValidUntil {
+		t.Fatalf("unexpected native issuer request: nonce=%d context=%x expiry=%d", len(tokenNonce), decodedAdmissionContextHash, expiryUnix)
+	}
+}
+
+func TestNativeSessionTakesOwnershipOfStarterProofRequest(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	request := nativeTestProofRequest(now)
+	expected := cloneNativeProofRequest(request)
+	defer zeroNativeProofRequest(&expected)
+	registry := newNativeSessionRegistry(nativeSessionRegistryOptions{
+		now:    func() time.Time { return now },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x56}, 64)),
+		start: func(context.Context, client.NativeProvisioning, time.Time) (nativeSessionHandshake, handshake.ClientProofRequest, error) {
+			return &nativeTestHandshake{}, request, nil
+		},
+	})
+	work, err := registry.begin(client.NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeIssuerWork(&work)
+	defer registry.close(work.Handle)
+	session, err := registry.lookup(work.Handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(session.request.AdmissionContextHash, expected.AdmissionContextHash) ||
+		!bytes.Equal(session.request.HandshakeBindingContext, expected.HandshakeBindingContext) ||
+		!bytes.Equal(session.request.ReplayWindowID, expected.ReplayWindowID) {
+		t.Fatal("native session did not retain an independent proof request")
+	}
+	for _, field := range [][]byte{request.AdmissionContextHash, request.HandshakeBindingContext, request.ReplayWindowID} {
+		if !bytes.Equal(field, make([]byte, len(field))) {
+			t.Fatal("native session retained starter proof request material")
+		}
 	}
 }
 

@@ -496,6 +496,53 @@ func TestNativeSessionLocalPacketWaitStopsWhenClosed(t *testing.T) {
 	}
 }
 
+func TestNativeSessionCloseClosesPacketAdapter(t *testing.T) {
+	application := nativeTestApplication(t)
+	adapter, err := client.NewPacketAdapter(application, client.PacketAdapterOptions{})
+	if err != nil {
+		application.Close()
+		t.Fatal(err)
+	}
+	registry := &nativeSessionRegistry{sessions: map[uint64]*nativeSession{
+		1: {
+			context:      context.Background(),
+			cancel:       func() {},
+			established:  &handshake.EstablishedSession{Application: application},
+			adapter:      adapter,
+			localPackets: make(chan []byte, 1),
+		},
+	}}
+	if err := registry.close(1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.NextEncryptedPacket(context.Background()); !errors.Is(err, client.ErrPacketAdapterClosed) {
+		t.Fatalf("adapter after native session close = %v, want ErrPacketAdapterClosed", err)
+	}
+}
+
+func TestNativeSessionCloseZeroesQueuedLocalPackets(t *testing.T) {
+	application := nativeTestApplication(t)
+	pending := []byte("queued native local packet")
+	packetQueue := make(chan []byte, 1)
+	packetQueue <- pending
+	registry := &nativeSessionRegistry{sessions: map[uint64]*nativeSession{
+		1: {
+			context:      context.Background(),
+			cancel:       func() {},
+			established:  &handshake.EstablishedSession{Application: application},
+			localPackets: packetQueue,
+		},
+	}}
+	if err := registry.close(1); err != nil {
+		t.Fatal(err)
+	}
+	for index, value := range pending {
+		if value != 0 {
+			t.Fatalf("queued local packet byte %d = %x after native session close, want zero", index, value)
+		}
+	}
+}
+
 func TestNativeSessionDispatchUsesBoundedOpaqueOperations(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	application := nativeTestApplication(t)

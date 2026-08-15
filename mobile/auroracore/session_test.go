@@ -17,6 +17,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/client"
 	"github.com/aurora-protocol/aurora-core/handshake"
+	"github.com/aurora-protocol/aurora-core/packet"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/server"
@@ -324,6 +325,85 @@ func TestNativeSessionPacketCallsRejectMalformedFramesAndPackets(t *testing.T) {
 	}
 	if packet, err := registry.nextPacket(work.Handle); !errors.Is(err, session.ErrNoPacket) || packet != nil {
 		t.Fatalf("native session next packet after drain = %x, %v; want no packet", packet, err)
+	}
+}
+
+func TestNativeSessionPacketHandlingConsumesOwnedEncryptedInput(t *testing.T) {
+	clientApplication := nativeTestApplication(t)
+	peerApplication := nativePeerApplication(t)
+	defer peerApplication.Close()
+	registry := &nativeSessionRegistry{
+		now: func() time.Time { return time.Unix(1_700_000_000, 0) },
+		sessions: map[uint64]*nativeSession{
+			1: {
+				context:     context.Background(),
+				cancel:      func() {},
+				established: &handshake.EstablishedSession{Application: clientApplication},
+			},
+		},
+	}
+	defer registry.close(1)
+
+	frame, err := protocol.NewStreamDataFrame(7, []byte("owned native packet"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := peerApplication.QueueFrames(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := peerApplication.TryNextPacket()
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := packet.DecodeAuroraPacketView(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealedOffset := len(encoded) - len(view.Ciphertext) - len(view.AuthTag)
+
+	encodedBlocks, err := registry.handlePacket(1, encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeBytes(encodedBlocks)
+	reader := wire.NewReader(encodedBlocks)
+	if count := reader.ReadVarint(); count != 1 {
+		t.Fatalf("native owned packet block count = %d, want 1", count)
+	}
+	blocks, err := protocol.DecodeFrameBlock(reader.ReadOpaque24())
+	if err != nil || reader.Err() != nil || !reader.EOF() {
+		t.Fatalf("decode native owned packet blocks: %v %v", err, reader.Err())
+	}
+	defer zeroNativeFrameBlock(&blocks)
+	if len(blocks.Frames) != 1 || !bytes.Equal(blocks.Frames[0].Payload, []byte("owned native packet")) {
+		t.Fatalf("native owned packet blocks = %#v", blocks)
+	}
+	for index, value := range encoded[sealedOffset:] {
+		if value != 0 {
+			t.Fatalf("native encrypted input byte %d = %x after handling, want zero", index, value)
+		}
+	}
+
+	if err := peerApplication.QueueFrames(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}); err != nil {
+		t.Fatal(err)
+	}
+	tampered, err := peerApplication.TryNextPacket()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedView, err := packet.DecodeAuroraPacketView(tampered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedOffset := len(tampered) - len(tamperedView.Ciphertext) - len(tamperedView.AuthTag)
+	tampered[tamperedOffset] ^= 0xff
+	if _, err := registry.handlePacket(1, tampered); err == nil {
+		t.Fatal("native packet handling accepted a tampered encrypted packet")
+	}
+	for index, value := range tampered[tamperedOffset:] {
+		if value != 0 {
+			t.Fatalf("tampered native encrypted input byte %d = %x after handling, want zero", index, value)
+		}
 	}
 }
 

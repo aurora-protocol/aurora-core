@@ -444,7 +444,7 @@ func (r *nativeSessionRegistry) handlePacket(handle uint64, encoded []byte) ([]b
 	if session.duplexActive {
 		return nil, fmt.Errorf("auroracore: carrier-backed native session owns encrypted packets")
 	}
-	blocks, err := session.established.Application.HandlePacket(context.Background(), r.now(), encoded)
+	blocks, err := session.established.Application.HandleOwnedPacket(context.Background(), r.now(), encoded)
 	if err != nil {
 		return nil, err
 	}

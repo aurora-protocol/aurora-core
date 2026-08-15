@@ -636,6 +636,7 @@ func exchangeIssuerWork(ctx context.Context, timeout time.Duration, work client.
 	}
 	encoded, err := io.ReadAll(io.LimitReader(response.Body, maximumIssuerResponseBytes+1))
 	if err != nil {
+		zeroProxyBytes(encoded)
 		return nil, fmt.Errorf("client: read issuer response: %w", err)
 	}
 	if len(encoded) == 0 || len(encoded) > maximumIssuerResponseBytes {
@@ -858,6 +859,7 @@ func readRestrictedOwnerFile(path string, maximumBytes int, label string) ([]byt
 	}
 	encoded, err := io.ReadAll(io.LimitReader(file, int64(maximumBytes)+1))
 	if err != nil {
+		zeroProxyBytes(encoded)
 		return nil, fmt.Errorf("client: read %s: %w", label, err)
 	}
 	if len(encoded) == 0 || len(encoded) > maximumBytes {

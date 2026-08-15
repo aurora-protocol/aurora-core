@@ -688,9 +688,11 @@ func readProductionFileWithMode(path string, restricted bool) ([]byte, error) {
 	}
 	encoded, err := io.ReadAll(io.LimitReader(file, maximumProductionConfigurationFileBytes+1))
 	if err != nil {
+		zeroProductionBytes(encoded)
 		return nil, fmt.Errorf("server: read configuration file: %w", err)
 	}
 	if len(encoded) == 0 || len(encoded) > maximumProductionConfigurationFileBytes {
+		zeroProductionBytes(encoded)
 		return nil, fmt.Errorf("server: configuration file length is invalid")
 	}
 	return encoded, nil

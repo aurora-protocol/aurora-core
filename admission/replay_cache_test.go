@@ -134,6 +134,23 @@ func TestFileReplayCacheRejectsDuplicateFromStaleOpenInstance(t *testing.T) {
 	}
 }
 
+func TestFileReplayCacheDoesNotExposeEntriesAfterClose(t *testing.T) {
+	cache, err := NewFileReplayCache(filepath.Join(t.TempDir(), "replay-cache.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := rep(0x79, 48)
+	if inserted, err := cache.InsertIfAbsent(key); err != nil || !inserted {
+		t.Fatalf("insert spent key: inserted=%t err=%v", inserted, err)
+	}
+	if err := cache.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if cache.Has(key) {
+		t.Fatal("closed replay cache exposed retained entry")
+	}
+}
+
 func TestVerifyAndSpendReplayFailsClosedWhenReplayCacheWriteFails(t *testing.T) {
 	proof, replay, handshakeBinding, admissionContext := replayVerificationFixture(t)
 	_, _, err := VerifyAndSpendReplay(ReplayVerificationInput{

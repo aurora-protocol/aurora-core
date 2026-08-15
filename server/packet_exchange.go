@@ -68,39 +68,58 @@ func DecodePacketBatch(data []byte) (PacketBatch, error) {
 	if count > maxPacketBatchPackets {
 		return PacketBatch{}, fmt.Errorf("server: packet batch has %d packets, max %d", count, maxPacketBatchPackets)
 	}
+	if err := validatePacketBatchEncoding(data, count); err != nil {
+		return PacketBatch{}, err
+	}
 	batch := PacketBatch{
 		Packets:         make([][]byte, 0, count),
 		ProtocolNumbers: make([]uint16, 0, count),
 	}
 	offset := 2
 	for i := 0; i < count; i++ {
+		protocolNumber := binary.BigEndian.Uint16(data[offset : offset+2])
+		offset += 2
+		packetLength := int(binary.BigEndian.Uint32(data[offset : offset+4]))
+		offset += 4
+		batch.ProtocolNumbers = append(batch.ProtocolNumbers, protocolNumber)
+		batch.Packets = append(batch.Packets, append([]byte(nil), data[offset:offset+packetLength]...))
+		offset += packetLength
+	}
+	return batch, nil
+}
+
+func validatePacketBatchEncoding(data []byte, count int) error {
+	offset := 2
+	for i := 0; i < count; i++ {
 		if len(data)-offset < 6 {
-			return PacketBatch{}, fmt.Errorf("server: packet entry %d is truncated", i)
+			return fmt.Errorf("server: packet entry %d is truncated", i)
 		}
 		protocolNumber := binary.BigEndian.Uint16(data[offset : offset+2])
 		offset += 2
 		packetLength := int(binary.BigEndian.Uint32(data[offset : offset+4]))
 		offset += 4
 		if packetLength == 0 {
-			return PacketBatch{}, fmt.Errorf("server: packet entry %d is empty", i)
+			return fmt.Errorf("server: packet entry %d is empty", i)
 		}
 		if packetLength > maxPacketBytes {
-			return PacketBatch{}, fmt.Errorf("server: packet length %d exceeds %d", packetLength, maxPacketBytes)
+			return fmt.Errorf("server: packet length %d exceeds %d", packetLength, maxPacketBytes)
 		}
 		if len(data)-offset < packetLength {
-			return PacketBatch{}, fmt.Errorf("server: packet entry %d payload is truncated", i)
+			return fmt.Errorf("server: packet entry %d payload is truncated", i)
 		}
-		batch.ProtocolNumbers = append(batch.ProtocolNumbers, protocolNumber)
-		batch.Packets = append(batch.Packets, append([]byte(nil), data[offset:offset+packetLength]...))
+		packetFamily := packetProtocolNumber(data[offset : offset+packetLength])
+		if packetFamily == 0 {
+			return fmt.Errorf("server: packet entry %d is not IPv4 or IPv6", i)
+		}
+		if protocolNumber != packetFamily {
+			return fmt.Errorf("server: packet entry %d protocol number %d does not match packet family %d", i, protocolNumber, packetFamily)
+		}
 		offset += packetLength
 	}
 	if offset != len(data) {
-		return PacketBatch{}, fmt.Errorf("server: trailing packet batch bytes")
+		return fmt.Errorf("server: trailing packet batch bytes")
 	}
-	if err := validatePacketBatch(batch); err != nil {
-		return PacketBatch{}, err
-	}
-	return batch, nil
+	return nil
 }
 
 func validatePacketBatch(batch PacketBatch) error {

@@ -250,6 +250,30 @@ func TestPacketBatchCodecRejectsEmptyPacketEntry(t *testing.T) {
 	}
 }
 
+func TestPacketBatchCodecRejectsMalformedSecondEntryWithoutCopyingFirstPacket(t *testing.T) {
+	encoded := []byte{
+		0x00, 0x02,
+		0x00, 0x02,
+		0x00, 0x00, 0x00, 0x04,
+		0x45, 0x00, 0x00, 0x14,
+		0x00, 0x02,
+		0x00, 0x00, 0x00, 0x04,
+		0x45,
+	}
+	if _, err := DecodePacketBatch(encoded); err == nil {
+		t.Fatal("DecodePacketBatch accepted a truncated second packet")
+	}
+
+	allocations := testing.AllocsPerRun(1000, func() {
+		if _, err := DecodePacketBatch(encoded); err == nil {
+			panic("DecodePacketBatch accepted a truncated second packet")
+		}
+	})
+	if allocations > 2 {
+		t.Fatalf("malformed packet batch allocations = %.0f, want at most 2", allocations)
+	}
+}
+
 func TestPacketBatchCodecRejectsProtocolNumberMismatch(t *testing.T) {
 	encodedMismatch := []byte{
 		0x00, 0x01,

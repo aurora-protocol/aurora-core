@@ -96,13 +96,13 @@ func validatePacketBatchEncoding(data []byte, count int) error {
 		}
 		protocolNumber := binary.BigEndian.Uint16(data[offset : offset+2])
 		offset += 2
-		packetLength := int(binary.BigEndian.Uint32(data[offset : offset+4]))
+		packetLength, err := validatePacketBatchPacketLength(binary.BigEndian.Uint32(data[offset : offset+4]))
+		if err != nil {
+			return err
+		}
 		offset += 4
 		if packetLength == 0 {
 			return fmt.Errorf("server: packet entry %d is empty", i)
-		}
-		if packetLength > maxPacketBytes {
-			return fmt.Errorf("server: packet length %d exceeds %d", packetLength, maxPacketBytes)
 		}
 		if len(data)-offset < packetLength {
 			return fmt.Errorf("server: packet entry %d payload is truncated", i)
@@ -120,6 +120,13 @@ func validatePacketBatchEncoding(data []byte, count int) error {
 		return fmt.Errorf("server: trailing packet batch bytes")
 	}
 	return nil
+}
+
+func validatePacketBatchPacketLength(length uint32) (int, error) {
+	if length > maxPacketBytes {
+		return 0, fmt.Errorf("server: packet length %d exceeds %d", length, maxPacketBytes)
+	}
+	return int(length), nil
 }
 
 func validatePacketBatch(batch PacketBatch) error {

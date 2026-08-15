@@ -274,6 +274,19 @@ func TestPacketBatchCodecRejectsMalformedSecondEntryWithoutCopyingFirstPacket(t 
 	}
 }
 
+func TestPacketBatchCodecRejectsOversizedUnsignedWireLength(t *testing.T) {
+	for _, length := range []uint32{uint32(maxPacketBytes) + 1, 0x80000000} {
+		encoded := []byte{
+			0x00, 0x01,
+			0x00, 0x02,
+			byte(length >> 24), byte(length >> 16), byte(length >> 8), byte(length),
+		}
+		if _, err := DecodePacketBatch(encoded); err == nil {
+			t.Fatalf("packet length %d was accepted", length)
+		}
+	}
+}
+
 func TestPacketBatchCodecRejectsProtocolNumberMismatch(t *testing.T) {
 	encodedMismatch := []byte{
 		0x00, 0x01,

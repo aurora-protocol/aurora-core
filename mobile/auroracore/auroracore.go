@@ -204,6 +204,11 @@ func cBytes(b []byte, outLen *C.int) *C.uint8_t {
 	return (*C.uint8_t)(p)
 }
 
+func encodeNativeIssueCarrier(body []byte) []byte {
+	defer zeroNativeBytes(body)
+	return server.EncodeCarrier(server.CarrierBlindRSAIssueReq, body)
+}
+
 func dispatch(op int, in []byte, arg uint64) (byte, []byte) {
 	switch op {
 	case opEncodeMetadataRequest:
@@ -216,7 +221,7 @@ func dispatch(op int, in []byte, arg uint64) (byte, []byte) {
 		if err != nil {
 			return statusError, nil
 		}
-		return statusOK, server.EncodeCarrier(server.CarrierBlindRSAIssueReq, body)
+		return statusOK, encodeNativeIssueCarrier(body)
 	case opEncodeSpendRequest:
 		if len(in) == 0 {
 			return statusError, nil

@@ -101,6 +101,23 @@ func TestDecodeVerifierRequestBodyOwnsAndScrubsInput(t *testing.T) {
 	}
 }
 
+func TestAppendIssuerdOwnedBytesScrubsReplacedBuffer(t *testing.T) {
+	original := []byte{0xa1}
+	if cap(original) != len(original) {
+		t.Fatal("test buffer must grow")
+	}
+	updated, err := appendIssuerdOwnedBytes(original, []byte{0xb2}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(updated, []byte{0xa1, 0xb2}) {
+		t.Fatalf("updated owned bytes = %x", updated)
+	}
+	if original[0] != 0 {
+		t.Fatalf("replaced request buffer byte = %x, want zero", original[0])
+	}
+}
+
 func TestHTTPDaemonPublishesMetadataIssuesVerifiesAndSpends(t *testing.T) {
 	service, err := NewHarnessService(200)
 	if err != nil {

@@ -605,6 +605,64 @@ func (r IssuerVerifierRequest) EncodeTo(e *wire.Encoder) {
 	e.WriteUint64(r.RequestTimeUnix)
 }
 
+func (r IssuerVerifierRequest) EncodedLen() (int, bool) {
+	for _, field := range []struct {
+		value  []byte
+		length int
+	}{
+		{r.ServiceID, 16},
+		{r.IssuerID, 16},
+		{r.IssuerMetadataHash, 48},
+		{r.RelayDescriptorHash, 48},
+		{r.RelayBucketID, 16},
+		{r.TokenKeyID, 32},
+		{r.TokenNonce, 32},
+		{r.ChallengeDigest, 32},
+		{r.AuthenticatorInputHash, 48},
+		{r.TokenSpentKey, 48},
+		{r.RequestNonce, 32},
+	} {
+		if len(field.value) != field.length {
+			return 0, false
+		}
+	}
+	if len(r.TokenAuthenticator) > 0xffff {
+		return 0, false
+	}
+	length := 1 + 2 + len(r.TokenAuthenticator) + 8 + 8 + 8
+	for _, field := range [][]byte{
+		r.ServiceID,
+		r.IssuerID,
+		r.IssuerMetadataHash,
+		r.RelayDescriptorHash,
+		r.RelayBucketID,
+		r.TokenKeyID,
+		r.TokenNonce,
+		r.ChallengeDigest,
+		r.AuthenticatorInputHash,
+		r.TokenSpentKey,
+		r.RequestNonce,
+	} {
+		var ok bool
+		length, ok = addEncodedLength(length, len(field))
+		if !ok {
+			return 0, false
+		}
+	}
+	for _, value := range []uint64{r.RequestVersion, r.RouteInstanceID, r.ProofType} {
+		fieldLength, err := wire.VarintLen(value)
+		if err != nil {
+			return 0, false
+		}
+		var ok bool
+		length, ok = addEncodedLength(length, fieldLength)
+		if !ok {
+			return 0, false
+		}
+	}
+	return length, true
+}
+
 func DecodeIssuerVerifierRequest(r *wire.Reader) IssuerVerifierRequest {
 	return IssuerVerifierRequest{
 		RequestVersion:            r.ReadVarint(),

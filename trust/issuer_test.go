@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"testing"
 
+	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 )
@@ -61,6 +62,36 @@ func issuerVerifierRequestFixture(t *testing.T) (protocol.IssuerVerifierServiceR
 		ServiceSignature: []byte("signature"),
 	}
 	return service, req, resp
+}
+
+func TestIssuerVerifierRequestHashEncodedInputIsScrubbed(t *testing.T) {
+	_, request, _ := issuerVerifierRequestFixture(t)
+	encoded, err := protocol.Encode(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := auroracrypto.PreHashLabel("aurora v2.0 issuer verifier request", append([]byte(nil), encoded...))
+	got := hashIssuerVerifierRequestEncoding(encoded)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("issuer verifier request hash = %x, want %x", got, want)
+	}
+	for index, value := range encoded {
+		if value != 0 {
+			t.Fatalf("request hash input byte %d = %x after hashing, want zero", index, value)
+		}
+	}
+}
+
+func TestIssuerVerifierRequestEncodedLenMatchesCanonicalEncoding(t *testing.T) {
+	_, request, _ := issuerVerifierRequestFixture(t)
+	encoded, err := protocol.Encode(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	length, known := request.EncodedLen()
+	if !known || length != len(encoded) {
+		t.Fatalf("issuer verifier request encoded length = %d, known=%t, want %d", length, known, len(encoded))
+	}
 }
 
 func TestIssuerMetadataHashIgnoresSignatureBytes(t *testing.T) {

@@ -26,6 +26,7 @@ import (
 const (
 	maximumJSONRequestBodyBytes     int64 = 1 << 20
 	maximumVerifierRequestBodyBytes int64 = 1 << 20
+	verifierRequestReadChunkBytes         = 32 << 10
 )
 
 var (
@@ -509,16 +510,70 @@ func decodeVerifierRequest(r *http.Request) (protocol.IssuerVerifierRequest, err
 	if r.ContentLength > maximumVerifierRequestBodyBytes {
 		return protocol.IssuerVerifierRequest{}, errVerifierRequestTooLarge
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maximumVerifierRequestBodyBytes+1))
+	body, err := readVerifierRequestBody(r.Body, r.ContentLength)
 	if err != nil {
-		zeroIssuerdBytes(body)
 		return protocol.IssuerVerifierRequest{}, err
 	}
-	if len(body) > int(maximumVerifierRequestBodyBytes) {
-		zeroIssuerdBytes(body)
-		return protocol.IssuerVerifierRequest{}, errVerifierRequestTooLarge
-	}
 	return decodeVerifierRequestBody(body)
+}
+
+func readVerifierRequestBody(source io.Reader, contentLength int64) ([]byte, error) {
+	maximum := int(maximumVerifierRequestBodyBytes)
+	capacityHint := verifierRequestReadChunkBytes
+	if contentLength >= 0 && contentLength <= maximumVerifierRequestBodyBytes {
+		capacityHint = int(contentLength)
+	}
+	if capacityHint > maximum {
+		capacityHint = maximum
+	}
+	var body []byte
+	if capacityHint > 0 {
+		body = make([]byte, 0, capacityHint)
+	}
+	scratch := make([]byte, verifierRequestReadChunkBytes)
+	defer zeroIssuerdBytes(scratch)
+	for {
+		count, err := source.Read(scratch)
+		if count > 0 {
+			var appendErr error
+			body, appendErr = appendIssuerdOwnedBytes(body, scratch[:count], maximum)
+			if appendErr != nil {
+				return nil, appendErr
+			}
+		}
+		if err == io.EOF {
+			return body, nil
+		}
+		if err != nil {
+			zeroIssuerdOwnedBytes(body)
+			return nil, err
+		}
+	}
+}
+
+func appendIssuerdOwnedBytes(body, input []byte, maximum int) ([]byte, error) {
+	if maximum < 0 || len(body) > maximum || len(input) > maximum-len(body) {
+		zeroIssuerdOwnedBytes(body)
+		return nil, errVerifierRequestTooLarge
+	}
+	nextLength := len(body) + len(input)
+	if nextLength <= cap(body) {
+		body = body[:nextLength]
+		copy(body[nextLength-len(input):], input)
+		return body, nil
+	}
+	nextCapacity := cap(body) * 2
+	if nextCapacity < nextLength {
+		nextCapacity = nextLength
+	}
+	if nextCapacity > maximum {
+		nextCapacity = maximum
+	}
+	next := make([]byte, nextLength, nextCapacity)
+	copy(next, body)
+	zeroIssuerdOwnedBytes(body)
+	copy(next[len(body):], input)
+	return next, nil
 }
 
 func decodeVerifierRequestBody(body []byte) (protocol.IssuerVerifierRequest, error) {
@@ -559,6 +614,10 @@ func zeroIssuerdBytes(value []byte) {
 	for index := range value {
 		value[index] = 0
 	}
+}
+
+func zeroIssuerdOwnedBytes(value []byte) {
+	zeroIssuerdBytes(value[:cap(value)])
 }
 
 func decodeJSONBody(r *http.Request, out any) error {

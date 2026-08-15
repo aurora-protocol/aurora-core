@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -737,6 +738,71 @@ func TestReadIssuerVerifierResponseRejectsOversizedBody(t *testing.T) {
 	} {
 		if _, err := readIssuerVerifierResponse(response); err == nil {
 			t.Fatalf("oversized verifier response was accepted")
+		}
+	}
+}
+
+func TestIssuerVerifierRequestBodyZeroesEncodingOnClose(t *testing.T) {
+	encoded := []byte("sensitive verifier authenticator")
+	body := newIssuerVerifierRequestBody(encoded)
+	read, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+	if !bytes.Equal(read, []byte("sensitive verifier authenticator")) {
+		t.Fatalf("request body = %q", read)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("close request body: %v", err)
+	}
+	for i, b := range encoded {
+		if b != 0 {
+			t.Fatalf("encoding byte %d = %d after close, want zero", i, b)
+		}
+	}
+	if _, err := body.Read(make([]byte, 1)); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("read after close error = %v, want %v", err, io.ErrClosedPipe)
+	}
+}
+
+func TestDecodeIssuerVerifierResponseZeroesSourceBuffer(t *testing.T) {
+	service := verifierServiceRecord()
+	response := protocol.IssuerVerifierResponse{
+		ResponseVersion:  1,
+		ServiceID:        append([]byte(nil), service.ServiceID...),
+		RequestHash:      rb(0x70, 48),
+		Decision:         registry.VerifierDecisionAccept,
+		TokenSpentKey:    rb(0x71, 48),
+		ValidUntilUnix:   200,
+		ResponseNonce:    rb(0x72, 32),
+		ServiceSignature: rb(0x73, 64),
+	}
+	encoded, err := protocol.Encode(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeIssuerVerifierResponse(encoded)
+	if err != nil {
+		t.Fatalf("decode verifier response: %v", err)
+	}
+	if !reflect.DeepEqual(decoded, response) {
+		t.Fatalf("decoded response = %+v, want %+v", decoded, response)
+	}
+	for i, b := range encoded {
+		if b != 0 {
+			t.Fatalf("response byte %d = %d after decode, want zero", i, b)
+		}
+	}
+}
+
+func TestDecodeIssuerVerifierResponseZeroesSourceBufferOnError(t *testing.T) {
+	encoded := []byte{0x01, 0x02, 0x03}
+	if _, err := decodeIssuerVerifierResponse(encoded); err == nil {
+		t.Fatalf("malformed verifier response was accepted")
+	}
+	for i, b := range encoded {
+		if b != 0 {
+			t.Fatalf("response byte %d = %d after failed decode, want zero", i, b)
 		}
 	}
 }

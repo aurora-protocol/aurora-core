@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/protocol"
@@ -25,6 +26,43 @@ const (
 
 type MTLSIssuerVerifierTransport struct {
 	Client *http.Client
+}
+
+// issuerVerifierRequestBody owns a verifier request encoding until Transport closes it.
+type issuerVerifierRequestBody struct {
+	mu      sync.Mutex
+	reader  *bytes.Reader
+	encoded []byte
+	closed  bool
+}
+
+func newIssuerVerifierRequestBody(encoded []byte) *issuerVerifierRequestBody {
+	return &issuerVerifierRequestBody{
+		reader:  bytes.NewReader(encoded),
+		encoded: encoded,
+	}
+}
+
+func (b *issuerVerifierRequestBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return 0, io.ErrClosedPipe
+	}
+	return b.reader.Read(p)
+}
+
+func (b *issuerVerifierRequestBody) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil
+	}
+	clear(b.encoded)
+	b.encoded = nil
+	b.reader.Reset(nil)
+	b.closed = true
+	return nil
 }
 
 func (t MTLSIssuerVerifierTransport) ExchangeIssuerVerifier(service protocol.IssuerVerifierServiceRecord, req protocol.IssuerVerifierRequest) (protocol.IssuerVerifierResponse, error) {
@@ -43,10 +81,13 @@ func (t MTLSIssuerVerifierTransport) ExchangeIssuerVerifier(service protocol.Iss
 	if err != nil {
 		return protocol.IssuerVerifierResponse{}, err
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(encoded))
+	requestBody := newIssuerVerifierRequestBody(encoded)
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, requestBody)
 	if err != nil {
+		_ = requestBody.Close()
 		return protocol.IssuerVerifierResponse{}, err
 	}
+	httpReq.ContentLength = int64(len(encoded))
 	httpReq.Header.Set("Content-Type", "application/octet-stream")
 	httpReq.Header.Set("Accept", "application/octet-stream")
 	httpReq.Header.Set("Accept-Encoding", "identity")
@@ -65,15 +106,7 @@ func (t MTLSIssuerVerifierTransport) ExchangeIssuerVerifier(service protocol.Iss
 	if err != nil {
 		return protocol.IssuerVerifierResponse{}, err
 	}
-	reader := wire.NewReader(body)
-	out := protocol.DecodeIssuerVerifierResponse(reader)
-	if reader.Err() != nil {
-		return protocol.IssuerVerifierResponse{}, reader.Err()
-	}
-	if !reader.EOF() {
-		return protocol.IssuerVerifierResponse{}, fmt.Errorf("ops: trailing verifier response bytes")
-	}
-	return out, nil
+	return decodeIssuerVerifierResponse(body)
 }
 
 func issuerVerifierHTTPClient(source *http.Client) (*http.Client, error) {
@@ -132,12 +165,27 @@ func readIssuerVerifierResponse(resp *http.Response) ([]byte, error) {
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, issuerVerifierMaxResponseSize+1))
 	if err != nil {
+		clear(body)
 		return nil, err
 	}
 	if len(body) > issuerVerifierMaxResponseSize {
+		clear(body)
 		return nil, fmt.Errorf("ops: verifier response exceeds %d-byte limit", issuerVerifierMaxResponseSize)
 	}
 	return body, nil
+}
+
+func decodeIssuerVerifierResponse(body []byte) (protocol.IssuerVerifierResponse, error) {
+	defer clear(body)
+	reader := wire.NewReader(body)
+	out := protocol.DecodeIssuerVerifierResponse(reader)
+	if reader.Err() != nil {
+		return protocol.IssuerVerifierResponse{}, reader.Err()
+	}
+	if !reader.EOF() {
+		return protocol.IssuerVerifierResponse{}, fmt.Errorf("ops: trailing verifier response bytes")
+	}
+	return out, nil
 }
 
 func issuerVerifierEndpoint(service protocol.IssuerVerifierServiceRecord) (string, error) {

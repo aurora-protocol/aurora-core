@@ -750,6 +750,50 @@ func TestTCPProxyFlowCloseZerosQueuedWrites(t *testing.T) {
 	}
 }
 
+func TestTCPProxyLocalWritePumpAbortsShortWrite(t *testing.T) {
+	clientApplication, relayApplication := tcpProxyRuntimeApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	runtime, err := NewTCPProxyRuntime(clientApplication, TCPProxyRuntimeOptions{MaxFlows: 1, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	local, peer := net.Pipe()
+	defer peer.Close()
+	flow := &tcpProxyFlow{
+		id:                  1,
+		conn:                &tcpProxyShortWriteConn{Conn: local},
+		writes:              make(chan []byte, 1),
+		done:                make(chan struct{}),
+		releasePendingBytes: runtime.releasePendingWriteBytes,
+	}
+	payload := []byte("relay response")
+	flow.pendingWrites = len(payload)
+	if !runtime.reservePendingWriteBytes(len(payload)) {
+		t.Fatal("reservePendingWriteBytes failed")
+	}
+	flow.writes <- payload
+	runtime.flows[flow.id] = flow
+
+	go runtime.runLocalWritePump(flow)
+
+	select {
+	case <-flow.done:
+	case <-time.After(time.Second):
+		t.Fatal("short local write did not abort the proxy flow")
+	}
+	if runtime.flow(flow.id) != nil {
+		t.Fatal("short local write retained the proxy flow")
+	}
+	if got := runtime.pendingWriteBytes.Load(); got != 0 {
+		t.Fatalf("pending write bytes after short write = %d, want 0", got)
+	}
+	if !bytes.Equal(payload, make([]byte, len(payload))) {
+		t.Fatal("short local write retained relay payload bytes")
+	}
+}
+
 func TestTCPProxyRuntimeRejectsExcessPendingConnections(t *testing.T) {
 	clientApplication, relayApplication := tcpProxyRuntimeApplications(t)
 	defer clientApplication.Close()
@@ -873,6 +917,17 @@ type tcpProxyDeadlineRecordingConn struct {
 	net.Conn
 	deadlines []time.Time
 	cleared   chan struct{}
+}
+
+type tcpProxyShortWriteConn struct {
+	net.Conn
+}
+
+func (c *tcpProxyShortWriteConn) Write(payload []byte) (int, error) {
+	if len(payload) == 0 {
+		return 0, nil
+	}
+	return len(payload) - 1, nil
 }
 
 func (c *tcpProxyDeadlineRecordingConn) SetDeadline(deadline time.Time) error {

@@ -118,6 +118,22 @@ func TestAppendIssuerdOwnedBytesScrubsReplacedBuffer(t *testing.T) {
 	}
 }
 
+func TestReadVerifierRequestBodyAvoidsFixedScratchAllocation(t *testing.T) {
+	input := bytes.Repeat([]byte{0xa1}, 128)
+	reader := bytes.NewReader(input)
+	allocations := testing.AllocsPerRun(1000, func() {
+		reader.Reset(input)
+		body, err := readVerifierRequestBody(reader, -1)
+		if err != nil {
+			panic(err)
+		}
+		zeroIssuerdOwnedBytes(body)
+	})
+	if allocations > 1 {
+		t.Fatalf("unknown-length verifier request allocations = %.0f, want at most 1", allocations)
+	}
+}
+
 func TestHTTPDaemonPublishesMetadataIssuesVerifiesAndSpends(t *testing.T) {
 	service, err := NewHarnessService(200)
 	if err != nil {

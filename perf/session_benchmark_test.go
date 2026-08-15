@@ -117,6 +117,34 @@ func BenchmarkApplicationQueueAndOpen1200(b *testing.B) {
 	}
 }
 
+// BenchmarkApplicationQueueAndOpenOwned1200 measures the receive path the
+// transport duplex and the native mobile ABI actually take, where the packet
+// buffer is owned by the caller and is authenticated in place.
+func BenchmarkApplicationQueueAndOpenOwned1200(b *testing.B) {
+	client, relay := newPerformanceSessionPair(b, 8, 256<<10)
+	defer client.Close()
+	defer relay.Close()
+	block := performanceFrameBlock(b, 1, 1200)
+	b.SetBytes(1200)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := client.QueueFrames(context.Background(), block); err != nil {
+			b.Fatal(err)
+		}
+		encoded, err := client.NextPacket(context.Background())
+		if err != nil {
+			b.Fatal(err)
+		}
+		// HandleOwnedPacket consumes and zeroes the buffer it is given.
+		blocks, err := relay.HandleOwnedPacket(context.Background(), time.Now(), encoded)
+		if err != nil {
+			b.Fatal(err)
+		}
+		destroyPerformanceBlocks(blocks)
+	}
+}
+
 func BenchmarkApplicationBidirectional64K(b *testing.B) {
 	client, relay := newPerformanceSessionPair(b, 8, 2<<20)
 	defer client.Close()

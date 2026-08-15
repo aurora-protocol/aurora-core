@@ -185,9 +185,11 @@ func readCarrierRequest(body io.Reader) (CarrierType, []byte, error) {
 }
 
 func writeCarrier(w http.ResponseWriter, t CarrierType, payload []byte) {
+	encoded := EncodeCarrier(t, payload)
+	defer zeroCarrierPayload(encoded)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(EncodeCarrier(t, payload))
+	_, _ = w.Write(encoded)
 }
 
 func serveCarrierPacketBatch(w http.ResponseWriter, r *http.Request, origin relay.Origin, coverOrigin http.Handler, exchanger PacketExchanger, payload []byte) {
@@ -251,6 +253,7 @@ func serveCarrierBlindRSAIssue(w http.ResponseWriter, r *http.Request, origin re
 		serveCoverFailure(w, r, origin, coverOrigin)
 		return
 	}
+	defer zeroCarrierPayload(proof)
 	writeCarrier(w, CarrierBlindRSAIssueResp, proof)
 }
 
@@ -266,6 +269,7 @@ func serveCarrierTokenSpend(w http.ResponseWriter, r *http.Request, origin relay
 		writeCarrier(w, CarrierTokenSpendConflict, nil)
 		return
 	}
+	defer zeroCarrierPayload(spentKey)
 	writeCarrier(w, CarrierTokenSpendResp, spentKey)
 }
 

@@ -83,6 +83,39 @@ int main(void) {
             AuroraCoreZeroFree(output, output_length);
             continue;
         }
+        if (operation == INT_MAX - 1) {
+            int output_length = 0;
+            uint8_t *output = AuroraCoreCall(0, NULL, 0, argument, &output_length);
+            if (output_length <= 0 || output == NULL) {
+                AuroraCoreZeroFree(output, output_length);
+                return 1;
+            }
+            uint8_t status = output[0];
+            AuroraCoreZeroFree(output, INT_MAX);
+            uint8_t output_header[4];
+            write_u32(output_header, 1);
+            if (write_full(output_header, sizeof(output_header)) != 0 || write_full(&status, 1) != 0) {
+                return 1;
+            }
+            continue;
+        }
+        if (operation == INT_MAX - 2) {
+            int output_length = 0;
+            uint8_t *output = AuroraCoreCall(0, NULL, 0, argument, &output_length);
+            if (output_length <= 0 || output == NULL) {
+                AuroraCoreZeroFree(output, output_length);
+                return 1;
+            }
+            uint8_t status = output[0];
+            AuroraCoreFree(output);
+            AuroraCoreZeroFree(output, INT_MAX);
+            uint8_t output_header[4];
+            write_u32(output_header, 1);
+            if (write_full(output_header, sizeof(output_header)) != 0 || write_full(&status, 1) != 0) {
+                return 1;
+            }
+            continue;
+        }
         if (input_length != 0) {
             input = malloc(input_length);
             if (input == NULL || read_full(input, input_length) != 1) {

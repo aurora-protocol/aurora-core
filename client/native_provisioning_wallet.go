@@ -288,6 +288,7 @@ func (w *NativeProvisioningWallet) Reserve(alreadyReserved func([]byte) bool, no
 }
 
 // BucketStatus returns the remaining unreserved entries grouped by relay bucket.
+// Entries that are expired or already recorded in persistent caller state are erased.
 func (w *NativeProvisioningWallet) BucketStatus(alreadyReserved func([]byte) bool, now time.Time) []NativeProvisioningWalletBucketStatus {
 	if w == nil || now.IsZero() || now.Unix() < 0 {
 		return nil
@@ -301,7 +302,15 @@ func (w *NativeProvisioningWallet) BucketStatus(alreadyReserved func([]byte) boo
 	buckets := make(map[string]bucket)
 	for index := range w.entries {
 		entry := &w.entries[index]
-		if len(entry.encoded) == 0 || entry.expiryUnix <= uint64(now.Unix()) || (alreadyReserved != nil && alreadyReserved(entry.spentHintKey)) {
+		if len(entry.encoded) == 0 {
+			continue
+		}
+		if entry.expiryUnix <= uint64(now.Unix()) {
+			entry.zero()
+			continue
+		}
+		if alreadyReserved != nil && alreadyReserved(entry.spentHintKey) {
+			entry.zero()
 			continue
 		}
 		key := string(entry.relayBucketID)

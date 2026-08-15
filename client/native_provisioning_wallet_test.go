@@ -236,6 +236,74 @@ func TestNativeProvisioningWalletFiltersExpiredEntriesAndReportsRefillNeed(t *te
 	zeroNativeProvisioning(&malformedExpired)
 }
 
+func TestNativeProvisioningWalletBucketStatusClearsDurablyReservedEntries(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	provisioning := validNativeProvisioning(t, now)
+	defer zeroNativeProvisioning(&provisioning)
+
+	encoded, err := EncodeNativeProvisioningWallet([]NativeProvisioning{provisioning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wallet, err := ParseNativeProvisioningWalletWithTrust(encoded, provisioning.signedSeedTrust, now)
+	zeroNativeProvisioningBytes(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wallet.Zero()
+	if len(wallet.entries) != 1 || len(wallet.entries[0].encoded) == 0 {
+		t.Fatal("loaded wallet entry is unavailable")
+	}
+
+	status := wallet.BucketStatus(func([]byte) bool { return true }, now)
+	if len(status) != 0 {
+		t.Fatalf("durably reserved wallet status = %+v, want none", status)
+	}
+	entry := wallet.entries[0]
+	if entry.encoded != nil || entry.spentHintKey != nil || entry.relayBucketID != nil || entry.expiryUnix != 0 {
+		t.Fatal("bucket status retained a durably reserved provisioning entry")
+	}
+}
+
+func TestNativeProvisioningWalletBucketStatusClearsExpiredEntries(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	provisioning := validNativeProvisioning(t, now)
+	defer zeroNativeProvisioning(&provisioning)
+	credential, err := admission.DecodeAccessHintCredential(provisioning.AccessHint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential.ExpiryUnix = uint64(now.Add(time.Second).Unix())
+	provisioning.AccessHint, err = admission.EncodeAccessHintCredential(credential)
+	zeroNativeAccessHintCredential(&credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	encoded, err := EncodeNativeProvisioningWallet([]NativeProvisioning{provisioning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wallet, err := ParseNativeProvisioningWalletWithTrust(encoded, provisioning.signedSeedTrust, now)
+	zeroNativeProvisioningBytes(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wallet.Zero()
+	if len(wallet.entries) != 1 || len(wallet.entries[0].encoded) == 0 {
+		t.Fatal("loaded wallet entry is unavailable")
+	}
+
+	status := wallet.BucketStatus(nil, now.Add(2*time.Second))
+	if len(status) != 0 {
+		t.Fatalf("expired wallet status = %+v, want none", status)
+	}
+	entry := wallet.entries[0]
+	if entry.encoded != nil || entry.spentHintKey != nil || entry.relayBucketID != nil || entry.expiryUnix != 0 {
+		t.Fatal("bucket status retained an expired provisioning entry")
+	}
+}
+
 func TestReserveNativeProvisioningSupportsSingleAndWalletSources(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	first := validNativeProvisioning(t, now)

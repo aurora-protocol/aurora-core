@@ -101,6 +101,13 @@ func TestServeCoverCarrierScrubsIssueRequestInputsAfterDispatch(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("carrier issue response status = %d, want %d", response.Code, http.StatusOK)
 	}
+	responseType, responseProof, err := DecodeCarrier(response.Body.Bytes())
+	if err != nil {
+		t.Fatalf("DecodeCarrier issue response failed: %v", err)
+	}
+	if responseType != CarrierBlindRSAIssueResp || !bytes.Equal(responseProof, []byte("proof")) {
+		t.Fatalf("carrier issue response type=%d proof=%x", responseType, responseProof)
+	}
 	for _, value := range issuer.issueTokenNonce {
 		if value != 0 {
 			t.Fatal("issuer retained token nonce after carrier dispatch")
@@ -109,6 +116,11 @@ func TestServeCoverCarrierScrubsIssueRequestInputsAfterDispatch(t *testing.T) {
 	for _, value := range issuer.issueRedemptionContext {
 		if value != 0 {
 			t.Fatal("issuer retained redemption context after carrier dispatch")
+		}
+	}
+	for _, value := range issuer.issueProof {
+		if value != 0 {
+			t.Fatal("issuer retained admission proof after carrier dispatch")
 		}
 	}
 }
@@ -122,9 +134,32 @@ func TestServeCoverCarrierScrubsSpendRequestInputAfterDispatch(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("carrier spend response status = %d, want %d", response.Code, http.StatusOK)
 	}
+	responseType, responseSpentKey, err := DecodeCarrier(response.Body.Bytes())
+	if err != nil {
+		t.Fatalf("DecodeCarrier spend response failed: %v", err)
+	}
+	if responseType != CarrierTokenSpendResp || !bytes.Equal(responseSpentKey, repeatedByte(0x44, carrierSpentKeyLen)) {
+		t.Fatalf("carrier spend response type=%d spent key=%x", responseType, responseSpentKey)
+	}
 	for _, value := range issuer.spentProof {
 		if value != 0 {
 			t.Fatal("issuer retained admission proof after carrier dispatch")
+		}
+	}
+	for _, value := range issuer.spentKey {
+		if value != 0 {
+			t.Fatal("issuer retained token spent key after carrier dispatch")
+		}
+	}
+}
+
+func TestWriteCarrierScrubsOwnedResponseEnvelope(t *testing.T) {
+	writer := &retainingCarrierResponseWriter{header: make(http.Header)}
+	writeCarrier(writer, CarrierBlindRSAIssueResp, []byte("admission proof response"))
+
+	for index, value := range writer.body {
+		if value != 0 {
+			t.Fatalf("response envelope byte %d = %d after write, want zero", index, value)
 		}
 	}
 }
@@ -208,7 +243,25 @@ func TestPacketBatchCodecMatchesInteroperabilityVector(t *testing.T) {
 type retainingCarrierIssuer struct {
 	issueTokenNonce        []byte
 	issueRedemptionContext []byte
+	issueProof             []byte
 	spentProof             []byte
+	spentKey               []byte
+}
+
+type retainingCarrierResponseWriter struct {
+	header http.Header
+	body   []byte
+}
+
+func (w *retainingCarrierResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (*retainingCarrierResponseWriter) WriteHeader(int) {}
+
+func (w *retainingCarrierResponseWriter) Write(body []byte) (int, error) {
+	w.body = body
+	return len(body), nil
 }
 
 type retainingPacketExchanger struct {
@@ -230,12 +283,14 @@ func (*retainingCarrierIssuer) IssuerMetadata() ([]byte, []byte, error) {
 func (c *retainingCarrierIssuer) IssueBlindRSA(tokenNonce, redemptionContextHash []byte, _ uint64) ([]byte, error) {
 	c.issueTokenNonce = tokenNonce
 	c.issueRedemptionContext = redemptionContextHash
-	return []byte("proof"), nil
+	c.issueProof = []byte("proof")
+	return c.issueProof, nil
 }
 
 func (c *retainingCarrierIssuer) SpendToken(admissionProof []byte) ([]byte, error) {
 	c.spentProof = admissionProof
-	return repeatedByte(0x44, carrierSpentKeyLen), nil
+	c.spentKey = repeatedByte(0x44, carrierSpentKeyLen)
+	return c.spentKey, nil
 }
 
 func TestPacketBatchCodecRejectsEmptyPacketEntry(t *testing.T) {

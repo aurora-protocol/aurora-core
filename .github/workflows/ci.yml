@@ -116,6 +116,7 @@ jobs:
           go test -timeout 2m ./relay -run '^$' -fuzz '^FuzzSocketDNSQuestionResponseRoundTrip$' -fuzztime=10s
           go test -timeout 2m ./relay -run '^$' -fuzz '^FuzzSocketEgressFlowOpen$' -fuzztime=10s
           go test -timeout 2m ./client -run '^$' -fuzz '^FuzzPacketAdapterIngress$' -fuzztime=10s
+          go test -timeout 2m ./wire -run '^$' -fuzz '^FuzzDecodeVarint$' -fuzztime=10s
       - name: Native ABI fuzz smoke
         timeout-minutes: 5
         run: |

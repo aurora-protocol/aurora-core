@@ -59,7 +59,7 @@ func (d *ClientDriver) Begin(ctx context.Context, opener ClientCarrierOpener) (*
 	}
 
 	provider := &deferredClientProofProvider{
-		requests: make(chan ClientProofRequest, 1),
+		requests: make(chan ClientProofRequest),
 		results:  make(chan clientProofResult, 1),
 		closed:   make(chan struct{}),
 	}
@@ -78,7 +78,9 @@ func (d *ClientDriver) Begin(ctx context.Context, opener ClientCarrierOpener) (*
 
 	select {
 	case request := <-provider.requests:
-		return handshake, cloneClientProofRequestValue(request), nil
+		ownedRequest := cloneClientProofRequestValue(request)
+		zeroClientProofRequest(&request)
+		return handshake, ownedRequest, nil
 	case <-handshake.done:
 		result := handshake.resultValue()
 		handshake.markClosed()
@@ -201,6 +203,7 @@ func (p *deferredClientProofProvider) BuildProofs(ctx context.Context, request C
 	defer zeroClientProofRequest(&request)
 	select {
 	case p.requests <- request:
+		request = ClientProofRequest{}
 	case <-p.closed:
 		return protocol.AdmissionProof{}, protocol.ReplayProof{}, fmt.Errorf("handshake: client handshake closed before proofs")
 	case <-ctx.Done():
@@ -258,6 +261,11 @@ func (p *deferredClientProofProvider) close() {
 		select {
 		case result := <-p.results:
 			zeroClientProofResult(&result)
+		default:
+		}
+		select {
+		case request := <-p.requests:
+			zeroClientProofRequest(&request)
 		default:
 		}
 		p.stateMu.Unlock()

@@ -33,8 +33,9 @@ import (
 
 const (
 	maximumProductionConfigurationFileBytes = 1 << 20
-	productionShutdownTimeout               = 15 * time.Second
 )
+
+var productionShutdownTimeout = 15 * time.Second
 
 var (
 	productionListen        = func(address string) (net.Listener, error) { return net.Listen("tcp", address) }

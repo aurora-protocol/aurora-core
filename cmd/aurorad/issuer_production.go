@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -356,11 +357,18 @@ func serveProductionIssuer(ctx context.Context, runtime *productionIssuerService
 		shutdownContext, cancel := context.WithTimeout(context.Background(), productionShutdownTimeout)
 		defer cancel()
 		shutdownErr := httpServer.Shutdown(shutdownContext)
+		var closeErr error
+		if shutdownErr != nil {
+			closeErr = httpServer.Close()
+			if errors.Is(closeErr, http.ErrServerClosed) {
+				closeErr = nil
+			}
+		}
 		serveErr := <-serveResult
 		if errors.Is(serveErr, http.ErrServerClosed) {
 			serveErr = nil
 		}
-		return errors.Join(shutdownErr, serveErr)
+		return errors.Join(shutdownErr, closeErr, serveErr)
 	}
 }
 
@@ -377,6 +385,7 @@ func newProductionIssuerHTTPServer(runtime *productionIssuerService) (*http.Serv
 		IdleTimeout:       issuerProductionIdleTimeout,
 		MaxHeaderBytes:    issuerProductionMaxHeaderBytes,
 	}
+	httpServer.ErrorLog = log.New(io.Discard, "", 0)
 	if err := http2.ConfigureServer(httpServer, &http2.Server{
 		MaxConcurrentStreams: issuerProductionHTTP2MaxConcurrentStreams,
 		IdleTimeout:          issuerProductionIdleTimeout,

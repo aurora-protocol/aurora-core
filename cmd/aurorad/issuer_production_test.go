@@ -26,6 +26,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -78,8 +79,59 @@ func TestNewProductionIssuerHTTPServerSetsResourceBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if httpServer.ReadHeaderTimeout <= 0 || httpServer.ReadTimeout <= 0 || httpServer.WriteTimeout <= 0 || httpServer.IdleTimeout <= 0 || httpServer.MaxHeaderBytes <= 0 {
+	if httpServer.ReadHeaderTimeout <= 0 || httpServer.ReadTimeout <= 0 || httpServer.WriteTimeout <= 0 || httpServer.IdleTimeout <= 0 || httpServer.MaxHeaderBytes <= 0 || httpServer.ErrorLog == nil || httpServer.ErrorLog.Writer() != io.Discard {
 		t.Fatalf("issuer HTTP server resource bounds are incomplete: %+v", httpServer)
+	}
+}
+
+func TestServeProductionIssuerForceClosesLingeringTLSConnection(t *testing.T) {
+	config := newProductionIssuerCommandFixture(t)
+	runtime, err := newProductionIssuerService(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	signalingListener := &issuerProductionSignalingListener{Listener: listener, accepted: make(chan struct{})}
+	previousTimeout := productionShutdownTimeout
+	productionShutdownTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { productionShutdownTimeout = previousTimeout })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- serveProductionIssuer(ctx, runtime, signalingListener) }()
+
+	connection, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	select {
+	case <-signalingListener.accepted:
+	case <-time.After(time.Second):
+		t.Fatal("issuer did not accept lingering TLS connection")
+	}
+	cancel()
+	select {
+	case err := <-serveResult:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("issuer shutdown error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("issuer shutdown did not return after graceful deadline")
+	}
+	if err := connection.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Read(make([]byte, 1)); err == nil {
+		t.Fatal("issuer left lingering TLS connection open after shutdown")
+	} else if networkErr, ok := err.(net.Error); ok && networkErr.Timeout() {
+		t.Fatalf("issuer did not close lingering TLS connection: %v", err)
 	}
 }
 
@@ -93,6 +145,20 @@ func TestCloseProductionIssuerRuntimeReportsDurableCacheFailure(t *testing.T) {
 	if output := stderr.String(); !strings.Contains(output, "spent-token cache close failed") {
 		t.Fatalf("close failure output = %q", output)
 	}
+}
+
+type issuerProductionSignalingListener struct {
+	net.Listener
+	accepted chan struct{}
+	once     sync.Once
+}
+
+func (l *issuerProductionSignalingListener) Accept() (net.Conn, error) {
+	connection, err := l.Listener.Accept()
+	if err == nil {
+		l.once.Do(func() { close(l.accepted) })
+	}
+	return connection, err
 }
 
 func TestRunIssuerStartsAndStopsProductionService(t *testing.T) {

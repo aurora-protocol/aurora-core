@@ -333,6 +333,7 @@ func (c *HTTP2ClientCarrier) Close() error {
 		}
 		c.stateMu.Lock()
 		c.closed = true
+		zeroFirstHopBinding(&c.binding)
 		c.stateMu.Unlock()
 		c.cancel()
 		pipeErr := c.requestWriter.CloseWithError(net.ErrClosed)
@@ -453,6 +454,24 @@ func cloneFirstHopBinding(in handshake.FirstHopBinding) handshake.FirstHopBindin
 		CoverStreamBinding:      append([]byte(nil), in.CoverStreamBinding...),
 		HandshakeBindingContext: append([]byte(nil), in.HandshakeBindingContext...),
 	}
+}
+
+func zeroFirstHopBinding(binding *handshake.FirstHopBinding) {
+	if binding == nil {
+		return
+	}
+	for _, value := range [][]byte{
+		binding.OuterExporterValue,
+		binding.TLSExporterChannelID,
+		binding.ConnectionIDHash,
+		binding.CoverStreamBinding,
+		binding.HandshakeBindingContext,
+	} {
+		for index := range value {
+			value[index] = 0
+		}
+	}
+	*binding = handshake.FirstHopBinding{}
 }
 
 func http2TLSHandshakeTimeout(dialer net.Dialer) time.Duration {

@@ -28,6 +28,7 @@ package client
 // native_provisioning_trust_coverage_test.go (same package client).
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -102,6 +103,33 @@ func TestHandleSOCKS5GreetingRejectsMalformed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHandleSOCKS5GreetingSelectsNoAuth exercises the method-selection logic past the
+// structural checks: a greeting offering no-auth selects it (success), while a greeting
+// offering only non-no-auth methods yields the no-acceptable-methods response+error.
+// Both cases are built with the socks5Greeting helper, which keeps the byte framing
+// correct and exercises the well-formed happy path of the parser.
+func TestHandleSOCKS5GreetingSelectsNoAuth(t *testing.T) {
+	t.Run("no auth offered", func(t *testing.T) {
+		resp, err := HandleSOCKS5Greeting(socks5Greeting(socksNoAuth))
+		if err != nil {
+			t.Fatalf("HandleSOCKS5Greeting(no-auth) returned err: %v", err)
+		}
+		if want := []byte{socksVersion5, socksNoAuth}; !bytes.Equal(resp, want) {
+			t.Fatalf("HandleSOCKS5Greeting(no-auth) = %x, want %x", resp, want)
+		}
+	})
+	t.Run("no auth unavailable", func(t *testing.T) {
+		// Only username/password (0x01) is offered; no-auth is absent.
+		resp, err := HandleSOCKS5Greeting(socks5Greeting(0x01))
+		if err == nil {
+			t.Fatal("HandleSOCKS5Greeting accepted a greeting without no-auth")
+		}
+		if want := []byte{socksVersion5, socksNoAcceptable}; !bytes.Equal(resp, want) {
+			t.Fatalf("HandleSOCKS5Greeting(no-auth-absent) = %x, want %x", resp, want)
+		}
+	})
 }
 
 func TestSocks5BindResponseRejectsInvalidBind(t *testing.T) {

@@ -35,7 +35,9 @@ package flow
 //     seeded only via ResolveFakeA -> Assign, which requires firstIPTarget to
 //     pass, so a mapping's answers always contain a usable IP.
 //   - AnswerLocalAQuery:197-199 — EncryptedDNSFrame wraps NewDNSMessageFrame, which
-//     has no error path for a non-nil []byte query.
+//     CAN error on a zero FlowID (protocol/frames.go:236, "data frame has zero
+//     flow_id"); this branch is covered by TestAnswerLocalAQueryRejectsZeroFlowID
+//     in dns_forwarder_error_coverage_test.go, not dead-by-design.
 //   - AnswerLocalAQuery:201-203 — syntheticAResponse error: answer.FakeIP is always
 //     a valid IPv4 produced by the FakeIP allocator, so the ip==nil branch at 281
 //     cannot fire on this path (it is covered directly instead).

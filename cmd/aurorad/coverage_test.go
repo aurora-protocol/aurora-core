@@ -101,7 +101,6 @@ func TestZeroRSAPrivateKeyHandlesNilAndLegacyCRTValues(t *testing.T) {
 		r := big.NewInt(0x33)
 		key := &rsa.PrivateKey{
 			Precomputed: rsa.PrecomputedValues{
-				//lint:ignore SA1019 Populate the deprecated legacy CRT field so the production zeroing loop (which itself ignores SA1019) is exercised.
 				CRTValues: []rsa.CRTValue{{Exp: exp, Coeff: coeff, R: r}},
 			},
 		}

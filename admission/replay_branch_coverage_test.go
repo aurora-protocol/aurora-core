@@ -31,6 +31,15 @@ package admission
 //     The existing suite passes only prototype-valid hints, so the propagation
 //     is unreached. HintFlags = 1 fails ValidatePrototype (hint_flags must be
 //     zero) before any encoding runs.
+//   - clientTransportHintsHashForPolicy:51-53 — the protocol.Encode(hints)
+//     error after ValidatePrototype + NormalizePrototype. ValidatePrototype
+//     caps NetworkCohortHint (<=16) but NOT Padding, and EncodeTo writes
+//     Padding via WriteOpaque16 (max 0xffff), so a prototype-valid hints with a
+//     70000-byte Padding passes both gates and fails Encode at the
+//     WriteOpaque16 write. (This corrects a prior note in this file's
+//     dead-by-design section that classified this branch as unreachable: that
+//     analysis treated every EncodeTo field as a fixed-width scalar or an
+//     extension, but Padding is an uncapped Opaque16.)
 //   - AdmissionContextHash:59-61 — the PolicyOfferHash error propagation. The
 //     existing suite drives AdmissionContextHash only with canonical offers,
 //     so the propagation is unreached. The same oversized OfferedVersions
@@ -76,14 +85,6 @@ package admission
 //     replay-context hashes, so the propagation is unreached.
 //
 // Dead-by-design (documented, NOT claimed):
-//   - clientTransportHintsHashForPolicy:51-53 — the protocol.Encode(hints)
-//     error after ValidatePrototype + NormalizePrototype. ClientTransportHints
-//     encodes only fixed-width scalars (Uint16/Uint8) plus Opaque8/Opaque16
-//     plus EncodeExtensions; ValidatePrototype calls ValidateExtensions at 299
-//     which rejects any extension that would fail Encode, and the scalar fields
-//     are fixed-width (cannot overflow a varint). So a prototype that passes
-//     ValidatePrototype and NormalizePrototype cannot fail Encode —
-//     validated-normalized-input-can't-fail-Encode.
 //   - VerifyAndSpendReplay:186-188 — the TokenSpentKey error inside the
 //     orchestrator. tokenRedemptionHash is the output of TokenRedemptionHash,
 //     which is always a 48-byte SHA-384 digest, so TokenSpentKey (which only
@@ -130,6 +131,25 @@ func TestClientTransportHintsHashRejectsInvalidPrototype(t *testing.T) {
 	if err == nil ||
 		!strings.Contains(err.Error(), "client transport hint_flags must be zero") {
 		t.Fatalf("ClientTransportHintsHash(HintFlags=1) err = %v, want substring \"client transport hint_flags must be zero\"", err)
+	}
+}
+
+func TestClientTransportHintsHashRejectsOversizedPadding(t *testing.T) {
+	// 51-53: ValidatePrototype caps NetworkCohortHint (<=16) but NOT Padding,
+	// and EncodeTo writes Padding via WriteOpaque16 (max 0xffff). A
+	// prototype-valid hints (HintFlags 0, no cohort, no extensions) with a
+	// 70000-byte Padding passes ValidatePrototype + NormalizePrototype, then
+	// protocol.Encode -> EncodeTo -> WriteOpaque16 records "wire: opaque16 too
+	// long" and Encode surfaces it, so clientTransportHintsHashForPolicy returns
+	// the error at :51-53. ClientTransportHintsHash calls the helper with
+	// requestedPolicyID 0, so the policy switch is skipped and the failure
+	// originates at the Encode step (not the cohort guard at :44-47).
+	_, err := ClientTransportHintsHash(protocol.ClientTransportHints{
+		Padding: make([]byte, 70000), // > 0xffff
+	})
+	if err == nil ||
+		!strings.Contains(err.Error(), "opaque16 too long") {
+		t.Fatalf("ClientTransportHintsHash(oversized padding) err = %v, want substring \"opaque16 too long\"", err)
 	}
 }
 

@@ -394,6 +394,7 @@ func TestDiscoverRelayRoutesRejectsInvalidConditions(t *testing.T) {
 	})
 	manager := mustLinuxTUNNetworkManager(t, &recordingLinuxIPRunner{})
 	t.Run("nil context", func(t *testing.T) {
+		//lint:ignore SA1012 Verifies the public API's explicit nil-context rejection.
 		if _, err := manager.DiscoverRelayRoutes(nil, "https://relay.example"); err == nil {
 			t.Fatal("DiscoverRelayRoutes accepted a nil context")
 		}
@@ -467,6 +468,7 @@ func TestConfigureRejectsEarlyErrors(t *testing.T) {
 	})
 	manager := mustLinuxTUNNetworkManager(t, &recordingLinuxIPRunner{})
 	t.Run("nil context", func(t *testing.T) {
+		//lint:ignore SA1012 Verifies the public API's explicit nil-context rejection.
 		if _, err := manager.Configure(nil, nil); err == nil {
 			t.Fatal("Configure accepted a nil context")
 		}

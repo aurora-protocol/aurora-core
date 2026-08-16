@@ -38,14 +38,25 @@ package trust
 //     validation; no signatures are needed because the check precedes signature
 //     verification (line 81).
 //
+// Covered elsewhere in this package (documented, covered):
+//   - cloneRelayDescriptor:363 and cloneCoverTemplate:379 — the Encode error
+//     branches. Encode does not only fail on a varint-length overflow; it also
+//     fails on a fixed-width length mismatch (WriteOpaqueFixed / WritePreHash
+//     reject a field whose length is not the fixed width), and a zero-valued
+//     struct has nil/empty fixed fields. cloneRelayDescriptor(zero) fails at
+//     WriteOpaqueFixed(RelayID, 32); cloneCoverTemplate(zero) fails at
+//     WritePreHash(OriginSPKIHash, 48). These two branches are covered by
+//     deployment_clone_branch_coverage_test.go, along with deploymentRequestClass
+//     352/355 and happy-path byte-identity locks.
+//
 // Dead-by-design / not-contrived (documented, not covered):
-//   - cloneRelayDescriptor (363/368/371) and cloneCoverTemplate (379/384/387) error
-//     branches. Each clones via protocol.Encode -> Decode round-trip. Encode only
-//     fails on a varint-length overflow (a slice with > 2^62 elements, impossible for
-//     a real struct), and because Encode and Decode use the same wire format the
-//     round-trip of any struct that Encode accepts is clean (no decode error, no
-//     trailing bytes). The error branches guard against an Encode/Decode wire-format
-//     mismatch that no constructible struct can produce.
+//   - cloneRelayDescriptor (368/371) and cloneCoverTemplate (384/387) — the
+//     decode-error and trailing-bytes branches. Each clone is a faithful
+//     protocol.Encode -> wire.NewReader -> Decode round-trip of the same wire
+//     format, so for any struct whose Encode succeeds the Decode consumes exactly
+//     the encoded bytes (no decode error, EOF reached with no trailing bytes).
+//     The decode and trailing-bytes branches guard against an Encode/Decode
+//     wire-format mismatch that no constructible struct can produce.
 //   - VerifyRelayDeployment signature branches (78, 88, 92, 101, 109, 117, 120, 124,
 //     133, 136, 146, 148, 151, 154). Reaching them requires a descriptor whose hash
 //     matches TrustedDescriptorHash AND whose classical + ML-DSA signatures all

@@ -1119,6 +1119,13 @@ func TestFirstHopHTTPServerRejectsInvalidConfiguration(t *testing.T) {
 		}},
 		{name: "custom randomness", mutate: func(in *serverInput) { in.tlsConfig.Rand = bytes.NewReader(make([]byte, 4096)) }},
 		{name: "custom time", mutate: func(in *serverInput) { in.tlsConfig.Time = func() time.Time { return time.Unix(1, 0) } }},
+		{name: "deprecated certificate map", mutate: func(in *serverInput) {
+			//lint:ignore SA1019 Setting the deprecated map to trip the :285 forbidden-field guard.
+			in.tlsConfig.NameToCertificate = map[string]*tls.Certificate{}
+		}},
+		{name: "TLS session callbacks", mutate: func(in *serverInput) {
+			in.tlsConfig.UnwrapSession = func([]byte, tls.ConnectionState) (*tls.SessionState, error) { return nil, nil }
+		}},
 		{name: "key log", mutate: func(in *serverInput) { in.tlsConfig.KeyLogWriter = io.Discard }},
 	}
 	for _, test := range tests {

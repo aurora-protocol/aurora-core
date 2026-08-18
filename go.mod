@@ -3,7 +3,7 @@ module github.com/aurora-protocol/aurora-core
 go 1.26.6
 
 require (
-	github.com/cloudflare/circl v1.6.3
+	github.com/cloudflare/circl v1.6.5
 	golang.org/x/crypto v0.55.0
 )
 

@@ -69,13 +69,13 @@ func validRelayDescriptor() protocol.RelayDescriptor {
 // CoverOriginCommitment both succeed, used as the base for adversarial mutants.
 func validCoverTemplate() protocol.CoverTemplate {
 	return protocol.CoverTemplate{
-		TemplateVersion:  registry.Version20,
-		TemplateID:       rb(0x01, 16),
-		TemplateFamilyID: rb(0x02, 16),
-		ValidFromUnix:    100,
-		ValidUntilUnix:   400,
-		OriginSPKIHash:   rb(0x03, 48),
-		PublicNameHash:   rb(0x04, 48),
+		TemplateVersion:       registry.Version20,
+		TemplateID:            rb(0x01, 16),
+		TemplateFamilyID:      rb(0x02, 16),
+		ValidFromUnix:         100,
+		ValidUntilUnix:        400,
+		OriginSPKIHash:        rb(0x03, 48),
+		PublicNameHash:        rb(0x04, 48),
 		CoverOriginCommitment: rb(0x05, 48),
 		RequestClasses: []protocol.RequestClass{{
 			ClassID:             registry.RequestGatewayOwnedSlot,
@@ -113,8 +113,8 @@ func validCoverTemplate() protocol.CoverTemplate {
 			ProfileID:               3,
 			FrameSizeDistributionID: rb(0x10, 16),
 		},
-		CacheCookiePolicy: protocol.CacheCookiePolicy{PolicyID: 4},
-		TimingEnvelope:    protocol.TimingEnvelope{TimingPolicyID: 5, JitterDistributionID: rb(0x11, 16)},
+		CacheCookiePolicy:         protocol.CacheCookiePolicy{PolicyID: 4},
+		TimingEnvelope:            protocol.TimingEnvelope{TimingPolicyID: 5, JitterDistributionID: rb(0x11, 16)},
 		TemplateFamilySignature:   []byte("family"),
 		TemplateInstanceSignature: []byte("instance"),
 	}
@@ -386,7 +386,7 @@ func TestValidateAuthorityKeyRotationAdversarial(t *testing.T) {
 	})
 	noSigs.AuthoritySignatures = nil
 	if err := ValidateAuthorityKeyRotation(AuthorityKeyRotationInput{
-		PreviousKeys: []protocol.AuthorityKeyRecord{valid},
+		PreviousKeys:  []protocol.AuthorityKeyRecord{valid},
 		NextKeys:      []protocol.AuthorityKeyRecord{valid},
 		NextConsensus: noSigs,
 		NowUnix:       20,

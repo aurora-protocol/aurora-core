@@ -232,8 +232,8 @@ func TestRequireOriginAllowedRejectsExpiredMatchingScope(t *testing.T) {
 			RelayBucketID:         rep(0x32, 16),
 			TokenScopeID:          rep(0x33, 16),
 			AllowedOriginPolicyID: []uint64{7},
-			ValidFromUnix:          10,
-			ValidUntilUnix:         50, // expired at now=100
+			ValidFromUnix:         10,
+			ValidUntilUnix:        50, // expired at now=100
 		}},
 	}
 	proof := protocol.AdmissionProof{RelayBucketID: rep(0x32, 16), TokenScopeID: rep(0x33, 16)}
@@ -253,11 +253,11 @@ func validBlindRSATokenMetadataForCoverage(t *testing.T, proof protocol.Admissio
 	}
 	return protocol.AuroraTokenMetadata{
 		RFC9577TokenType:       uint16(proof.ProofType),
-		RFC9577ChallengeDigest:  challengeDigest,
-		RFC9577TokenKeyID:        append([]byte(nil), proof.TokenKeyID...),
-		IssuerName:               []byte("issuer.example"),
-		OriginInfo:               []byte("origin.example"),
-		IssuerMetadataHash:       rep(0x36, 48),
+		RFC9577ChallengeDigest: challengeDigest,
+		RFC9577TokenKeyID:      append([]byte(nil), proof.TokenKeyID...),
+		IssuerName:             []byte("issuer.example"),
+		OriginInfo:             []byte("origin.example"),
+		IssuerMetadataHash:     rep(0x36, 48),
 	}
 }
 
@@ -417,7 +417,7 @@ func TestVerifyBlindRSA2048WithIssuerMetadataRejectsMalformed(t *testing.T) {
 	t.Run("missing required binding proof", func(t *testing.T) {
 		m := metadata
 		m.AuxiliaryBindingPolicies = []protocol.AuxiliaryBindingPolicy{{
-			ProofType:           registry.ProofBlindRSA2048,
+			ProofType:            registry.ProofBlindRSA2048,
 			BindingProofRequired: true,
 			MaxBindingProofLen:   32,
 		}}

@@ -500,8 +500,8 @@ func TestConfigureRejectsEarlyErrors(t *testing.T) {
 	})
 	t.Run("ipv6 default route error", func(t *testing.T) {
 		runner := &recordingLinuxIPRunner{responses: map[string]string{
-			"-j\x00-4\x00rule\x00show":              linuxMainRoutingPolicyJSON(),
-			"-j\x00-6\x00rule\x00show":              linuxMainRoutingPolicyJSON(),
+			"-j\x00-4\x00rule\x00show":             linuxMainRoutingPolicyJSON(),
+			"-j\x00-6\x00rule\x00show":             linuxMainRoutingPolicyJSON(),
 			"-j\x00-4\x00route\x00show\x00default": `[{"dst":"default","metric":100}]`,
 		}, errors: map[string]error{
 			"-j\x00-6\x00route\x00show\x00default": errors.New("ip command failed"),
@@ -539,9 +539,9 @@ func TestConfigureRollsBackOnEachAddFailure(t *testing.T) {
 	// steps) by injecting a runner whose responses hold valid policy+metric
 	// JSON and whose errors map trips exactly one add command.
 	cases := []struct {
-		name        string
-		failingKey  string
-		routes      []linuxHostRoute
+		name       string
+		failingKey string
+		routes     []linuxHostRoute
 	}{
 		{
 			"route add",
@@ -574,8 +574,8 @@ func TestConfigureRollsBackOnEachAddFailure(t *testing.T) {
 // guards so a single state.add failure is the first error reached.
 func validConfigureResponsesForCoverage() map[string]string {
 	return map[string]string{
-		"-j\x00-4\x00rule\x00show":               linuxMainRoutingPolicyJSON(),
-		"-j\x00-6\x00rule\x00show":               linuxMainRoutingPolicyJSON(),
+		"-j\x00-4\x00rule\x00show":             linuxMainRoutingPolicyJSON(),
+		"-j\x00-6\x00rule\x00show":             linuxMainRoutingPolicyJSON(),
 		"-j\x00-4\x00route\x00show\x00default": `[{"dst":"default","metric":100}]`,
 		"-j\x00-6\x00route\x00show\x00default": `[{"dst":"default","metric":1024}]`,
 	}

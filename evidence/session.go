@@ -62,9 +62,9 @@ type SessionResult struct {
 	// path allocates differently.
 	AllocatedPerMessage float64 `json:"allocated_per_message"`
 	GoroutinesBefore    int     `json:"goroutines_before"`
-	GoroutinesAfter   int           `json:"goroutines_after"`
-	GoroutineDelta    int           `json:"goroutine_delta"`
-	Errors            int           `json:"errors"`
+	GoroutinesAfter     int     `json:"goroutines_after"`
+	GoroutineDelta      int     `json:"goroutine_delta"`
+	Errors              int     `json:"errors"`
 }
 
 func RunSession(ctx context.Context, options SessionOptions) (SessionResult, error) {

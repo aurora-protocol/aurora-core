@@ -45,7 +45,7 @@ func TestValidateProductionFileOwnerRejectsUnavailable(t *testing.T) {
 type fakeFileInfoForCoverage struct{}
 
 func (fakeFileInfoForCoverage) Name() string       { return "fake" }
-func (fakeFileInfoForCoverage) Size() int64         { return 0 }
+func (fakeFileInfoForCoverage) Size() int64        { return 0 }
 func (fakeFileInfoForCoverage) Mode() os.FileMode  { return 0 }
 func (fakeFileInfoForCoverage) ModTime() time.Time { return time.Time{} }
 func (fakeFileInfoForCoverage) IsDir() bool        { return false }

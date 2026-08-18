@@ -39,7 +39,7 @@ func TestSealCapsulesRejectMalformedPlaintextEncoding(t *testing.T) {
 	t.Run("CoverCapsule2/ServerFinishedOverlong", func(t *testing.T) {
 		c := protocol.CoverCapsule2Plain{
 			PolicyAccept:   samplePolicyAcceptForControl(),
-			ServerFinished:  bytes.Repeat([]byte("x"), overlongOpaque),
+			ServerFinished: bytes.Repeat([]byte("x"), overlongOpaque),
 		}
 		if _, err := SealCoverCapsule2(ctx, c); err == nil {
 			t.Fatal("SealCoverCapsule2 accepted overlong ServerFinished")
@@ -57,7 +57,7 @@ func TestSealCapsulesRejectMalformedPlaintextEncoding(t *testing.T) {
 	t.Run("RouteCapsule2/ServerFinishedOverlong", func(t *testing.T) {
 		c := protocol.RouteCapsule2Plain{
 			PolicyAccept:   samplePolicyAcceptForControl(),
-			ServerFinished:  bytes.Repeat([]byte("x"), overlongOpaque),
+			ServerFinished: bytes.Repeat([]byte("x"), overlongOpaque),
 		}
 		if _, err := SealRouteCapsule2(ctx, c); err == nil {
 			t.Fatal("SealRouteCapsule2 accepted overlong ServerFinished")

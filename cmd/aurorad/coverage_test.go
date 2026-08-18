@@ -38,12 +38,12 @@ func TestIsLoopbackListenAddressClassification(t *testing.T) {
 		addr string
 		want bool
 	}{
-		{"malformed address has no port", "no-port", false},         // SplitHostPort error -> return false
-		{"literal localhost", "localhost:443", true},                // EqualFold("localhost") -> return true
-		{"loopback ipv4", "127.0.0.1:443", true},                     // ip.IsLoopback -> return true
-		{"loopback ipv6 bracketed", "[::1]:443", true},               // Trim "[]" + ip.IsLoopback -> return true
-		{"non-loopback ipv4", "203.0.113.7:443", false},             // ip not loopback -> return false
-		{"non-ip hostname", "example.com:443", false},               // ParseIP nil -> return false
+		{"malformed address has no port", "no-port", false}, // SplitHostPort error -> return false
+		{"literal localhost", "localhost:443", true},        // EqualFold("localhost") -> return true
+		{"loopback ipv4", "127.0.0.1:443", true},            // ip.IsLoopback -> return true
+		{"loopback ipv6 bracketed", "[::1]:443", true},      // Trim "[]" + ip.IsLoopback -> return true
+		{"non-loopback ipv4", "203.0.113.7:443", false},     // ip not loopback -> return false
+		{"non-ip hostname", "example.com:443", false},       // ParseIP nil -> return false
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,7 +69,7 @@ func TestPrintReadinessEmitsSummaryAndFindings(t *testing.T) {
 	t.Run("one finding line per finding", func(t *testing.T) {
 		var out bytes.Buffer
 		report := server.ReadinessReport{
-			Passed:  false,
+			Passed: false,
 			Findings: []string{
 				"cover endpoint unreachable",
 				"issuer metadata carrier missing",
@@ -106,9 +106,9 @@ func TestZeroRSAPrivateKeyHandlesNilAndLegacyCRTValues(t *testing.T) {
 		}
 		zeroRSAPrivateKey(key)
 		for name, value := range map[string]*big.Int{
-			"legacy CRT exponent":   exp,
+			"legacy CRT exponent":    exp,
 			"legacy CRT coefficient": coeff,
-			"legacy CRT remainder":  r,
+			"legacy CRT remainder":   r,
 		} {
 			if value.Sign() != 0 {
 				t.Fatalf("RSA %s retained material after zeroization (sign=%d)", name, value.Sign())

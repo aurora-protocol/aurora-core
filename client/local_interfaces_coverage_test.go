@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	socks5CoverageAtypIPv4   = 0x01
+	socks5CoverageAtypIPv4    = 0x01
 	socks5CoverageAtypDomain  = 0x03
 	socks5CoverageAtypIPv6    = 0x04
 	socks5CoverageCmdConnect  = 0x01
@@ -89,7 +89,7 @@ func socks5CovUDPDatagram(atyp byte, addr []byte, port uint16, payload []byte) [
 
 func TestHandleSOCKS5GreetingRejectsMalformed(t *testing.T) {
 	cases := []struct {
-		name    string
+		name     string
 		greeting []byte
 	}{
 		{"too short", []byte{0x05}},

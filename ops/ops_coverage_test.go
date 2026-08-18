@@ -198,10 +198,10 @@ func validVerifierResponseBase(service protocol.IssuerVerifierServiceRecord, req
 	return protocol.IssuerVerifierResponse{
 		ResponseVersion: registry.Version20,
 		ServiceID:       append([]byte(nil), service.ServiceID...),
-		RequestHash:      append([]byte(nil), requestHash...),
+		RequestHash:     append([]byte(nil), requestHash...),
 		Decision:        registry.VerifierDecisionAccept,
 		TokenSpentKey:   append([]byte(nil), req.TokenSpentKey...),
-		ValidUntilUnix:   200,
+		ValidUntilUnix:  200,
 		ResponseNonce:   rb(0x40, 32),
 	}
 }

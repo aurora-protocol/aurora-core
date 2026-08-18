@@ -182,10 +182,10 @@ func selfSignedECDSACertForCoverage(t *testing.T, curve elliptic.Curve) *x509.Ce
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "coverage"},
-		NotBefore:     time.Unix(0, 0),
-		NotAfter:      time.Unix(1<<32, 0),
-		KeyUsage:      x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		NotBefore:    time.Unix(0, 0),
+		NotAfter:     time.Unix(1<<32, 0),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {
@@ -333,10 +333,10 @@ func TestTokenMetadataMatchesIssuerMetadata(t *testing.T) {
 		encoded := encodeTokenMetadataForCoverage(t, protocol.AuroraTokenMetadata{
 			RFC9577TokenType:       uint16(registry.ProofVOPRFP384SHA384),
 			RFC9577ChallengeDigest: fill(0x01, 32),
-			RFC9577TokenKeyID:       fill(0x02, 32),
-			IssuerName:              []byte("issuer.example"),
-			OriginInfo:              []byte("origin.example"),
-			IssuerMetadataHash:       metadataHash,
+			RFC9577TokenKeyID:      fill(0x02, 32),
+			IssuerName:             []byte("issuer.example"),
+			OriginInfo:             []byte("origin.example"),
+			IssuerMetadataHash:     metadataHash,
 		})
 		proof := protocol.AdmissionProof{TokenPublicMetadata: encoded}
 		if !tokenMetadataMatchesIssuerMetadata(proof, metadata) {
@@ -347,10 +347,10 @@ func TestTokenMetadataMatchesIssuerMetadata(t *testing.T) {
 		encoded := encodeTokenMetadataForCoverage(t, protocol.AuroraTokenMetadata{
 			RFC9577TokenType:       uint16(registry.ProofVOPRFP384SHA384),
 			RFC9577ChallengeDigest: fill(0x01, 32),
-			RFC9577TokenKeyID:       fill(0x02, 32),
-			IssuerName:              []byte("issuer.example"),
-			OriginInfo:              []byte("origin.example"),
-			IssuerMetadataHash:       fill(0xee, 48),
+			RFC9577TokenKeyID:      fill(0x02, 32),
+			IssuerName:             []byte("issuer.example"),
+			OriginInfo:             []byte("origin.example"),
+			IssuerMetadataHash:     fill(0xee, 48),
 		})
 		proof := protocol.AdmissionProof{TokenPublicMetadata: encoded}
 		if tokenMetadataMatchesIssuerMetadata(proof, metadata) {
@@ -371,10 +371,10 @@ func TestTokenMetadataMatchesIssuerMetadata(t *testing.T) {
 		encoded := encodeTokenMetadataForCoverage(t, protocol.AuroraTokenMetadata{
 			RFC9577TokenType:       uint16(registry.ProofVOPRFP384SHA384),
 			RFC9577ChallengeDigest: fill(0x01, 32),
-			RFC9577TokenKeyID:       fill(0x02, 32),
-			IssuerName:              []byte("issuer.example"),
-			OriginInfo:              []byte("origin.example"),
-			IssuerMetadataHash:       metadataHash,
+			RFC9577TokenKeyID:      fill(0x02, 32),
+			IssuerName:             []byte("issuer.example"),
+			OriginInfo:             []byte("origin.example"),
+			IssuerMetadataHash:     metadataHash,
 		})
 		proof := protocol.AdmissionProof{TokenPublicMetadata: encoded}
 		malformed := protocol.IssuerMetadata{IssuerID: []byte("too-short")}
@@ -413,8 +413,8 @@ func TestSelectProductionIssuanceScopeRejectsInvalidSelection(t *testing.T) {
 			RelayBucketID:         fill(0x99, 16),
 			TokenScopeID:          fill(0x82, 16),
 			AllowedOriginPolicyID: []uint64{7},
-			ValidFromUnix:          100,
-			ValidUntilUnix:         900,
+			ValidFromUnix:         100,
+			ValidUntilUnix:        900,
 		}}}
 		if _, _, err := selectProductionIssuanceScope(other, bucket, 7, 200); err == nil {
 			t.Fatal("selectProductionIssuanceScope accepted a request with no matching scope")
@@ -463,9 +463,9 @@ func TestSelectProductionIssuanceScopeAcceptsUniqueMatch(t *testing.T) {
 			ValidUntilUnix:        900,
 		}},
 		OriginInfoPolicies: []protocol.OriginInfoPolicy{{
-			PolicyID:      7,
-			OriginInfo:    []byte("origin.example"),
-			ValidFromUnix: 100,
+			PolicyID:       7,
+			OriginInfo:     []byte("origin.example"),
+			ValidFromUnix:  100,
 			ValidUntilUnix: 900,
 		}},
 	}

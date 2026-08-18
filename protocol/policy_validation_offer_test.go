@@ -42,7 +42,7 @@ func TestPolicyAcceptValidateForOfferRejectsMismatchedSelections(t *testing.T) {
 		},
 		{
 			name: "selected policy weaker than minimum",
-			mut:  func(o *PolicyOffer, a *PolicyAccept) {
+			mut: func(o *PolicyOffer, a *PolicyAccept) {
 				o.MinimumPolicyID = registry.PolicyBalancedWeb
 				a.SelectedPolicy = registry.PolicyFastWeb
 			},
@@ -50,7 +50,9 @@ func TestPolicyAcceptValidateForOfferRejectsMismatchedSelections(t *testing.T) {
 		},
 		{
 			name: "selected tunnel personality not offered",
-			mut:  func(o *PolicyOffer, a *PolicyAccept) { o.TunnelPersonalityOffers = []uint64{registry.PersonalityIPLite} },
+			mut: func(o *PolicyOffer, a *PolicyAccept) {
+				o.TunnelPersonalityOffers = []uint64{registry.PersonalityIPLite}
+			},
 			want: "selected tunnel personality",
 		},
 	}

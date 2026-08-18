@@ -86,7 +86,7 @@ func TestSuiteHashLengthMatchesSuiteHashOutput(t *testing.T) {
 	wantLen := map[uint64]int{
 		registry.SuiteHybrid768AESGCM:  48,
 		registry.SuiteHybrid1024AESGCM: 64,
-		registry.SuiteLabClassical:      32,
+		registry.SuiteLabClassical:     32,
 	}
 	for suite, want := range wantLen {
 		got, err := SuiteHashLength(suite)

@@ -106,7 +106,7 @@ func TestVerifyIssuerMetadataSignaturePropagatesServiceAuthKeySeparationFailure(
 		ValidFromUnix:  90,
 		ValidUntilUnix: 400,
 		KeyStatus:      registry.AuthorityActive,
-		UsageFlags:      registry.UsageMaySignIssuerMetadata,
+		UsageFlags:     registry.UsageMaySignIssuerMetadata,
 	}}
 	// ValidateStructural passes (the service is structurally valid), then the
 	// separation check rejects the reuse of authority key material.

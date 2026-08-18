@@ -21,6 +21,16 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version-file: go.mod
+      - name: Check gofmt
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::The following files are not gofmt-clean (run 'gofmt -w .' and commit):"
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
       - name: Test
         run: go test ./...
       - name: Test lab build gates

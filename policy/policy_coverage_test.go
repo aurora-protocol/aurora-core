@@ -13,12 +13,12 @@ import (
 // ID so a name-to-ID mismatch is caught.
 func TestProfileByNameResolvesAllAndRejectsUnknown(t *testing.T) {
 	wantByName := map[string]uint64{
-		"fast-web":            registry.PolicyFastWeb,
-		"balanced-web":        registry.PolicyBalancedWeb,
-		"adversarial-dpi":     registry.PolicyAdversarialDPI,
+		"fast-web":               registry.PolicyFastWeb,
+		"balanced-web":           registry.PolicyBalancedWeb,
+		"adversarial-dpi":        registry.PolicyAdversarialDPI,
 		"adversarial-dpi-strict": registry.PolicyAdversarialStrict,
-		"emergency-web":       registry.PolicyEmergencyWeb,
-		"lab":                 registry.PolicyLab,
+		"emergency-web":          registry.PolicyEmergencyWeb,
+		"lab":                    registry.PolicyLab,
 	}
 	for name, wantID := range wantByName {
 		p, err := ProfileByName(name)

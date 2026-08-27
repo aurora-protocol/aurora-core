@@ -168,6 +168,128 @@ func TestRecordReaderZeroesPartiallyReadBodyOnFailure(t *testing.T) {
 	}
 }
 
+func TestRecordReaderReservationRejectsBeforeBodyRead(t *testing.T) {
+	wantErr := errors.New("reservation rejected")
+	input := &prefixOnlyReader{prefix: []byte{0, 0, 8}}
+	reader, err := NewRecordReader(input, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reserved uint32
+	body, release, err := reader.ReadWithReservation(func(length uint32) (func(), error) {
+		reserved = length
+		return nil, wantErr
+	})
+	if !errors.Is(err, wantErr) || body != nil || release != nil {
+		t.Fatalf("reserved read result: body=%x release=%t err=%v", body, release != nil, err)
+	}
+	if reserved != 8 {
+		t.Fatalf("reserved length = %d, want 8", reserved)
+	}
+	if input.reads != 1 {
+		t.Fatalf("reader was called %d times, want only the prefix read", input.reads)
+	}
+}
+
+func TestRecordReaderReservationReleasesAndZeroesOnBodyFailure(t *testing.T) {
+	input := &partialRecordReader{prefix: []byte{0, 0, 8}, body: []byte("secr")}
+	reader, err := NewRecordReader(input, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var active uint32
+	var releases int
+	body, release, err := reader.ReadWithReservation(func(length uint32) (func(), error) {
+		active += length
+		return func() {
+			active -= length
+			releases++
+		}, nil
+	})
+	if !errors.Is(err, io.ErrUnexpectedEOF) || body != nil || release != nil {
+		t.Fatalf("reserved partial read result: body=%x release=%t err=%v", body, release != nil, err)
+	}
+	if active != 0 || releases != 1 {
+		t.Fatalf("reservation after read failure: active=%d releases=%d", active, releases)
+	}
+	for _, value := range input.retained {
+		if value != 0 {
+			t.Fatal("reserved RecordReader retained partially read body bytes")
+		}
+	}
+}
+
+func TestRecordReaderReservationSuccessTransfersRelease(t *testing.T) {
+	reader, err := NewRecordReader(bytes.NewReader([]byte{0, 0, 3, 'o', 'n', 'e'}), 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var active uint32
+	body, release, err := reader.ReadWithReservation(func(length uint32) (func(), error) {
+		active += length
+		return func() { active -= length }, nil
+	})
+	if err != nil || string(body) != "one" || release == nil {
+		t.Fatalf("reserved read result: body=%q release=%t err=%v", body, release != nil, err)
+	}
+	if active != 3 {
+		t.Fatalf("active reservation = %d, want 3", active)
+	}
+	release()
+	if active != 0 {
+		t.Fatalf("active reservation after release = %d, want 0", active)
+	}
+}
+
+func TestRecordReaderReservationRejectsInvalidCallbacksWithoutAllocation(t *testing.T) {
+	t.Run("nil reservation", func(t *testing.T) {
+		input := &prefixOnlyReader{prefix: []byte{0, 0, 8}}
+		reader, err := NewRecordReader(input, 16)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if body, release, err := reader.ReadWithReservation(nil); !errors.Is(err, errNilRecordReservation) || body != nil || release != nil {
+			t.Fatalf("nil reservation result: body=%x release=%t err=%v", body, release != nil, err)
+		}
+		if input.reads != 0 {
+			t.Fatalf("nil reservation consumed %d reads", input.reads)
+		}
+	})
+
+	t.Run("nil release", func(t *testing.T) {
+		input := &prefixOnlyReader{prefix: []byte{0, 0, 8}}
+		reader, err := NewRecordReader(input, 16)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if body, release, err := reader.ReadWithReservation(func(uint32) (func(), error) { return nil, nil }); !errors.Is(err, errNilRecordRelease) || body != nil || release != nil {
+			t.Fatalf("nil release result: body=%x release=%t err=%v", body, release != nil, err)
+		}
+		if input.reads != 1 {
+			t.Fatalf("nil release consumed %d reads, want only the prefix", input.reads)
+		}
+	})
+
+	t.Run("error release", func(t *testing.T) {
+		input := &prefixOnlyReader{prefix: []byte{0, 0, 8}}
+		reader, err := NewRecordReader(input, 16)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantErr := errors.New("reservation failed")
+		released := false
+		_, _, err = reader.ReadWithReservation(func(uint32) (func(), error) {
+			return func() { released = true }, wantErr
+		})
+		if !errors.Is(err, wantErr) || !released {
+			t.Fatalf("error reservation: released=%t err=%v", released, err)
+		}
+		if input.reads != 1 {
+			t.Fatalf("error reservation consumed %d reads, want only the prefix", input.reads)
+		}
+	})
+}
+
 func TestNewRecordRejectsInvalidReadersWritersAndMaximums(t *testing.T) {
 	if _, err := NewRecordReader(nil, 16); err == nil {
 		t.Fatal("NewRecordReader(nil, ...) returned nil error")

@@ -21,6 +21,8 @@ const maxRecordBodyBytes uint32 = 0xffffff
 var (
 	errInvalidRecordMaximum = errors.New("transport: record maximum exceeds unsigned-24 limit")
 	errNilRecordReader      = errors.New("transport: nil record reader")
+	errNilRecordReservation = errors.New("transport: nil record body reservation")
+	errNilRecordRelease     = errors.New("transport: nil record body release")
 	errNilRecordWriter      = errors.New("transport: nil record writer")
 )
 
@@ -47,17 +49,58 @@ func NewRecordReader(r io.Reader, max uint32) (*RecordReader, error) {
 }
 
 func (r *RecordReader) Read() ([]byte, error) {
+	length, err := r.readLength()
+	if err != nil {
+		return nil, err
+	}
+	return r.readBody(length)
+}
+
+// ReadWithReservation reserves the validated record length before allocating
+// its body. On success, the caller owns release until it no longer retains the
+// returned body or data derived from it. Read failures release automatically.
+func (r *RecordReader) ReadWithReservation(reserve func(uint32) (func(), error)) ([]byte, func(), error) {
+	if reserve == nil {
+		return nil, nil, errNilRecordReservation
+	}
+	length, err := r.readLength()
+	if err != nil {
+		return nil, nil, err
+	}
+	release, err := reserve(length)
+	if err != nil {
+		if release != nil {
+			release()
+		}
+		return nil, nil, err
+	}
+	if release == nil {
+		return nil, nil, errNilRecordRelease
+	}
+	body, err := r.readBody(length)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	return body, release, nil
+}
+
+func (r *RecordReader) readLength() (uint32, error) {
 	var prefix [3]byte
 	if _, err := io.ReadFull(r.r, prefix[:]); err != nil {
-		return nil, err
+		return 0, err
 	}
 	length := uint32(prefix[0])<<16 | uint32(prefix[1])<<8 | uint32(prefix[2])
 	if length == 0 {
-		return nil, ErrEmptyRecord
+		return 0, ErrEmptyRecord
 	}
 	if length > r.max {
-		return nil, ErrRecordTooLarge
+		return 0, ErrRecordTooLarge
 	}
+	return length, nil
+}
+
+func (r *RecordReader) readBody(length uint32) ([]byte, error) {
 	body := make([]byte, int(length))
 	if _, err := io.ReadFull(r.r, body); err != nil {
 		zeroRecordBytes(body)

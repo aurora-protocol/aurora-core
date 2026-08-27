@@ -67,6 +67,149 @@ func TestFirstHopWithholdsHeadersUntilBeginCompletes(t *testing.T) {
 	}
 }
 
+func TestFirstHopPreludeReservationExhaustionUsesSanitizedCover(t *testing.T) {
+	var beginCalls atomic.Int32
+	server, client, _, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
+		beginCalls.Add(1)
+		return nil, protocol.CoverPrelude1{}, errors.New("Begin must not run")
+	})
+	recorder := &recordingFirstHopCoverOrigin{}
+	handler.coverOrigin = recorder
+	wantErr := errors.New("test Prelude budget exhausted")
+	var reserved atomic.Uint32
+	handler.preludeReservation = func(length uint32) (func(), error) {
+		reserved.Store(length)
+		return nil, wantErr
+	}
+	record := firstHopTestPreludeRecord(t)
+	request, err := http.NewRequest(http.MethodPost, server.URL+handler.path, bytes.NewReader(record[:3]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := readFirstHopHTTPResult(response, nil)
+	assertFirstHopCoverResult(t, result)
+	if result.header.Get("X-Carrier-Reply") != "" {
+		t.Fatal("Prelude budget exhaustion leaked carrier response headers")
+	}
+	wantLength := uint32(record[0])<<16 | uint32(record[1])<<8 | uint32(record[2])
+	if got := reserved.Load(); got != wantLength {
+		t.Fatalf("reserved Prelude length = %d, want %d", got, wantLength)
+	}
+	method, body := recorder.snapshot()
+	if method != http.MethodGet || len(body) != 0 {
+		t.Fatalf("budget-rejected Prelude reached cover origin: method=%s body=%x", method, body)
+	}
+	if beginCalls.Load() != 0 {
+		t.Fatalf("budget-rejected Prelude entered Begin %d times", beginCalls.Load())
+	}
+}
+
+func TestFirstHopPreludeReservationHeldThroughBeginAndReleasedBeforeReturn(t *testing.T) {
+	budget := newProductionFirstHopPreludeBudget(8192)
+	usedAtBegin := make(chan uint64, 1)
+	usedAtCover := make(chan uint64, 1)
+	server, client, _, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
+		budget.mu.Lock()
+		used := budget.used
+		budget.mu.Unlock()
+		usedAtBegin <- used
+		return nil, protocol.CoverPrelude1{}, errors.New("test admission rejection")
+	})
+	recorder := &recordingFirstHopCoverOrigin{onServe: func(*http.Request) {
+		budget.mu.Lock()
+		used := budget.used
+		budget.mu.Unlock()
+		usedAtCover <- used
+	}}
+	handler.coverOrigin = recorder
+	handler.preludeReservation = budget.reserve
+	record := firstHopTestPreludeRecord(t)
+	request, err := http.NewRequest(http.MethodPost, server.URL+handler.path, bytes.NewReader(record))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFirstHopCoverResult(t, readFirstHopHTTPResult(response, nil))
+	wantLength := uint64(record[0])<<16 | uint64(record[1])<<8 | uint64(record[2])
+	if got := <-usedAtBegin; got != wantLength {
+		t.Fatalf("Prelude reservation during Begin = %d, want %d", got, wantLength)
+	}
+	if got := <-usedAtCover; got != 0 {
+		t.Fatalf("Prelude reservation on cover-origin entry = %d, want 0", got)
+	}
+	budget.mu.Lock()
+	used := budget.used
+	budget.mu.Unlock()
+	if used != 0 {
+		t.Fatalf("Prelude reservation after Begin failure = %d, want 0", used)
+	}
+	method, body := recorder.snapshot()
+	if method != http.MethodGet || len(body) != 0 {
+		t.Fatalf("failed Prelude reached cover origin: method=%s body=%x", method, body)
+	}
+}
+
+func TestFirstHopPreludeLimitRejectsPrefixBeforeReservation(t *testing.T) {
+	var beginCalls atomic.Int32
+	server, client, _, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
+		beginCalls.Add(1)
+		return nil, protocol.CoverPrelude1{}, errors.New("Begin must not run")
+	})
+	record := firstHopTestPreludeRecord(t)
+	declared := uint32(record[0])<<16 | uint32(record[1])<<8 | uint32(record[2])
+	handler.maxPreludeRequestBodyBytes = declared - 1
+	var reservationCalls atomic.Int32
+	handler.preludeReservation = func(uint32) (func(), error) {
+		reservationCalls.Add(1)
+		return func() {}, nil
+	}
+	request, err := http.NewRequest(http.MethodPost, server.URL+handler.path, bytes.NewReader(record[:3]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFirstHopCoverResult(t, readFirstHopHTTPResult(response, nil))
+	if reservationCalls.Load() != 0 || beginCalls.Load() != 0 {
+		t.Fatalf("oversized Prelude reached reservation/Begin: reservations=%d begin=%d", reservationCalls.Load(), beginCalls.Load())
+	}
+}
+
+func TestFirstHopPreludeResponseLimitUsesCoverBeforeHeaders(t *testing.T) {
+	server, client, _, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
+		return &handshake.RelayHandshake{}, firstHopTestPrelude1(), nil
+	})
+	recorder := &recordingFirstHopCoverOrigin{}
+	handler.coverOrigin = recorder
+	handler.maxPreludeResponseBodyBytes = 1
+	request, err := http.NewRequest(http.MethodPost, server.URL+handler.path, bytes.NewReader(firstHopTestPreludeRecord(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := readFirstHopHTTPResult(response, nil)
+	assertFirstHopCoverResult(t, result)
+	if result.header.Get("X-Carrier-Reply") != "" {
+		t.Fatal("oversized Prelude1 leaked carrier response headers")
+	}
+	method, body := recorder.snapshot()
+	if method != http.MethodGet || len(body) != 0 {
+		t.Fatalf("oversized Prelude1 request reached cover origin: method=%s body=%x", method, body)
+	}
+}
+
 func TestFirstHopCarrierHeaderCommitRejectsConcurrentCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	writer := &cancellingFirstHopResponseWriter{cancelOnHeader: cancel}
@@ -237,6 +380,104 @@ func TestFirstHopPreludeTimeoutUnblocksPartialRead(t *testing.T) {
 	case <-time.After(time.Second):
 		_ = body.Close()
 		t.Fatal("pre-header timeout did not unblock partial Prelude0 read")
+	}
+}
+
+func TestFirstHopPreludeTimeoutReleasesReservedBody(t *testing.T) {
+	server, client, _, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
+		return nil, protocol.CoverPrelude1{}, errors.New("Begin must not run")
+	})
+	handler.preHeaderTimeout = 50 * time.Millisecond
+	budget := newProductionFirstHopPreludeBudget(8192)
+	reservationStarted := make(chan struct{})
+	var reservationOnce sync.Once
+	handler.preludeReservation = func(length uint32) (func(), error) {
+		release, err := budget.reserve(length)
+		if err == nil {
+			reservationOnce.Do(func() { close(reservationStarted) })
+		}
+		return release, err
+	}
+	body := newPrefixBlockingFirstHopRequestBody([]byte{0, 0x20, 0})
+	request, err := http.NewRequest(http.MethodPost, server.URL+handler.path, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan firstHopHTTPResult, 1)
+	go func() {
+		response, requestErr := client.Do(request)
+		result <- readFirstHopHTTPResult(response, requestErr)
+	}()
+	select {
+	case <-reservationStarted:
+	case <-time.After(time.Second):
+		_ = body.Close()
+		t.Fatal("partial Prelude did not acquire a body reservation")
+	}
+	select {
+	case got := <-result:
+		if got.err == nil {
+			assertFirstHopCoverResult(t, got)
+		}
+	case <-time.After(time.Second):
+		_ = body.Close()
+		t.Fatal("pre-header timeout did not unblock reserved Prelude body")
+	}
+	budget.mu.Lock()
+	used := budget.used
+	budget.mu.Unlock()
+	if used != 0 {
+		t.Fatalf("timed-out Prelude retained %d reserved bytes", used)
+	}
+}
+
+func TestFirstHopShutdownReleasesReservedPreludeBody(t *testing.T) {
+	server, client, _, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
+		return nil, protocol.CoverPrelude1{}, errors.New("Begin must not run")
+	})
+	budget := newProductionFirstHopPreludeBudget(8192)
+	reservationStarted := make(chan struct{})
+	var reservationOnce sync.Once
+	handler.preludeReservation = func(length uint32) (func(), error) {
+		release, err := budget.reserve(length)
+		if err == nil {
+			reservationOnce.Do(func() { close(reservationStarted) })
+		}
+		return release, err
+	}
+	body := newPrefixBlockingFirstHopRequestBody([]byte{0, 0x20, 0})
+	request, err := http.NewRequest(http.MethodPost, server.URL+handler.path, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan firstHopHTTPResult, 1)
+	go func() {
+		response, requestErr := client.Do(request)
+		result <- readFirstHopHTTPResult(response, requestErr)
+	}()
+	select {
+	case <-reservationStarted:
+	case <-time.After(time.Second):
+		_ = body.Close()
+		t.Fatal("partial Prelude did not acquire a body reservation")
+	}
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := handler.shutdownAndWait(shutdownContext); err != nil {
+		_ = body.Close()
+		t.Fatalf("first-hop shutdown: %v", err)
+	}
+	select {
+	case <-result:
+	case <-time.After(time.Second):
+		_ = body.Close()
+		t.Fatal("shutdown did not terminate reserved Prelude request")
+	}
+	budget.mu.Lock()
+	used := budget.used
+	budget.mu.Unlock()
+	if used != 0 {
+		t.Fatalf("shutdown retained %d reserved Prelude bytes", used)
 	}
 }
 
@@ -573,6 +814,87 @@ func TestFirstHopPostHeaderFailureCancelsWithoutCoverBody(t *testing.T) {
 	case <-partialEndpoint.Done():
 	default:
 		t.Fatal("post-header failure did not close partial application")
+	}
+}
+
+func TestFirstHopCapsuleRequestLimitRejectsPrefixBeforeFinish(t *testing.T) {
+	server, client, _, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
+		return &handshake.RelayHandshake{}, firstHopTestPrelude1(), nil
+	})
+	recorder := &recordingFirstHopCoverOrigin{}
+	handler.coverOrigin = recorder
+	handler.maxCapsuleBodyBytes = 8
+	var finishCalls atomic.Int32
+	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
+		finishCalls.Add(1)
+		return nil, nil, protocol.PolicyAccept{}, errors.New("Finish must not run")
+	}
+	response, writer := openFirstHopStreamingRequest(t, client, server.URL+handler.path)
+	defer response.Body.Close()
+	defer writer.Close()
+	reader, err := transport.NewRecordReader(response.Body, 8192)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Read(); err != nil {
+		t.Fatalf("read Prelude1: %v", err)
+	}
+	if _, err := writer.pipe.Write([]byte{0, 0, 9}); err != nil {
+		t.Fatalf("write oversized Capsule1 prefix: %v", err)
+	}
+	if capsule, err := reader.Read(); err == nil {
+		t.Fatalf("oversized Capsule1 produced response record %q", capsule)
+	}
+	if finishCalls.Load() != 0 {
+		t.Fatalf("oversized Capsule1 entered Finish %d times", finishCalls.Load())
+	}
+	method, body := recorder.snapshot()
+	if method != "" || len(body) != 0 {
+		t.Fatalf("post-header Capsule1 rejection invoked cover origin: method=%s body=%x", method, body)
+	}
+}
+
+func TestFirstHopCapsuleResponseLimitAbortsAfterHeaders(t *testing.T) {
+	server, client, _, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
+		return &handshake.RelayHandshake{}, firstHopTestPrelude1(), nil
+	})
+	recorder := &recordingFirstHopCoverOrigin{}
+	handler.coverOrigin = recorder
+	handler.maxCapsuleBodyBytes = 8
+	endpoint := newFirstHopTestEndpoint(nil)
+	oversizedCapsule := []byte("123456789")
+	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
+		return oversizedCapsule, endpoint, protocol.PolicyAccept{}, nil
+	}
+	response, writer := openFirstHopStreamingRequest(t, client, server.URL+handler.path)
+	defer response.Body.Close()
+	defer writer.Close()
+	reader, err := transport.NewRecordReader(response.Body, 8192)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Read(); err != nil {
+		t.Fatalf("read Prelude1: %v", err)
+	}
+	if err := writer.Write([]byte("ok")); err != nil {
+		t.Fatalf("write Capsule1: %v", err)
+	}
+	if capsule, err := reader.Read(); err == nil {
+		t.Fatalf("oversized Capsule2 reached carrier %q", capsule)
+	}
+	method, body := recorder.snapshot()
+	if method != "" || len(body) != 0 {
+		t.Fatalf("post-header Capsule2 rejection invoked cover origin: method=%s body=%x", method, body)
+	}
+	for _, value := range oversizedCapsule {
+		if value != 0 {
+			t.Fatal("oversized Capsule2 was not zeroed")
+		}
+	}
+	select {
+	case <-endpoint.Done():
+	case <-time.After(time.Second):
+		t.Fatal("oversized Capsule2 did not close partial application")
 	}
 }
 
@@ -986,8 +1308,12 @@ func TestFirstHopHandlerAcceptsSessionFactoryWithoutStaticHandler(t *testing.T) 
 			return func(context.Context, protocol.FrameBlock) error { return nil }, io.NopCloser(bytes.NewReader(nil)), nil
 		},
 	}
-	if _, err := NewFirstHopHandler(options); err != nil {
+	handler, err := NewFirstHopHandler(options)
+	if err != nil {
 		t.Fatalf("NewFirstHopHandler rejected session factory: %v", err)
+	}
+	if handler.maxRecordBodyBytes != transport.DefaultMaxRecordBodyBytes || handler.maxPreludeRequestBodyBytes != transport.DefaultMaxRecordBodyBytes || handler.maxPreludeResponseBodyBytes != transport.DefaultMaxRecordBodyBytes || handler.maxCapsuleBodyBytes != transport.DefaultMaxRecordBodyBytes {
+		t.Fatalf("generic first-hop record limits changed: data=%d Prelude0=%d Prelude1=%d Capsule=%d", handler.maxRecordBodyBytes, handler.maxPreludeRequestBodyBytes, handler.maxPreludeResponseBodyBytes, handler.maxCapsuleBodyBytes)
 	}
 }
 
@@ -1583,8 +1909,19 @@ type blockingFirstHopRequestBody struct {
 	closeOnce sync.Once
 }
 
+type prefixBlockingFirstHopRequestBody struct {
+	prefix    []byte
+	offset    int
+	release   chan struct{}
+	closeOnce sync.Once
+}
+
 func newBlockingFirstHopRequestBody() *blockingFirstHopRequestBody {
 	return &blockingFirstHopRequestBody{started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func newPrefixBlockingFirstHopRequestBody(prefix []byte) *prefixBlockingFirstHopRequestBody {
+	return &prefixBlockingFirstHopRequestBody{prefix: append([]byte(nil), prefix...), release: make(chan struct{})}
 }
 
 func (b *blockingFirstHopRequestBody) Read([]byte) (int, error) {
@@ -1594,6 +1931,21 @@ func (b *blockingFirstHopRequestBody) Read([]byte) (int, error) {
 }
 
 func (b *blockingFirstHopRequestBody) Close() error {
+	b.closeOnce.Do(func() { close(b.release) })
+	return nil
+}
+
+func (b *prefixBlockingFirstHopRequestBody) Read(p []byte) (int, error) {
+	if b.offset < len(b.prefix) {
+		n := copy(p, b.prefix[b.offset:])
+		b.offset += n
+		return n, nil
+	}
+	<-b.release
+	return 0, io.EOF
+}
+
+func (b *prefixBlockingFirstHopRequestBody) Close() error {
 	b.closeOnce.Do(func() { close(b.release) })
 	return nil
 }
@@ -1726,9 +2078,10 @@ func assertFirstHopCoverResult(t *testing.T, result firstHopHTTPResult) {
 }
 
 type recordingFirstHopCoverOrigin struct {
-	mu     sync.Mutex
-	method string
-	body   []byte
+	mu      sync.Mutex
+	method  string
+	body    []byte
+	onServe func(*http.Request)
 }
 
 func (o *recordingFirstHopCoverOrigin) ServeHTTP(w http.ResponseWriter, request *http.Request) {
@@ -1740,6 +2093,9 @@ func (o *recordingFirstHopCoverOrigin) ServeFailureHTTP(w http.ResponseWriter, r
 }
 
 func (o *recordingFirstHopCoverOrigin) recordAndServe(w http.ResponseWriter, request *http.Request) {
+	if o.onServe != nil {
+		o.onServe(request)
+	}
 	body, _ := io.ReadAll(request.Body)
 	o.mu.Lock()
 	o.method = request.Method

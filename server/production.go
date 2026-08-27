@@ -17,16 +17,20 @@ import (
 
 	"github.com/aurora-protocol/aurora-core/handshake"
 	"github.com/aurora-protocol/aurora-core/relay"
+	"github.com/aurora-protocol/aurora-core/transport"
 	"github.com/aurora-protocol/aurora-core/trust"
 	"golang.org/x/net/netutil"
 )
 
 const (
-	maximumProductionFirstHopSessions    = 4096
-	productionFirstHopConnectionHeadroom = 64
+	maximumProductionFirstHopSessions            = 4096
+	maximumProductionFirstHopPendingPreludeBytes = 64 << 20
+	productionFirstHopConnectionHeadroom         = 64
 )
 
 var ErrProductionFirstHopSessionLimit = errors.New("server: production first-hop session limit reached")
+
+var errProductionFirstHopPreludeBudget = errors.New("server: production first-hop Prelude budget exhausted")
 
 // ProductionFirstHopOptions contains the fixed dependencies needed by a production first-hop server.
 type ProductionFirstHopOptions struct {
@@ -47,6 +51,7 @@ type ProductionFirstHopOptions struct {
 type ProductionFirstHopServer struct {
 	handler         *FirstHopHandler
 	server          *http.Server
+	preludeBudget   *productionFirstHopPreludeBudget
 	connectionLimit int
 }
 
@@ -64,7 +69,12 @@ func NewProductionFirstHopServer(options ProductionFirstHopOptions) (*Production
 	}
 	template := options.Deployment.Template()
 	requestClass := options.Deployment.RequestClass()
+	metadata := options.Deployment.FirstHopMetadata(0)
 	limiter := newProductionFirstHopLimiter(options.MaxConcurrentSessions)
+	preludeBudget := newProductionFirstHopPreludeBudget(productionFirstHopPreludeBudgetLimit(
+		options.MaxConcurrentSessions,
+		metadata.PreludeMaxRequestBodySize,
+	))
 	handler, err := NewFirstHopHandler(FirstHopOptions{
 		Driver:    options.Driver,
 		Authority: options.Authority,
@@ -83,6 +93,10 @@ func NewProductionFirstHopServer(options ProductionFirstHopOptions) (*Production
 	if err != nil {
 		return nil, err
 	}
+	handler.maxPreludeRequestBodyBytes = uint32(metadata.PreludeMaxRequestBodySize)
+	handler.maxPreludeResponseBodyBytes = uint32(metadata.PreludeMaxResponseBodySize)
+	handler.maxCapsuleBodyBytes = uint32(metadata.CapsuleMaxBodySize)
+	handler.preludeReservation = preludeBudget.reserve
 	handler.sessionAdmission = limiter.acquire
 	httpServer, err := NewFirstHopHTTPServer(options.ListenAddress, handler, options.TLSConfig)
 	if err != nil {
@@ -92,6 +106,7 @@ func NewProductionFirstHopServer(options ProductionFirstHopOptions) (*Production
 	return &ProductionFirstHopServer{
 		handler:         handler,
 		server:          httpServer,
+		preludeBudget:   preludeBudget,
 		connectionLimit: options.MaxConcurrentSessions + productionFirstHopConnectionHeadroom,
 	}, nil
 }
@@ -175,6 +190,16 @@ func validateProductionFirstHopOptions(options ProductionFirstHopOptions) error 
 	if options.MaxConcurrentSessions <= 0 || options.MaxConcurrentSessions > maximumProductionFirstHopSessions {
 		return fmt.Errorf("server: production first-hop session limit is invalid")
 	}
+	metadata := options.Deployment.FirstHopMetadata(0)
+	if metadata.PreludeMaxRequestBodySize == 0 || metadata.PreludeMaxRequestBodySize > uint64(transport.DefaultMaxRecordBodyBytes) {
+		return fmt.Errorf("server: production first-hop Prelude request body limit is invalid")
+	}
+	if metadata.PreludeMaxResponseBodySize == 0 || metadata.PreludeMaxResponseBodySize > uint64(transport.DefaultMaxRecordBodyBytes) {
+		return fmt.Errorf("server: production first-hop Prelude response body limit is invalid")
+	}
+	if metadata.CapsuleMaxBodySize == 0 || metadata.CapsuleMaxBodySize > uint64(transport.DefaultMaxRecordBodyBytes) {
+		return fmt.Errorf("server: production first-hop Capsule body limit is invalid")
+	}
 	return nil
 }
 
@@ -225,6 +250,47 @@ func ValidateProductionFirstHopListenAddress(address string) error {
 
 type productionFirstHopLimiter struct {
 	slots chan struct{}
+}
+
+type productionFirstHopPreludeBudget struct {
+	mu    sync.Mutex
+	limit uint64
+	used  uint64
+}
+
+func productionFirstHopPreludeBudgetLimit(maxSessions int, maxBodyBytes uint64) uint64 {
+	if maxSessions <= 0 || maxBodyBytes == 0 {
+		return 0
+	}
+	sessions := uint64(maxSessions)
+	if maxBodyBytes > maximumProductionFirstHopPendingPreludeBytes/sessions {
+		return maximumProductionFirstHopPendingPreludeBytes
+	}
+	return sessions * maxBodyBytes
+}
+
+func newProductionFirstHopPreludeBudget(limit uint64) *productionFirstHopPreludeBudget {
+	return &productionFirstHopPreludeBudget{limit: limit}
+}
+
+func (b *productionFirstHopPreludeBudget) reserve(length uint32) (func(), error) {
+	amount := uint64(length)
+	b.mu.Lock()
+	if amount == 0 || amount > b.limit || b.used > b.limit-amount {
+		b.mu.Unlock()
+		return nil, errProductionFirstHopPreludeBudget
+	}
+	b.used += amount
+	b.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			b.mu.Lock()
+			b.used -= amount
+			b.mu.Unlock()
+		})
+	}, nil
 }
 
 func newProductionFirstHopLimiter(limit int) *productionFirstHopLimiter {

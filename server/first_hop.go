@@ -120,27 +120,31 @@ func NewFirstHopProxySessionFactory(options FirstHopProxySessionOptions) (FirstH
 
 // FirstHopHandler admits at most the first request on each HTTP/2 connection.
 type FirstHopHandler struct {
-	driver             *handshake.RelayDriver
-	authority          string
-	path               string
-	bindingMetadata    handshake.HTTP2BindingMetadata
-	coverStatus        int
-	coverHeader        http.Header
-	origin             relay.Origin
-	coverOrigin        http.Handler
-	maxRecordBodyBytes uint32
-	frameHandler       transport.FrameBlockHandler
-	sessionFactory     FirstHopSessionFactory
-	preHeaderTimeout   time.Duration
-	postHeaderTimeout  time.Duration
-	begin              firstHopBeginFunc
-	finish             firstHopFinishFunc
-	sessionAdmission   func(context.Context) (func(), error)
-	sessionMu          sync.Mutex
-	sessions           map[uint64]context.CancelFunc
-	sessionWG          sync.WaitGroup
-	nextSessionID      uint64
-	shuttingDown       bool
+	driver                      *handshake.RelayDriver
+	authority                   string
+	path                        string
+	bindingMetadata             handshake.HTTP2BindingMetadata
+	coverStatus                 int
+	coverHeader                 http.Header
+	origin                      relay.Origin
+	coverOrigin                 http.Handler
+	maxRecordBodyBytes          uint32
+	maxPreludeRequestBodyBytes  uint32
+	maxPreludeResponseBodyBytes uint32
+	maxCapsuleBodyBytes         uint32
+	frameHandler                transport.FrameBlockHandler
+	sessionFactory              FirstHopSessionFactory
+	preHeaderTimeout            time.Duration
+	postHeaderTimeout           time.Duration
+	begin                       firstHopBeginFunc
+	finish                      firstHopFinishFunc
+	sessionAdmission            func(context.Context) (func(), error)
+	preludeReservation          func(uint32) (func(), error)
+	sessionMu                   sync.Mutex
+	sessions                    map[uint64]context.CancelFunc
+	sessionWG                   sync.WaitGroup
+	nextSessionID               uint64
+	shuttingDown                bool
 }
 
 type firstHopBeginFunc func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error)
@@ -213,20 +217,23 @@ func NewFirstHopHandler(options FirstHopOptions) (*FirstHopHandler, error) {
 		MethodFamilyID:          metadata.MethodFamilyID,
 	}
 	handler := &FirstHopHandler{
-		driver:             options.Driver,
-		authority:          authority,
-		path:               options.Path,
-		bindingMetadata:    metadata,
-		coverStatus:        options.CoverStatus,
-		coverHeader:        options.CoverHeader.Clone(),
-		origin:             options.Origin,
-		coverOrigin:        options.CoverOrigin,
-		maxRecordBodyBytes: maximum,
-		frameHandler:       options.FrameHandler,
-		sessionFactory:     options.SessionFactory,
-		preHeaderTimeout:   defaultFirstHopPreHeaderTimeout,
-		postHeaderTimeout:  postHeaderTimeout,
-		sessions:           make(map[uint64]context.CancelFunc),
+		driver:                      options.Driver,
+		authority:                   authority,
+		path:                        options.Path,
+		bindingMetadata:             metadata,
+		coverStatus:                 options.CoverStatus,
+		coverHeader:                 options.CoverHeader.Clone(),
+		origin:                      options.Origin,
+		coverOrigin:                 options.CoverOrigin,
+		maxRecordBodyBytes:          maximum,
+		maxPreludeRequestBodyBytes:  maximum,
+		maxPreludeResponseBodyBytes: maximum,
+		maxCapsuleBodyBytes:         maximum,
+		frameHandler:                options.FrameHandler,
+		sessionFactory:              options.SessionFactory,
+		preHeaderTimeout:            defaultFirstHopPreHeaderTimeout,
+		postHeaderTimeout:           postHeaderTimeout,
+		sessions:                    make(map[uint64]context.CancelFunc),
 	}
 	handler.begin = handler.driver.Begin
 	handler.finish = func(ctx context.Context, state *handshake.RelayHandshake, capsule1 []byte, nowUnix uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
@@ -552,30 +559,67 @@ func (h *FirstHopHandler) serveCandidate(ctx context.Context, cancel context.Can
 		h.servePreHeaderFailure(w, request)
 		return err
 	}
-	recordReader, err := transport.NewRecordReader(request.Body, h.maxRecordBodyBytes)
+	preludeReader, err := transport.NewRecordReader(request.Body, h.maxPreludeRequestBodyBytes)
 	if err != nil {
 		h.servePreHeaderFailure(w, request)
 		return err
 	}
-	preludeRecord, err := recordReader.Read()
+	capsuleReader, err := transport.NewRecordReader(request.Body, h.maxCapsuleBodyBytes)
 	if err != nil {
 		h.servePreHeaderFailure(w, request)
 		return err
 	}
-	defer zeroFirstHopBytes(preludeRecord)
-	prelude0, err := decodeFirstHopPrelude0(preludeRecord)
+	preludeWriter, err := transport.NewRecordWriter(w, h.maxPreludeResponseBodyBytes)
 	if err != nil {
 		h.servePreHeaderFailure(w, request)
 		return err
 	}
-	defer zeroFirstHopPrelude0(&prelude0)
+	capsuleWriter, err := transport.NewRecordWriter(w, h.maxCapsuleBodyBytes)
+	if err != nil {
+		h.servePreHeaderFailure(w, request)
+		return err
+	}
+	releasePreludeReservation := func() {}
+	var preludeRecord []byte
+	if h.preludeReservation == nil {
+		preludeRecord, err = preludeReader.Read()
+	} else {
+		preludeRecord, releasePreludeReservation, err = preludeReader.ReadWithReservation(h.preludeReservation)
+	}
+	if err != nil {
+		h.servePreHeaderFailure(w, request)
+		return err
+	}
+	var prelude0 protocol.CoverPrelude0
+	preludeReleased := false
+	releasePrelude := func() {
+		if preludeReleased {
+			return
+		}
+		zeroFirstHopBytes(preludeRecord)
+		preludeRecord = nil
+		zeroFirstHopPrelude0(&prelude0)
+		releasePreludeReservation()
+		preludeReleased = true
+	}
+	defer releasePrelude()
+	prelude0, err = decodeFirstHopPrelude0(preludeRecord)
+	zeroFirstHopBytes(preludeRecord)
+	preludeRecord = nil
+	if err != nil {
+		releasePrelude()
+		h.servePreHeaderFailure(w, request)
+		return err
+	}
 	binding, err := handshake.DeriveHTTP2FirstHopBinding(*request.TLS, h.bindingMetadata, prelude0.ClientCoverRandom)
 	if err != nil {
+		releasePrelude()
 		h.servePreHeaderFailure(w, request)
 		return err
 	}
 	defer zeroFirstHopBinding(&binding)
 	handshakeState, prelude1, err := h.begin(preHeaderContext, binding, prelude0, uint64(time.Now().Unix()))
+	releasePrelude()
 	if err != nil {
 		if handshakeState != nil {
 			_ = handshakeState.Close()
@@ -597,7 +641,7 @@ func (h *FirstHopHandler) serveCandidate(ctx context.Context, cancel context.Can
 		return err
 	}
 	defer zeroFirstHopBytes(prelude1Record)
-	if len(prelude1Record) == 0 || uint64(len(prelude1Record)) > uint64(h.maxRecordBodyBytes) {
+	if len(prelude1Record) == 0 || uint64(len(prelude1Record)) > uint64(h.maxPreludeResponseBodyBytes) {
 		h.servePreHeaderFailure(w, request)
 		return fmt.Errorf("server: first-hop Prelude1 exceeds record boundary")
 	}
@@ -621,12 +665,7 @@ func (h *FirstHopHandler) serveCandidate(ctx context.Context, cancel context.Can
 		return err
 	}
 	defer stopPostHeader()
-	recordWriter, err := transport.NewRecordWriter(w, h.maxRecordBodyBytes)
-	if err != nil {
-		abortFirstHopAfterHeader(cancel)
-		return err
-	}
-	if err := recordWriter.Write(prelude1Record); err != nil {
+	if err := preludeWriter.Write(prelude1Record); err != nil {
 		abortFirstHopAfterHeader(cancel)
 		return err
 	}
@@ -635,13 +674,15 @@ func (h *FirstHopHandler) serveCandidate(ctx context.Context, cancel context.Can
 		return err
 	}
 
-	capsule1Record, err := recordReader.Read()
+	capsule1Record, err := capsuleReader.Read()
 	if err != nil {
 		abortFirstHopAfterHeader(cancel)
 		return err
 	}
-	defer zeroFirstHopBytes(capsule1Record)
+	defer func() { zeroFirstHopBytes(capsule1Record) }()
 	capsule2Record, application, policy, err := h.finish(postHeaderContext, handshakeState, capsule1Record, uint64(time.Now().Unix()))
+	zeroFirstHopBytes(capsule1Record)
+	capsule1Record = nil
 	if err != nil {
 		zeroFirstHopBytes(capsule2Record)
 		if !isNilFirstHopInterface(application) {
@@ -656,6 +697,11 @@ func (h *FirstHopHandler) serveCandidate(ctx context.Context, cancel context.Can
 		return fmt.Errorf("server: first-hop Finish returned nil application")
 	}
 	defer application.Close()
+	if len(capsule2Record) == 0 || uint64(len(capsule2Record)) > uint64(h.maxCapsuleBodyBytes) {
+		zeroFirstHopBytes(capsule2Record)
+		abortFirstHopAfterHeader(cancel)
+		return fmt.Errorf("server: first-hop Capsule2 exceeds record boundary")
+	}
 	frameHandler := h.frameHandler
 	if h.sessionFactory != nil {
 		sessionApplication, ok := application.(FirstHopSessionApplication)
@@ -691,7 +737,7 @@ func (h *FirstHopHandler) serveCandidate(ctx context.Context, cancel context.Can
 		return err
 	}
 	defer zeroFirstHopBytes(capsule2Record)
-	if err := recordWriter.Write(capsule2Record); err != nil {
+	if err := capsuleWriter.Write(capsule2Record); err != nil {
 		abortFirstHopAfterHeader(cancel)
 		return err
 	}

@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -108,9 +110,17 @@ func TestNewProductionFirstHopServerBuildsBoundedOwnedServer(t *testing.T) {
 		t.Fatalf("production TLS configuration is not fixed to TLS 1.3 HTTP/2: %+v", server.server.TLSConfig)
 	}
 	template := options.Deployment.Template()
+	metadata := options.Deployment.FirstHopMetadata(0)
 	requestClass := options.Deployment.RequestClass()
 	if server.handler.authority != options.Authority || server.handler.path != options.Path || !bytes.Equal(server.handler.bindingMetadata.NormalizedAuthorityHash, template.PublicNameHash) || !bytes.Equal(server.handler.bindingMetadata.PathTemplateID, requestClass.PathTemplateID) || server.handler.bindingMetadata.RequestClassID != requestClass.ClassID || server.handler.bindingMetadata.MethodFamilyID != options.Deployment.Method() {
 		t.Fatalf("production first-hop binding is not derived from deployment: %+v", server.handler.bindingMetadata)
+	}
+	if server.handler.maxPreludeRequestBodyBytes != uint32(metadata.PreludeMaxRequestBodySize) || server.handler.maxPreludeResponseBodyBytes != uint32(metadata.PreludeMaxResponseBodySize) || server.handler.maxCapsuleBodyBytes != uint32(metadata.CapsuleMaxBodySize) {
+		t.Fatalf("production bootstrap limits are not derived from deployment: request=%d response=%d capsule=%d metadata=%+v", server.handler.maxPreludeRequestBodyBytes, server.handler.maxPreludeResponseBodyBytes, server.handler.maxCapsuleBodyBytes, metadata)
+	}
+	wantPreludeBudget := productionFirstHopPreludeBudgetLimit(options.MaxConcurrentSessions, metadata.PreludeMaxRequestBodySize)
+	if server.preludeBudget == nil || server.handler.preludeReservation == nil || server.preludeBudget.limit != wantPreludeBudget || server.preludeBudget.used != 0 {
+		t.Fatalf("production Prelude budget is incomplete: budget=%+v want_limit=%d", server.preludeBudget, wantPreludeBudget)
 	}
 	options.CarrierHeader.Set("X-Carrier-Mode", "mutated")
 	if server.handler.coverHeader.Get("X-Carrier-Mode") == "mutated" {
@@ -133,6 +143,104 @@ func TestNewProductionFirstHopServerBuildsBoundedOwnedServer(t *testing.T) {
 	//lint:ignore SA1012 Verify the public API rejects a nil context without dereferencing it.
 	if err := server.Shutdown(nil); err == nil {
 		t.Fatal("production first-hop accepted a nil shutdown context")
+	}
+}
+
+func TestProductionFirstHopPreludeBudgetBoundsAndReusesCapacity(t *testing.T) {
+	budget := newProductionFirstHopPreludeBudget(8)
+	firstRelease, err := budget.reserve(5)
+	if err != nil || firstRelease == nil {
+		t.Fatalf("reserve first Prelude body: release=%t err=%v", firstRelease != nil, err)
+	}
+	secondRelease, err := budget.reserve(3)
+	if err != nil || secondRelease == nil {
+		t.Fatalf("reserve second Prelude body: release=%t err=%v", secondRelease != nil, err)
+	}
+	if release, err := budget.reserve(1); !errors.Is(err, errProductionFirstHopPreludeBudget) || release != nil {
+		t.Fatalf("over-budget reservation: release=%t err=%v", release != nil, err)
+	}
+	if release, err := budget.reserve(9); !errors.Is(err, errProductionFirstHopPreludeBudget) || release != nil {
+		t.Fatalf("oversized reservation: release=%t err=%v", release != nil, err)
+	}
+	if release, err := budget.reserve(0); !errors.Is(err, errProductionFirstHopPreludeBudget) || release != nil {
+		t.Fatalf("zero reservation: release=%t err=%v", release != nil, err)
+	}
+
+	firstRelease()
+	firstRelease()
+	replacementRelease, err := budget.reserve(5)
+	if err != nil || replacementRelease == nil {
+		t.Fatalf("reserve released capacity: release=%t err=%v", replacementRelease != nil, err)
+	}
+	secondRelease()
+	replacementRelease()
+	budget.mu.Lock()
+	used := budget.used
+	budget.mu.Unlock()
+	if used != 0 {
+		t.Fatalf("Prelude budget retained %d bytes after releases", used)
+	}
+}
+
+func TestProductionFirstHopPreludeBudgetConcurrentAccounting(t *testing.T) {
+	const (
+		limit      = 16
+		workers    = 64
+		iterations = 200
+	)
+	budget := newProductionFirstHopPreludeBudget(limit)
+	var active atomic.Int64
+	var maximum atomic.Int64
+	var unexpected atomic.Int64
+	var wait sync.WaitGroup
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for range iterations {
+				release, err := budget.reserve(1)
+				if err != nil {
+					if !errors.Is(err, errProductionFirstHopPreludeBudget) || release != nil {
+						unexpected.Add(1)
+					}
+					continue
+				}
+				current := active.Add(1)
+				for observed := maximum.Load(); current > observed && !maximum.CompareAndSwap(observed, current); observed = maximum.Load() {
+				}
+				active.Add(-1)
+				release()
+				release()
+			}
+		}()
+	}
+	wait.Wait()
+	if unexpected.Load() != 0 {
+		t.Fatalf("concurrent budget observed %d unexpected results", unexpected.Load())
+	}
+	if active.Load() != 0 || maximum.Load() > limit {
+		t.Fatalf("concurrent external accounting: active=%d maximum=%d limit=%d", active.Load(), maximum.Load(), limit)
+	}
+	budget.mu.Lock()
+	used := budget.used
+	budget.mu.Unlock()
+	if used != 0 {
+		t.Fatalf("concurrent Prelude budget retained %d bytes", used)
+	}
+}
+
+func TestProductionFirstHopPreludeBudgetLimitIsOverflowSafe(t *testing.T) {
+	if got := productionFirstHopPreludeBudgetLimit(0, 4096); got != 0 {
+		t.Fatalf("zero-session Prelude budget = %d, want 0", got)
+	}
+	if got := productionFirstHopPreludeBudgetLimit(-1, 4096); got != 0 {
+		t.Fatalf("negative-session Prelude budget = %d, want 0", got)
+	}
+	if got := productionFirstHopPreludeBudgetLimit(2, 4096); got != 8192 {
+		t.Fatalf("small Prelude budget = %d, want 8192", got)
+	}
+	if got := productionFirstHopPreludeBudgetLimit(maximumProductionFirstHopSessions, ^uint64(0)); got != maximumProductionFirstHopPendingPreludeBytes {
+		t.Fatalf("overflowing Prelude budget = %d, want %d", got, maximumProductionFirstHopPendingPreludeBytes)
 	}
 }
 

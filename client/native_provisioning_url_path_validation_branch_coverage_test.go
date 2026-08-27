@@ -89,6 +89,10 @@ func TestValidateNativeHTTPSURLAndCarrierPathRejectInvalidInput(t *testing.T) {
 		{"https url length invalid", "", false, "", false, "URL length is invalid"},
 		{"https parse request uri fails", "https://%invalid", false, "", false, "invalid URL escape"},
 		{"https not an https authority", "http://example.com", false, "", false, "URL must be an HTTPS authority without user info, query, or fragment"},
+		{"https empty query is still a query", "https://example.com?", false, "", false, "URL must be an HTTPS authority without user info, query, or fragment"},
+		{"https explicit port is empty", "https://example.com:", false, "", false, "URL port must be between 1 and 65535"},
+		{"https explicit port is zero", "https://example.com:0", false, "", false, "URL port must be between 1 and 65535"},
+		{"https explicit port exceeds range", "https://example.com:65536", false, "", false, "URL port must be between 1 and 65535"},
 		{"https issuer url has a path", "https://example.com/p", false, "", false, "issuer URL must not include a path"},
 		{"https carrier path invalid", "https://example.com", true, "", false, "URL path:"},
 		// validateNativeCarrierPath guards
@@ -106,6 +110,21 @@ func TestValidateNativeHTTPSURLAndCarrierPathRejectInvalidInput(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), c.wantSub) {
 				t.Fatalf("%s: err = %v, want non-nil containing %q", c.name, err, c.wantSub)
+			}
+		})
+	}
+}
+
+func TestValidateNativeHTTPSURLAcceptsValidExplicitPorts(t *testing.T) {
+	for _, raw := range []string{
+		"https://example.com:1",
+		"https://example.com:443",
+		"https://example.com:65535",
+		"https://[2001:db8::1]:443",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if err := validateNativeHTTPSURL(raw, false); err != nil {
+				t.Fatalf("validateNativeHTTPSURL(%q) = %v", raw, err)
 			}
 		})
 	}

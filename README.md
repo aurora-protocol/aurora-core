@@ -22,10 +22,10 @@ Implemented now:
 - `client`: local-interface-neutral client engine.
 - `platform`: thin platform adapter contracts for local proxy and packet interfaces.
 - `relay`: relay-side cover, admission, and exit-policy gates.
-- `server`: runnable prototype server handler combining cover-origin fallback and the cover-neutral issuance carrier surface.
+- `server`: runnable prototype/readiness handler combining cover-origin fallback and an opaque diagnostic carrier; production issuance still requires the verified cover-slot gate described by the protocol.
 - `ops`: operational verifier and directory helper logic.
 - `vectors`: generated structural vector bundle and drift tests.
-- `mobile/auroracore`: C-archive (`buildmode=c-archive`) binding exposing the portable wire, AdmissionProof, and cover-issuance carrier codec to native thin adapters (e.g. the Apple `AuroraCore.xcframework`), so platform adapters never reimplement protocol logic (Section 35.10).
+- `mobile/auroracore`: C-archive (`buildmode=c-archive`) binding exposing the portable wire, AdmissionProof, and opaque issuer-carrier codec to native thin adapters (e.g. the Apple `AuroraCore.xcframework`), so platform adapters never reimplement protocol logic (Section 35.10).
 - `cmd/aurorac`: Linux local proxy and TUN client process using an owner-only native provisioning file.
 - `cmd/auroractl`: local vector, config, and capability diagnostics.
 

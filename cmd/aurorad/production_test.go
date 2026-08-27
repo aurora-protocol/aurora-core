@@ -262,6 +262,39 @@ func TestParseProductionConfigRejectsArgumentsFilePrecededByCLIOptions(t *testin
 	}
 }
 
+func TestProductionCommandsRejectDuplicateOptions(t *testing.T) {
+	tests := []struct {
+		name      string
+		component string
+		parse     func([]string) error
+	}{
+		{
+			name:      "relay",
+			component: "server",
+			parse: func(args []string) error {
+				_, err := parseProductionConfig(args, io.Discard)
+				return err
+			},
+		},
+		{
+			name:      "issuer",
+			component: "issuer",
+			parse: func(args []string) error {
+				_, err := parseProductionIssuerConfig(args, io.Discard)
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.parse([]string{"--listen", "0.0.0.0:9443", "-listen=0.0.0.0:9444"})
+			if err == nil || !strings.Contains(err.Error(), test.component+": production option \"listen\" must not be repeated") {
+				t.Fatalf("duplicate option error = %v", err)
+			}
+		})
+	}
+}
+
 func TestParseProductionConfigRejectsUnknownArgumentsFileFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "aurorad.json")
 	writeProductionCommandFile(t, path, []byte(`{"arguments": [], "unexpected": true}`), 0o600)
@@ -269,6 +302,36 @@ func TestParseProductionConfigRejectsUnknownArgumentsFileFields(t *testing.T) {
 	_, err := parseProductionConfig([]string{"--config", path}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "decode production configuration file") {
 		t.Fatalf("unknown configuration file field error = %v, want strict decoding rejection", err)
+	}
+}
+
+func TestParseProductionConfigRejectsDuplicateOrNonCanonicalArgumentsFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		encoded string
+	}{
+		{
+			name:    "duplicate",
+			encoded: `{"arguments":["--listen","0.0.0.0:9443"],"arguments":["--listen","0.0.0.0:9444"]}`,
+		},
+		{
+			name:    "non-canonical case",
+			encoded: `{"Arguments":[]}`,
+		},
+		{
+			name:    "non-object",
+			encoded: `[]`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "aurorad.json")
+			writeProductionCommandFile(t, path, []byte(test.encoded), 0o600)
+			_, err := parseProductionConfig([]string{"--config", path}, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "decode production configuration file") {
+				t.Fatalf("parse production configuration file error = %v, want strict decoding rejection", err)
+			}
+		})
 	}
 }
 

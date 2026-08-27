@@ -517,10 +517,11 @@ func decodeNativeProvisioningReservationRequest(encoded []byte) ([]byte, [][]byt
 	if len(encoded) < nativeProvisioningReservationSourceLengthBytes+nativeProvisioningReservationCountBytes || len(encoded) > maximumNativeProvisioningReservationInput {
 		return nil, nil, fmt.Errorf("auroracore: native provisioning reservation request size is invalid")
 	}
-	sourceLength := int(binary.BigEndian.Uint32(encoded[:nativeProvisioningReservationSourceLengthBytes]))
-	if sourceLength == 0 || sourceLength > client.MaximumNativeProvisioningWalletBytes {
+	encodedSourceLength := binary.BigEndian.Uint32(encoded[:nativeProvisioningReservationSourceLengthBytes])
+	if encodedSourceLength == 0 || uint64(encodedSourceLength) > uint64(client.MaximumNativeProvisioningWalletBytes) {
 		return nil, nil, fmt.Errorf("auroracore: native provisioning reservation source is invalid")
 	}
+	sourceLength := int(encodedSourceLength)
 	offset := nativeProvisioningReservationSourceLengthBytes
 	if sourceLength > len(encoded)-offset-nativeProvisioningReservationCountBytes {
 		return nil, nil, fmt.Errorf("auroracore: native provisioning reservation source is truncated")

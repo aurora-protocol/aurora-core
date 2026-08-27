@@ -68,6 +68,9 @@ func EncodeMetadataResponse(encoded, hash []byte) ([]byte, error) {
 	if len(hash) != metadataHashLength {
 		return nil, fmt.Errorf("carrier: issuer metadata hash length is invalid")
 	}
+	if uint64(len(encoded)) > uint64(^uint32(0)) || len(encoded) > int(^uint(0)>>1)-4-metadataHashLength {
+		return nil, fmt.Errorf("carrier: issuer metadata is too large")
+	}
 	out := make([]byte, 4+len(encoded)+len(hash))
 	binary.BigEndian.PutUint32(out[:4], uint32(len(encoded)))
 	copy(out[4:4+len(encoded)], encoded)
@@ -79,11 +82,12 @@ func DecodeMetadataResponse(payload []byte) (encoded, hash []byte, err error) {
 	if len(payload) < 4 {
 		return nil, nil, fmt.Errorf("carrier: metadata response missing length")
 	}
-	length := int(binary.BigEndian.Uint32(payload[:4]))
-	if len(payload) != 4+length+metadataHashLength {
+	length := uint64(binary.BigEndian.Uint32(payload[:4]))
+	if uint64(len(payload)) != 4+length+metadataHashLength {
 		return nil, nil, fmt.Errorf("carrier: metadata response length mismatch")
 	}
-	encoded = append([]byte(nil), payload[4:4+length]...)
-	hash = append([]byte(nil), payload[4+length:]...)
+	end := 4 + int(length)
+	encoded = append([]byte(nil), payload[4:end]...)
+	hash = append([]byte(nil), payload[end:]...)
 	return encoded, hash, nil
 }

@@ -237,6 +237,18 @@ func TestHTTPDaemonPublishesMetadataIssuesVerifiesAndSpends(t *testing.T) {
 	if err := admission.VerifyBlindRSA2048WithIssuerMetadata(proof, metadata, 200); err != nil {
 		t.Fatalf("issued proof did not verify: %v", err)
 	}
+	proof.TokenAuthenticator[0] ^= 0xff
+	forgedProof, err := protocol.Encode(proof)
+	proof.TokenAuthenticator[0] ^= 0xff
+	if err != nil {
+		t.Fatalf("encode forged proof: %v", err)
+	}
+	forged := serveHTTP(t, handler, http.MethodPost, "/token/spend", mustJSON(t, SpendRequest{
+		AdmissionProof: hex.EncodeToString(forgedProof),
+	}))
+	if forged.Code != http.StatusBadRequest || strings.Contains(forged.Body.String(), "already spent") {
+		t.Fatalf("forged spend response = %d %s", forged.Code, forged.Body.String())
+	}
 
 	voprfBody := mustJSON(t, VOPRFVerifyRequest{
 		ProofType:           registry.ProofVOPRFP384SHA384,
@@ -340,6 +352,7 @@ func TestHTTPDaemonRejectsOversizedStreamingJSONBody(t *testing.T) {
 	})
 	body = append(body, []byte(strings.Repeat(" ", 1<<20))...)
 	request := httptest.NewRequest(http.MethodPost, "/blind-rsa/issue", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
 	request.ContentLength = -1
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -413,6 +426,7 @@ func TestVerifierHTTPHandlerDoesNotSpendRequestAfterCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	request := httptest.NewRequest(http.MethodPost, "/", nil).WithContext(ctx)
+	request.Header.Set("Content-Type", "application/octet-stream")
 	request.Body = &cancelAfterIssuerBodyRead{reader: bytes.NewReader(requestBody), cancel: cancel}
 	request.ContentLength = -1
 	request.TLS = &tls.ConnectionState{
@@ -477,6 +491,7 @@ func TestVerifierHTTPHandlerRejectsDeclaredOversizedBinaryRequest(t *testing.T) 
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(encoded))
+	request.Header.Set("Content-Type", "application/octet-stream")
 	request.ContentLength = maximumVerifierRequestBodyBytes + 1
 	request.TLS = &tls.ConnectionState{
 		Version:          tls.VersionTLS13,

@@ -76,4 +76,11 @@ func TestDecodeMetadataResponseAdversarial(t *testing.T) {
 	if _, _, err := DecodeMetadataResponse(short); err == nil {
 		t.Fatal("DecodeMetadataResponse accepted payload with mismatched length")
 	}
+
+	// On 32-bit targets, converting this prefix to int used to wrap to -1.
+	// A 51-byte payload then passed the length check and panicked while slicing.
+	overflow := bytes.Repeat([]byte{0xff}, 4+metadataHashLength-1)
+	if _, _, err := DecodeMetadataResponse(overflow); err == nil {
+		t.Fatal("DecodeMetadataResponse accepted an unrepresentable length")
+	}
 }

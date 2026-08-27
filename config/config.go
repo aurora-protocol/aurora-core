@@ -50,6 +50,9 @@ func Default() Config {
 }
 
 func Parse(r io.Reader) (Config, error) {
+	if r == nil {
+		return Config{}, fmt.Errorf("config: input is required")
+	}
 	input, err := io.ReadAll(io.LimitReader(r, MaxConfigBytes+1))
 	if err != nil {
 		return Config{}, err
@@ -63,14 +66,26 @@ func Parse(r io.Reader) (Config, error) {
 	scanner.Buffer(make([]byte, 4096), MaxConfigBytes+1)
 	section := ""
 	lineNo := 0
+	seenSections := make(map[string]struct{})
+	seenKeys := make(map[string]struct{})
 	for scanner.Scan() {
 		lineNo++
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+		if strings.HasPrefix(line, "[") {
+			if !strings.HasSuffix(line, "]") {
+				return Config{}, fmt.Errorf("config: line %d has an invalid table header", lineNo)
+			}
 			section = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
+			if !isConfigSection(section) {
+				return Config{}, fmt.Errorf("config: line %d has unknown table %q", lineNo, section)
+			}
+			if _, exists := seenSections[section]; exists {
+				return Config{}, fmt.Errorf("config: line %d repeats table %q", lineNo, section)
+			}
+			seenSections[section] = struct{}{}
 			continue
 		}
 		key, val, ok := strings.Cut(line, "=")
@@ -78,6 +93,14 @@ func Parse(r io.Reader) (Config, error) {
 			return Config{}, fmt.Errorf("config: line %d missing '='", lineNo)
 		}
 		key = strings.TrimSpace(key)
+		if key == "" {
+			return Config{}, fmt.Errorf("config: line %d has an empty key", lineNo)
+		}
+		keyID := section + "\x00" + key
+		if _, exists := seenKeys[keyID]; exists {
+			return Config{}, fmt.Errorf("config: line %d repeats key %q in table %q", lineNo, key, section)
+		}
+		seenKeys[keyID] = struct{}{}
 		val = strings.Trim(strings.TrimSpace(val), "\"")
 		if err := cfg.set(section, key, val); err != nil {
 			return Config{}, err
@@ -90,6 +113,15 @@ func Parse(r io.Reader) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func isConfigSection(section string) bool {
+	switch section {
+	case "aurora", "local", "methods", "security", "storage":
+		return true
+	default:
+		return isExtensionSection(section)
+	}
 }
 
 func (c *Config) set(section, key, val string) error {

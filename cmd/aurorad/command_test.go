@@ -85,6 +85,21 @@ func TestIssuerHelpSucceeds(t *testing.T) {
 	}
 }
 
+func TestProductionCommandsReportConfigurationFileErrors(t *testing.T) {
+	for _, command := range []string{"serve", "issuer"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{command, "--config", filepath.Join(t.TempDir(), "missing.json")}, &stdout, &stderr)
+			if code != 2 {
+				t.Fatalf("run code = %d, want 2", code)
+			}
+			if !strings.Contains(stderr.String(), "read production configuration file") {
+				t.Fatalf("configuration file error was not reported: %q", stderr.String())
+			}
+		})
+	}
+}
+
 func TestHarnessHelpSucceeds(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"harness", "--help"}, &stdout, &stderr); code != 0 {

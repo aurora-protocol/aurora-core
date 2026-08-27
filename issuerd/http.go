@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -90,6 +91,9 @@ func NewVerifierHTTPHandler(service *Service) http.Handler {
 			writeError(w, http.StatusServiceUnavailable, "verifier unavailable")
 			return
 		}
+		if !requireRequestMediaType(w, r, "application/octet-stream") {
+			return
+		}
 		req, err := decodeVerifierRequest(r)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid verifier request")
@@ -149,6 +153,9 @@ func NewHTTPHandler(service *Service) http.Handler {
 			writeError(w, http.StatusServiceUnavailable, "issuer unavailable")
 			return
 		}
+		if !requireRequestMediaType(w, r, "application/json") {
+			return
+		}
 		var req IssueRequest
 		if err := decodeJSONBody(r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid issue request")
@@ -188,6 +195,9 @@ func NewHTTPHandler(service *Service) http.Handler {
 			writeError(w, http.StatusServiceUnavailable, "verifier unavailable")
 			return
 		}
+		if !requireRequestMediaType(w, r, "application/json") {
+			return
+		}
 		var req VOPRFVerifyRequest
 		if err := decodeJSONBody(r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid verifier request")
@@ -217,6 +227,9 @@ func NewHTTPHandler(service *Service) http.Handler {
 			writeError(w, http.StatusServiceUnavailable, "issuer unavailable")
 			return
 		}
+		if !requireRequestMediaType(w, r, "application/json") {
+			return
+		}
 		var req SpendRequest
 		if err := decodeJSONBody(r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid spend request")
@@ -237,7 +250,11 @@ func NewHTTPHandler(service *Service) http.Handler {
 		}
 		spentKey, err := service.SpendToken(proof)
 		if err != nil {
-			writeError(w, http.StatusConflict, "token already spent")
+			if errors.Is(err, ErrTokenAlreadySpent) {
+				writeError(w, http.StatusConflict, "token already spent")
+				return
+			}
+			writeError(w, http.StatusBadRequest, "invalid spend request")
 			return
 		}
 		writeJSON(w, http.StatusOK, SpendResponse{Spent: true, SpentKey: hex.EncodeToString(spentKey)})
@@ -372,6 +389,7 @@ func verifyBinaryVerifierMTLSEndpoint(service *Service, nowUnix uint64) error {
 		return err
 	}
 	request := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(encodedRequest))
+	request.Header.Set("Content-Type", "application/octet-stream")
 	request.TLS = &tls.ConnectionState{
 		Version:          tls.VersionTLS13,
 		PeerCertificates: []*x509.Certificate{{PublicKey: &clientKey.PublicKey}},
@@ -479,6 +497,17 @@ func rejectCanceledRequest(w http.ResponseWriter, r *http.Request) bool {
 	}
 	writeError(w, http.StatusRequestTimeout, "request canceled")
 	return true
+}
+
+func requireRequestMediaType(w http.ResponseWriter, r *http.Request, expected string) bool {
+	if r != nil {
+		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err == nil && mediaType == expected {
+			return true
+		}
+	}
+	writeError(w, http.StatusUnsupportedMediaType, "unsupported media type")
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

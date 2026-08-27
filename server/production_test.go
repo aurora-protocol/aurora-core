@@ -64,6 +64,34 @@ func TestNewProductionFirstHopServerRejectsInvalidOptions(t *testing.T) {
 	}
 }
 
+func TestValidateProductionFirstHopListenAddressRejectsNonConcreteOrLoopbackEndpoints(t *testing.T) {
+	for _, address := range []string{
+		":443",
+		"0.0.0.0:0",
+		"0.0.0.0:http",
+		"0.0.0.0:+443",
+		"0.0.0.0:65536",
+		"127.0.0.1:443",
+		"[::1]:443",
+		"localhost:443",
+		"localhost.:443",
+		"localhost..:443",
+	} {
+		t.Run(address, func(t *testing.T) {
+			if err := ValidateProductionFirstHopListenAddress(address); err == nil {
+				t.Fatalf("ValidateProductionFirstHopListenAddress(%q) accepted unsafe endpoint", address)
+			}
+		})
+	}
+	for _, address := range []string{"0.0.0.0:443", "[::]:443", "192.0.2.10:8443"} {
+		t.Run("valid "+address, func(t *testing.T) {
+			if err := ValidateProductionFirstHopListenAddress(address); err != nil {
+				t.Fatalf("ValidateProductionFirstHopListenAddress(%q) error = %v", address, err)
+			}
+		})
+	}
+}
+
 func TestNewProductionFirstHopServerBuildsBoundedOwnedServer(t *testing.T) {
 	options := newProductionFirstHopTestOptions(t)
 	server, err := NewProductionFirstHopServer(options)

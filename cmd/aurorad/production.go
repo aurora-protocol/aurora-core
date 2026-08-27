@@ -123,11 +123,13 @@ func runProductionService(service *server.ProductionFirstHopServer, caches []io.
 func parseProductionConfig(args []string, stderr io.Writer) (productionConfig, error) {
 	configPath, hasConfigFile, err := productionArgumentsFilePath("server", args)
 	if err != nil {
+		fmt.Fprintln(stderr, err)
 		return productionConfig{}, err
 	}
 	if hasConfigFile {
 		args, err = readProductionArgumentsFile("server", configPath)
 		if err != nil {
+			fmt.Fprintln(stderr, err)
 			return productionConfig{}, err
 		}
 	}
@@ -183,6 +185,10 @@ func parseProductionConfigArguments(args []string, stderr io.Writer) (production
 	flags.StringVar(&config.dnsUpstream, "dns-upstream", "", "numeric UDP DNS resolver address")
 	flags.BoolVar(&config.allowPrivateExit, "allow-private-exit", false, "allow private destination ranges")
 	flags.Uint64Var(&config.maxTemplateFutureSkew, "max-template-future-skew", 120, "maximum future template validity skew in seconds")
+	if err := rejectDuplicateProductionFlags("server", flags, args); err != nil {
+		fmt.Fprintln(stderr, err)
+		return productionConfig{}, err
+	}
 	if err := flags.Parse(args); err != nil {
 		return productionConfig{}, err
 	}
@@ -203,6 +209,39 @@ func setProductionArgumentsFileUsage(flags *flag.FlagSet) {
 		fmt.Fprintln(flags.Output(), "  --config path")
 		fmt.Fprintln(flags.Output(), "    owner-only JSON argument file; cannot be combined with command-line options")
 	}
+}
+
+func rejectDuplicateProductionFlags(component string, flags *flag.FlagSet, args []string) error {
+	seen := make(map[string]struct{})
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		if argument == "--" {
+			break
+		}
+		if len(argument) < 2 || argument[0] != '-' {
+			continue
+		}
+		nameAndValue := strings.TrimPrefix(argument, "-")
+		nameAndValue = strings.TrimPrefix(nameAndValue, "-")
+		name, _, hasValue := strings.Cut(nameAndValue, "=")
+		registered := flags.Lookup(name)
+		if registered == nil {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			return fmt.Errorf("%s: production option %q must not be repeated", component, name)
+		}
+		seen[name] = struct{}{}
+		if !hasValue && !isProductionBooleanFlag(registered) && index+1 < len(args) {
+			index++
+		}
+	}
+	return nil
+}
+
+func isProductionBooleanFlag(flagValue *flag.Flag) bool {
+	boolean, ok := flagValue.Value.(interface{ IsBoolFlag() bool })
+	return ok && boolean.IsBoolFlag()
 }
 
 func productionArgumentsFilePath(component string, args []string) (string, bool, error) {
@@ -245,9 +284,37 @@ func readProductionArgumentsFile(component, path string) ([]string, error) {
 		Arguments []string `json:"arguments"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&file); err != nil {
+	opening, err := decoder.Token()
+	if err != nil {
 		return nil, fmt.Errorf("%s: decode production configuration file: %w", component, err)
+	}
+	if delimiter, ok := opening.(json.Delim); !ok || delimiter != '{' {
+		return nil, fmt.Errorf("%s: decode production configuration file: top-level JSON object is required", component)
+	}
+	seenArguments := false
+	for decoder.More() {
+		fieldToken, err := decoder.Token()
+		if err != nil {
+			return nil, fmt.Errorf("%s: decode production configuration file: %w", component, err)
+		}
+		field, ok := fieldToken.(string)
+		if !ok || field != "arguments" {
+			return nil, fmt.Errorf("%s: decode production configuration file: unknown field %q", component, field)
+		}
+		if seenArguments {
+			return nil, fmt.Errorf("%s: decode production configuration file: duplicate arguments field", component)
+		}
+		seenArguments = true
+		if err := decoder.Decode(&file.Arguments); err != nil {
+			return nil, fmt.Errorf("%s: decode production configuration file: %w", component, err)
+		}
+	}
+	closing, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("%s: decode production configuration file: %w", component, err)
+	}
+	if delimiter, ok := closing.(json.Delim); !ok || delimiter != '}' {
+		return nil, fmt.Errorf("%s: decode production configuration file: top-level JSON object is incomplete", component)
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		if err == nil {
@@ -308,8 +375,8 @@ func (c productionConfig) validate() error {
 	if _, err := url.ParseRequestURI(c.coverOriginURL); err != nil {
 		return fmt.Errorf("server: cover origin URL is invalid: %w", err)
 	}
-	if _, _, err := net.SplitHostPort(c.listenAddress); err != nil {
-		return fmt.Errorf("server: listen address is invalid: %w", err)
+	if err := server.ValidateProductionFirstHopListenAddress(c.listenAddress); err != nil {
+		return err
 	}
 	if err := relay.ValidateSocketEgressLimits(c.egressLimits); err != nil {
 		return fmt.Errorf("server: egress limits: %w", err)
@@ -321,6 +388,9 @@ func (c productionConfig) validate() error {
 }
 
 func newProductionService(config productionConfig) (*server.ProductionFirstHopServer, []io.Closer, error) {
+	if err := config.validate(); err != nil {
+		return nil, nil, err
+	}
 	config.egressLimits.ResolvedTTLSeconds = uint32(config.egressResolvedTTL)
 	config.exitRateLimit.MaxFlowOpens = uint32(config.egressMaxFlowOpens)
 	dnsResolver, err := relay.NewUDPDNSMessageResolver(config.dnsUpstream)
@@ -707,18 +777,29 @@ func serveProduction(ctx context.Context, service *server.ProductionFirstHopServ
 	if service == nil || listener == nil {
 		return fmt.Errorf("server: production service and listener are required")
 	}
+	if ctx.Err() != nil {
+		return shutdownProductionService(service)
+	}
 	serveResult := make(chan error, 1)
 	go func() { serveResult <- service.Serve(listener) }()
 	select {
-	case err := <-serveResult:
-		return err
+	case serveErr := <-serveResult:
+		shutdownErr := shutdownProductionService(service)
+		return errors.Join(serveErr, shutdownErr)
 	case <-ctx.Done():
-		shutdownContext, cancel := context.WithTimeout(context.Background(), productionShutdownTimeout)
-		defer cancel()
-		shutdownErr := service.Shutdown(shutdownContext)
+		shutdownErr := shutdownProductionService(service)
 		serveErr := <-serveResult
 		return errors.Join(shutdownErr, serveErr)
 	}
+}
+
+func shutdownProductionService(service *server.ProductionFirstHopServer) error {
+	if service == nil {
+		return fmt.Errorf("server: production service is required for shutdown")
+	}
+	shutdownContext, cancel := context.WithTimeout(context.Background(), productionShutdownTimeout)
+	defer cancel()
+	return service.Shutdown(shutdownContext)
 }
 
 func zeroProductionBytes(bytes []byte) {

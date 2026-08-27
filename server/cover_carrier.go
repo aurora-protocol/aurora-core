@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -17,14 +18,10 @@ import (
 // CarrierType identifies the cover-carrier message kind multiplexed over the
 // single application/octet-stream cover surface (DefaultPacketExchangePath).
 //
-// Issuance shares the same cover-neutral carrier as packet exchange. This
-// implements the Section 27.2 "cover-issuance" transport: there is no
-// distinguishable public issuer or health path on the Aurora wire. An
-// adversarial probe that does not carry a well-formed carrier message falls
-// through to byte-identical cover-origin behaviour, exactly like an invalid
-// packet batch. A response is only produced for a holder of the matching
-// carrier payload (e.g. a valid encrypted packet batch or a parseable issuance
-// message).
+// This fixed type-byte carrier is the lab/readiness native-adapter surface. It
+// is not, by itself, a production cover-issuance admission mechanism: an
+// internet-facing deployment must place it behind a verified cover-slot gate.
+// Malformed messages always fall through to byte-identical cover behaviour.
 type CarrierType = carrier.Type
 
 const (
@@ -61,7 +58,10 @@ const (
 // IssuerCarrier is the minimal issuer capability the cover carrier forwards to.
 // The relay carries issuance over its cover surface and delegates the actual
 // admission logic to the issuer trust domain; it never reimplements it. Request
-// slices are borrowed only for the duration of each method call.
+// slices are borrowed only for the duration of each method call. SpendToken
+// implementations must return an error matching issuerd.ErrTokenAlreadySpent
+// only after fully authenticating a proof and atomically finding its spent key;
+// every other failure remains cover-neutral.
 type IssuerCarrier interface {
 	IssuerMetadata() (encoded []byte, hash []byte, err error)
 	IssueBlindRSA(tokenNonce, redemptionContextHash []byte, expiryUnix uint64) (admissionProof []byte, err error)
@@ -142,16 +142,28 @@ func DecodeCarrierMetadataResponse(payload []byte) (encoded, hash []byte, err er
 // malformed body, unknown type, or downstream failure maps to cover-neutral
 // behaviour so the surface is indistinguishable from an ordinary origin.
 func serveCoverCarrier(w http.ResponseWriter, r *http.Request, origin relay.Origin, coverOrigin http.Handler, exchanger PacketExchanger, issuer IssuerCarrier) {
+	if r.Context().Err() != nil {
+		serveCoverFailure(w, r, origin, coverOrigin)
+		return
+	}
 	carrierType, payload, err := readCarrierRequest(r.Body)
 	if err != nil {
 		serveCoverFailure(w, r, origin, coverOrigin)
 		return
 	}
 	defer zeroCarrierPayload(payload)
+	if r.Context().Err() != nil {
+		serveCoverFailure(w, r, origin, coverOrigin)
+		return
+	}
 	switch carrierType {
 	case CarrierPacketBatch:
 		serveCarrierPacketBatch(w, r, origin, coverOrigin, exchanger, payload)
 	case CarrierIssuerMetadataReq:
+		if len(payload) != 0 {
+			serveCoverFailure(w, r, origin, coverOrigin)
+			return
+		}
 		serveCarrierIssuerMetadata(w, r, origin, coverOrigin, issuer)
 	case CarrierBlindRSAIssueReq:
 		serveCarrierBlindRSAIssue(w, r, origin, coverOrigin, issuer, payload)
@@ -264,9 +276,14 @@ func serveCarrierTokenSpend(w http.ResponseWriter, r *http.Request, origin relay
 	}
 	spentKey, err := issuer.SpendToken(payload)
 	if err != nil {
-		// A decodeable proof that fails to spend is a replay (already spent).
-		// Report it in-band; only a holder of a valid proof can reach here.
-		writeCarrier(w, CarrierTokenSpendConflict, nil)
+		// Only the authenticated replay-cache result is safe to expose in-band.
+		// Decode, signature, policy, expiry, and storage failures remain cover-
+		// neutral so malformed probes cannot reach a typed carrier response.
+		if errors.Is(err, issuerd.ErrTokenAlreadySpent) {
+			writeCarrier(w, CarrierTokenSpendConflict, nil)
+			return
+		}
+		serveCoverFailure(w, r, origin, coverOrigin)
 		return
 	}
 	defer zeroCarrierPayload(spentKey)
@@ -281,10 +298,6 @@ func doCarrierExchangeHTTP(client *http.Client, url string, reqType CarrierType,
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCarrierBodyBytes+1))
-	if err != nil {
-		return 0, nil, err
-	}
 	if resp.StatusCode != http.StatusOK {
 		return 0, nil, fmt.Errorf("server: carrier status %d", resp.StatusCode)
 	}
@@ -292,7 +305,28 @@ func doCarrierExchangeHTTP(client *http.Client, url string, reqType CarrierType,
 	if err != nil || mediaType != "application/octet-stream" {
 		return 0, nil, fmt.Errorf("server: unexpected carrier content-type %q", resp.Header.Get("Content-Type"))
 	}
-	return DecodeCarrier(body)
+	if resp.ContentLength > int64(maxCarrierBodyBytes) {
+		return 0, nil, fmt.Errorf("server: carrier response exceeds limit")
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxCarrierBodyBytes)+1))
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(body) > maxCarrierBodyBytes {
+		return 0, nil, fmt.Errorf("server: carrier response exceeds limit")
+	}
+	responseType, responsePayload, err := DecodeCarrier(body)
+	if err != nil {
+		return 0, nil, err
+	}
+	maximumPayloadBytes := maxCarrierControlPayloadBytes
+	if responseType == CarrierPacketBatch {
+		maximumPayloadBytes = maxPacketBatchBytes
+	}
+	if len(responsePayload) > maximumPayloadBytes {
+		return 0, nil, fmt.Errorf("server: carrier response payload exceeds limit")
+	}
+	return responseType, responsePayload, nil
 }
 
 // doCarrierExchangeHandler exchanges a carrier message against an in-process

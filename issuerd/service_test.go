@@ -9,6 +9,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha512"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 
@@ -116,8 +117,8 @@ func TestServicePublishesIssuesVerifiesSpendsAndRedacts(t *testing.T) {
 	if len(spentKey) != 48 {
 		t.Fatalf("spent key length = %d, want 48", len(spentKey))
 	}
-	if _, err := service.SpendToken(proof); err == nil {
-		t.Fatalf("second token spend was accepted")
+	if _, err := service.SpendToken(proof); !errors.Is(err, ErrTokenAlreadySpent) {
+		t.Fatalf("second token spend error = %v, want ErrTokenAlreadySpent", err)
 	}
 
 	request := VOPRFVerifierRequest{

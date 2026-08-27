@@ -69,13 +69,11 @@ func NewHarnessHandler(opts HarnessOptions) (http.Handler, error) {
 	}), nil
 }
 
-// NewHandler builds the public-facing relay handler. The public Aurora wire
-// exposes no distinguishable issuer, health, or authentication path: issuance
-// and packet exchange are multiplexed over a single cover carrier surface
-// (DefaultPacketExchangePath) that falls through to byte-identical cover-origin
-// behaviour for any request that is not a well-formed carrier message. This
-// satisfies the cover-neutrality invariants (Section 8) and carries issuance as
-// Section 27.2 cover-issuance rather than over a fixed public path.
+// NewHandler builds the lab/readiness carrier handler used by native adapters
+// and interoperability checks. It is not the production first-hop listener and
+// MUST NOT be exposed as production cover issuance unless a gateway-owned,
+// verified cover-slot admission predicate runs before this handler. Requests
+// that fail carrier validation fall through to byte-identical cover behaviour.
 func NewHandler(opts Options) http.Handler {
 	mux := http.NewServeMux()
 	issuer := serviceIssuerCarrier{service: opts.Issuer}
@@ -126,8 +124,10 @@ func RunReadinessHarness(nowUnix uint64) (ReadinessReport, error) {
 	report.CoverNeutralHealthPath = legacyHealth.status == cover.status && bytes.Equal(legacyHealth.body, cover.body)
 	report.require(report.CoverNeutralHealthPath, "legacy health path is distinguishable from cover")
 
-	// Issuance is reachable only over the cover carrier (Section 27.2
-	// cover-issuance), never over a fixed public path.
+	// The readiness adapter exercises issuance only over its opaque diagnostic
+	// carrier, never over a fixed legacy issuer path. This checks adapter
+	// interoperability and probe fallback; it is not evidence that the carrier
+	// supplies the verified cover-slot gate required for production issuance.
 	metaType, metaPayload, _ := doCarrierExchangeHandler(handler, CarrierIssuerMetadataReq, nil)
 	if metaType == CarrierIssuerMetadataResp {
 		if encoded, hash, decodeErr := DecodeCarrierMetadataResponse(metaPayload); decodeErr == nil && len(encoded) > 0 && len(hash) == carrierMetadataHashLen {

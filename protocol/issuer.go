@@ -9,6 +9,15 @@ import (
 	"github.com/aurora-protocol/aurora-core/wire"
 )
 
+const (
+	minimumEncodedIssuerTokenKeyBytes       = 1 + 32 + 1 + 2 + 8 + 8 + 1
+	minimumEncodedOriginInfoPolicyBytes     = 1 + 2 + 1 + 8 + 8
+	minimumEncodedRelayBucketScopeBytes     = 16 + 16 + 1 + 8 + 8
+	minimumEncodedAuxiliaryBindingBytes     = 1 + 1 + 2 + 1
+	minimumEncodedVerifierServiceBytes      = 16 + 1 + 1 + minimumEncodedRoutingRecordBytes + 1 + 1 + 2 + 1 + 1 + 1 + 8 + 8 + 1
+	minimumEncodedAllowedRelayBucketIDBytes = 16
+)
+
 type IssuerTokenKeyRecord struct {
 	ProofType            uint64
 	TokenKeyID           []byte
@@ -257,7 +266,16 @@ func DecodeIssuerVerifierServiceRecord(r *wire.Reader) IssuerVerifierServiceReco
 		ServiceAuthKey:    DecodePublicKeyRecord(r),
 		AllowedProofTypes: r.ReadVarintVector(),
 	}
-	n := r.ReadVectorCount("allowed relay bucket")
+	n := readVectorCountWithMinimum(r, "allowed relay bucket", minimumEncodedAllowedRelayBucketIDBytes)
+	if r.Err() != nil {
+		return out
+	}
+	// Preserve the decoder's historical nil representation for an empty
+	// allowlist while still reserving one bounded allocation for non-empty
+	// vectors.
+	if n > 0 {
+		out.AllowedRelayBucketIDs = make([][]byte, 0, n)
+	}
 	for i := uint64(0); i < n; i++ {
 		out.AllowedRelayBucketIDs = append(out.AllowedRelayBucketIDs, r.ReadOpaqueFixed(16))
 	}
@@ -370,27 +388,42 @@ func DecodeIssuerMetadata(r *wire.Reader) IssuerMetadata {
 		IssuerName:          r.ReadOpaque16(),
 		SupportedProofTypes: r.ReadVarintVector(),
 	}
-	tokenKeys := r.ReadVectorCount("issuer token key")
+	tokenKeys := readVectorCountWithMinimum(r, "issuer token key", minimumEncodedIssuerTokenKeyBytes)
+	if r.Err() != nil {
+		return out
+	}
 	out.TokenKeyMappings = make([]IssuerTokenKeyRecord, 0, tokenKeys)
 	for i := uint64(0); i < tokenKeys; i++ {
 		out.TokenKeyMappings = append(out.TokenKeyMappings, DecodeIssuerTokenKeyRecord(r))
 	}
-	originPolicies := r.ReadVectorCount("origin policy")
+	originPolicies := readVectorCountWithMinimum(r, "origin policy", minimumEncodedOriginInfoPolicyBytes)
+	if r.Err() != nil {
+		return out
+	}
 	out.OriginInfoPolicies = make([]OriginInfoPolicy, 0, originPolicies)
 	for i := uint64(0); i < originPolicies; i++ {
 		out.OriginInfoPolicies = append(out.OriginInfoPolicies, DecodeOriginInfoPolicy(r))
 	}
-	relayScopes := r.ReadVectorCount("relay bucket scope")
+	relayScopes := readVectorCountWithMinimum(r, "relay bucket scope", minimumEncodedRelayBucketScopeBytes)
+	if r.Err() != nil {
+		return out
+	}
 	out.RelayBucketScopes = make([]RelayBucketScope, 0, relayScopes)
 	for i := uint64(0); i < relayScopes; i++ {
 		out.RelayBucketScopes = append(out.RelayBucketScopes, DecodeRelayBucketScope(r))
 	}
-	bindingPolicies := r.ReadVectorCount("auxiliary binding policy")
+	bindingPolicies := readVectorCountWithMinimum(r, "auxiliary binding policy", minimumEncodedAuxiliaryBindingBytes)
+	if r.Err() != nil {
+		return out
+	}
 	out.AuxiliaryBindingPolicies = make([]AuxiliaryBindingPolicy, 0, bindingPolicies)
 	for i := uint64(0); i < bindingPolicies; i++ {
 		out.AuxiliaryBindingPolicies = append(out.AuxiliaryBindingPolicies, DecodeAuxiliaryBindingPolicy(r))
 	}
-	services := r.ReadVectorCount("verifier service")
+	services := readVectorCountWithMinimum(r, "verifier service", minimumEncodedVerifierServiceBytes)
+	if r.Err() != nil {
+		return out
+	}
 	out.VerifierServices = make([]IssuerVerifierServiceRecord, 0, services)
 	for i := uint64(0); i < services; i++ {
 		out.VerifierServices = append(out.VerifierServices, DecodeIssuerVerifierServiceRecord(r))

@@ -29,9 +29,10 @@ install -o aurora -g aurora -m 0600 deploy/systemd/issuer.json.example /etc/auro
 
 Each file is one JSON object with an `arguments` array. It is the sole
 argument source: `--config` cannot be combined with command-line settings,
-cannot recursively select another file, rejects unknown JSON fields, and is
-opened as a regular owner-only file. It contains file paths and operational
-settings, not private key contents.
+cannot recursively select another file, rejects unknown or duplicated JSON
+fields and repeated command options, and is opened as a regular owner-only
+file. It contains file paths and operational settings, not private key
+contents.
 
 All private key, access-hint, and replay-state inputs must be regular files
 or directories owned by `aurora` with mode `0600` or `0700` as appropriate.

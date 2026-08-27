@@ -19,6 +19,19 @@ func TestDecodeExtensionsRejectsCountExceedingRemainingWithoutSyntheticEntries(t
 	}
 }
 
+func TestDecodeExtensionsRejectsCountWhoseElementsCannotFitBeforeAllocation(t *testing.T) {
+	// Two extensions pass the generic count <= remaining-bytes check, but the
+	// five bytes after the count can encode only one minimal Extension.
+	r := wire.NewReader([]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x00})
+	extensions := DecodeExtensions(r)
+	if r.Err() == nil || !strings.Contains(r.Err().Error(), "cannot fit") {
+		t.Fatalf("impossible extension vector error = %v, want fit rejection", r.Err())
+	}
+	if extensions != nil {
+		t.Fatalf("decoder returned %d extension entries for an impossible vector", len(extensions))
+	}
+}
+
 func TestDecodeFrameBlockRejectsCountExceedingRemainingAtVectorBoundary(t *testing.T) {
 	_, err := DecodeFrameBlock([]byte{0x02})
 	if err == nil {

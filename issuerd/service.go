@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -22,6 +23,10 @@ import (
 	"github.com/aurora-protocol/aurora-core/registry"
 	auroratrust "github.com/aurora-protocol/aurora-core/trust"
 )
+
+// ErrTokenAlreadySpent is returned only after a token has been fully decoded,
+// authenticated, and found in the atomic replay cache.
+var ErrTokenAlreadySpent = errors.New("issuerd: token already spent")
 
 type Service struct {
 	nowUnix                    uint64
@@ -447,7 +452,7 @@ func (s *Service) SpendToken(proof protocol.AdmissionProof) ([]byte, error) {
 		return nil, fmt.Errorf("issuerd: spent-token store failed: %w", err)
 	}
 	if !inserted {
-		return nil, fmt.Errorf("issuerd: token already spent")
+		return nil, ErrTokenAlreadySpent
 	}
 	return spentKey, nil
 }

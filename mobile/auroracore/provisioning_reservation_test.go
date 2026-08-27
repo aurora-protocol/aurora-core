@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"testing"
 	"time"
@@ -158,6 +159,14 @@ func TestNativeProvisioningReservationRejectsMalformedEnvelope(t *testing.T) {
 		if status, payload := dispatch(opReserveNativeProvisioning, input, uint64(time.Now().Unix())); status != statusError || len(payload) != 0 {
 			t.Fatalf("malformed reservation input status=%d payload=%x", status, payload)
 		}
+	}
+}
+
+func TestNativeProvisioningReservationRejectsUnrepresentableSourceLength(t *testing.T) {
+	request := make([]byte, nativeProvisioningReservationSourceLengthBytes+nativeProvisioningReservationCountBytes)
+	binary.BigEndian.PutUint32(request, ^uint32(0))
+	if _, _, err := decodeNativeProvisioningReservationRequest(request); err == nil {
+		t.Fatal("reservation request accepted an unrepresentable source length")
 	}
 }
 

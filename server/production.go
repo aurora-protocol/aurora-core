@@ -192,10 +192,10 @@ func validateProductionListenAddress(address string) error {
 		return fmt.Errorf("server: production first-hop listen address is invalid")
 	}
 	port, err := strconv.ParseUint(portText, 10, 16)
-	if err != nil || port == 0 {
+	if err != nil || port == 0 || !isDecimalProductionPort(portText) {
 		return fmt.Errorf("server: production first-hop listen port is invalid")
 	}
-	if strings.EqualFold(host, "localhost") {
+	if strings.EqualFold(strings.TrimRight(host, "."), "localhost") {
 		return fmt.Errorf("server: production first-hop loopback listen address is forbidden")
 	}
 	ipHost := strings.Split(host, "%")[0]
@@ -203,6 +203,24 @@ func validateProductionListenAddress(address string) error {
 		return fmt.Errorf("server: production first-hop loopback listen address is forbidden")
 	}
 	return nil
+}
+
+func isDecimalProductionPort(port string) bool {
+	if port == "" {
+		return false
+	}
+	for _, value := range port {
+		if value < '0' || value > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateProductionFirstHopListenAddress validates the public socket address
+// before callers load private production dependencies or create durable state.
+func ValidateProductionFirstHopListenAddress(address string) error {
+	return validateProductionListenAddress(address)
 }
 
 type productionFirstHopLimiter struct {

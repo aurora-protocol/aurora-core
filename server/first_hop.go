@@ -29,6 +29,10 @@ const (
 	defaultFirstHopPreHeaderTimeout   = 5 * time.Second
 	defaultFirstHopReadHeaderTimeout  = 5 * time.Second
 	defaultFirstHopIdleTimeout        = 2 * time.Minute
+	defaultFirstHopMaxHeaderBytes     = 64 << 10
+	defaultFirstHopHTTP2PingInterval  = 30 * time.Second
+	defaultFirstHopHTTP2PingTimeout   = 15 * time.Second
+	defaultFirstHopHTTP2WriteTimeout  = 30 * time.Second
 	minimumFirstHopWriteTimeout       = 5 * time.Second
 	maximumFirstHopPostHeaderTimeout  = 30 * time.Second
 	maximumFirstHopRecordBodyBytes    = 0xffffff
@@ -344,9 +348,15 @@ func NewFirstHopHTTPServer(address string, handler *FirstHopHandler, tlsConfig *
 		ReadHeaderTimeout: defaultFirstHopReadHeaderTimeout,
 		IdleTimeout:       defaultFirstHopIdleTimeout,
 		WriteTimeout:      writeTimeout,
-		MaxHeaderBytes:    1 << 20,
+		MaxHeaderBytes:    defaultFirstHopMaxHeaderBytes,
 		ConnContext:       handler.ConnContext,
-		Protocols:         protocols,
+		HTTP2: &http.HTTP2Config{
+			MaxConcurrentStreams: firstHopHTTP2MaxConcurrentStreams,
+			SendPingTimeout:      defaultFirstHopHTTP2PingInterval,
+			PingTimeout:          defaultFirstHopHTTP2PingTimeout,
+			WriteByteTimeout:     defaultFirstHopHTTP2WriteTimeout,
+		},
+		Protocols: protocols,
 	}
 	server.RegisterOnShutdown(handler.shutdown)
 	if err := http2.ConfigureServer(server, &http2.Server{MaxConcurrentStreams: firstHopHTTP2MaxConcurrentStreams}); err != nil {

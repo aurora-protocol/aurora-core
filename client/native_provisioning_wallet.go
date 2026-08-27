@@ -234,7 +234,7 @@ func ReserveNativeProvisioningWithTrust(encoded []byte, signedSeedTrust NativePr
 		return NativeProvisioningReservation{}, err
 	}
 	defer entry.zero()
-	if alreadyReserved != nil && alreadyReserved(entry.spentHintKey) {
+	if nativeProvisioningAlreadyReserved(alreadyReserved, entry.spentHintKey) {
 		zeroNativeProvisioning(&provisioning)
 		return NativeProvisioningReservation{}, ErrNoUsableNativeProvisioning
 	}
@@ -262,7 +262,7 @@ func (w *NativeProvisioningWallet) Reserve(alreadyReserved func([]byte) bool, no
 		if len(entry.encoded) == 0 {
 			continue
 		}
-		if alreadyReserved != nil && alreadyReserved(entry.spentHintKey) {
+		if nativeProvisioningAlreadyReserved(alreadyReserved, entry.spentHintKey) {
 			entry.zero()
 			continue
 		}
@@ -309,7 +309,7 @@ func (w *NativeProvisioningWallet) BucketStatus(alreadyReserved func([]byte) boo
 			entry.zero()
 			continue
 		}
-		if alreadyReserved != nil && alreadyReserved(entry.spentHintKey) {
+		if nativeProvisioningAlreadyReserved(alreadyReserved, entry.spentHintKey) {
 			entry.zero()
 			continue
 		}
@@ -389,6 +389,15 @@ func (entry *nativeProvisioningWalletEntry) zero() {
 	zeroNativeProvisioningBytes(entry.spentHintKey)
 	zeroNativeProvisioningBytes(entry.relayBucketID)
 	*entry = nativeProvisioningWalletEntry{}
+}
+
+func nativeProvisioningAlreadyReserved(alreadyReserved func([]byte) bool, spentHintKey []byte) bool {
+	if alreadyReserved == nil {
+		return false
+	}
+	key := append([]byte(nil), spentHintKey...)
+	defer zeroNativeProvisioningBytes(key)
+	return alreadyReserved(key)
 }
 
 func zeroNativeProvisioningWalletEntries(entries []nativeProvisioningWalletEntry) {

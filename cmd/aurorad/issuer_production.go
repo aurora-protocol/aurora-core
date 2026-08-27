@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -110,11 +111,13 @@ func runProductionIssuer(issuerRuntime *productionIssuerService, listenAddress s
 func parseProductionIssuerConfig(args []string, stderr io.Writer) (issuerProductionConfig, error) {
 	configPath, hasConfigFile, err := productionArgumentsFilePath("issuer", args)
 	if err != nil {
+		fmt.Fprintln(stderr, err)
 		return issuerProductionConfig{}, err
 	}
 	if hasConfigFile {
 		args, err = readProductionArgumentsFile("issuer", configPath)
 		if err != nil {
+			fmt.Fprintln(stderr, err)
 			return issuerProductionConfig{}, err
 		}
 	}
@@ -136,6 +139,10 @@ func parseProductionIssuerConfigArguments(args []string, stderr io.Writer) (issu
 	flags.StringVar(&config.spentTokenCachePath, "spent-token-cache", "", "durable spent-token cache path")
 	flags.StringVar(&relayBucketID, "relay-bucket-id", "", "16-byte relay bucket ID encoded as hexadecimal")
 	flags.Uint64Var(&config.originInfoPolicyID, "origin-info-policy", 0, "authorized origin-info policy ID")
+	if err := rejectDuplicateProductionFlags("issuer", flags, args); err != nil {
+		fmt.Fprintln(stderr, err)
+		return issuerProductionConfig{}, err
+	}
 	if err := flags.Parse(args); err != nil {
 		return issuerProductionConfig{}, err
 	}
@@ -164,8 +171,8 @@ func (c issuerProductionConfig) validate() error {
 	if err := c.validateRequiredFields(); err != nil {
 		return err
 	}
-	if _, _, err := net.SplitHostPort(c.listenAddress); err != nil {
-		return fmt.Errorf("issuer: listen address is invalid: %w", err)
+	if err := validateProductionIssuerListenAddress(c.listenAddress); err != nil {
+		return err
 	}
 	if len(c.relayBucketID) != 16 {
 		return fmt.Errorf("issuer: relay bucket ID must be 16 bytes")
@@ -174,6 +181,27 @@ func (c issuerProductionConfig) validate() error {
 		return fmt.Errorf("issuer: origin-info policy is required")
 	}
 	return nil
+}
+
+func validateProductionIssuerListenAddress(address string) error {
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil || host == "" || portText == "" {
+		return fmt.Errorf("issuer: listen address is invalid")
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || port == 0 || !isDecimalIssuerPort(portText) {
+		return fmt.Errorf("issuer: listen port is invalid")
+	}
+	return nil
+}
+
+func isDecimalIssuerPort(port string) bool {
+	for _, value := range port {
+		if value < '0' || value > '9' {
+			return false
+		}
+	}
+	return port != ""
 }
 
 func (c issuerProductionConfig) validateRequiredFields() error {
@@ -345,32 +373,51 @@ func serveProductionIssuer(ctx context.Context, runtime *productionIssuerService
 	if listener == nil {
 		return fmt.Errorf("issuer: production service and listener are required")
 	}
+	return serveProductionIssuerHTTPServer(ctx, httpServer, listener)
+}
+
+func serveProductionIssuerHTTPServer(ctx context.Context, httpServer *http.Server, listener net.Listener) error {
+	if ctx == nil || httpServer == nil || listener == nil {
+		return fmt.Errorf("issuer: production HTTP server, context, and listener are required")
+	}
+	if ctx.Err() != nil {
+		return shutdownProductionIssuerHTTPServer(httpServer)
+	}
 	limitedListener := netutil.LimitListener(listener, issuerProductionMaximumConnections)
 	serveResult := make(chan error, 1)
 	go func() { serveResult <- httpServer.ServeTLS(limitedListener, "", "") }()
 	select {
-	case err := <-serveResult:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+	case serveErr := <-serveResult:
+		shutdownErr := shutdownProductionIssuerHTTPServer(httpServer)
+		if errors.Is(serveErr, http.ErrServerClosed) {
+			serveErr = nil
 		}
-		return err
+		return errors.Join(serveErr, shutdownErr)
 	case <-ctx.Done():
-		shutdownContext, cancel := context.WithTimeout(context.Background(), productionShutdownTimeout)
-		defer cancel()
-		shutdownErr := httpServer.Shutdown(shutdownContext)
-		var closeErr error
-		if shutdownErr != nil {
-			closeErr = httpServer.Close()
-			if errors.Is(closeErr, http.ErrServerClosed) {
-				closeErr = nil
-			}
-		}
+		shutdownErr := shutdownProductionIssuerHTTPServer(httpServer)
 		serveErr := <-serveResult
 		if errors.Is(serveErr, http.ErrServerClosed) {
 			serveErr = nil
 		}
-		return errors.Join(shutdownErr, closeErr, serveErr)
+		return errors.Join(shutdownErr, serveErr)
 	}
+}
+
+func shutdownProductionIssuerHTTPServer(httpServer *http.Server) error {
+	if httpServer == nil {
+		return fmt.Errorf("issuer: production HTTP server is required for shutdown")
+	}
+	shutdownContext, cancel := context.WithTimeout(context.Background(), productionShutdownTimeout)
+	defer cancel()
+	shutdownErr := httpServer.Shutdown(shutdownContext)
+	if shutdownErr == nil {
+		return nil
+	}
+	closeErr := httpServer.Close()
+	if errors.Is(closeErr, http.ErrServerClosed) {
+		closeErr = nil
+	}
+	return errors.Join(shutdownErr, closeErr)
 }
 
 func newProductionIssuerHTTPServer(runtime *productionIssuerService) (*http.Server, error) {

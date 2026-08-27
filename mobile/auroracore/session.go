@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -74,6 +75,7 @@ type nativeSession struct {
 	localPackets      chan []byte
 	issuerURL         string
 	issuerCarrierPath string
+	issuerMetadata    []byte
 	request           handshake.ClientProofRequest
 	issuerTimer       *time.Timer
 	duplexActive      bool
@@ -165,6 +167,7 @@ func (r *nativeSessionRegistry) begin(provisioning client.NativeProvisioning) (n
 		localPackets:      make(chan []byte, maximumNativeLocalPacketQueue),
 		issuerURL:         provisioning.IssuerURL,
 		issuerCarrierPath: provisioning.IssuerCarrierPath,
+		issuerMetadata:    append([]byte(nil), provisioning.IssuerMetadata...),
 		request:           request,
 	}
 	r.mu.Lock()
@@ -244,11 +247,15 @@ func (r *nativeSessionRegistry) complete(handle uint64, issuerResponse []byte) e
 		return fmt.Errorf("auroracore: native session is not awaiting issuer completion")
 	}
 	session.completing = true
-	request := cloneNativeProofRequest(session.request)
+	request := session.request
+	session.request = handshake.ClientProofRequest{}
+	issuerMetadata := session.issuerMetadata
+	session.issuerMetadata = nil
 	deferred := session.handshake
 	session.mu.Unlock()
+	defer zeroNativeBytes(issuerMetadata)
 
-	proof, replay, err := r.proofsForIssuerResponse(request, issuerResponse)
+	proof, replay, err := r.proofsForIssuerResponse(request, issuerResponse, issuerMetadata, r.now().UTC())
 	zeroNativeProofRequest(&request)
 	var established *handshake.EstablishedSession
 	var adapter *client.PacketAdapter
@@ -322,7 +329,7 @@ func (r *nativeSessionRegistry) complete(handle uint64, issuerResponse []byte) e
 	return nil
 }
 
-func (r *nativeSessionRegistry) proofsForIssuerResponse(request handshake.ClientProofRequest, issuerResponse []byte) (protocol.AdmissionProof, protocol.ReplayProof, error) {
+func (r *nativeSessionRegistry) proofsForIssuerResponse(request handshake.ClientProofRequest, issuerResponse, issuerMetadata []byte, now time.Time) (protocol.AdmissionProof, protocol.ReplayProof, error) {
 	carrierType, payload, err := server.DecodeCarrier(issuerResponse)
 	if err != nil || carrierType != server.CarrierBlindRSAIssueResp || len(payload) == 0 {
 		return protocol.AdmissionProof{}, protocol.ReplayProof{}, fmt.Errorf("auroracore: invalid native issuer response")
@@ -330,6 +337,34 @@ func (r *nativeSessionRegistry) proofsForIssuerResponse(request handshake.Client
 	proof, err := issuerd.DecodeAdmissionProofBytes(payload)
 	if err != nil {
 		return protocol.AdmissionProof{}, protocol.ReplayProof{}, fmt.Errorf("auroracore: decode admission proof: %w", err)
+	}
+	if now.IsZero() || now.Unix() < 0 {
+		zeroNativeAdmissionProof(&proof)
+		return protocol.AdmissionProof{}, protocol.ReplayProof{}, fmt.Errorf("auroracore: invalid native issuer response time")
+	}
+	nowUnix := uint64(now.Unix())
+	if proof.ExpiryUnix <= nowUnix {
+		zeroNativeAdmissionProof(&proof)
+		return protocol.AdmissionProof{}, protocol.ReplayProof{}, fmt.Errorf("auroracore: native admission proof is expired")
+	}
+	if subtle.ConstantTimeCompare(proof.RedemptionContextHash, request.AdmissionContextHash) != 1 {
+		zeroNativeAdmissionProof(&proof)
+		return protocol.AdmissionProof{}, protocol.ReplayProof{}, fmt.Errorf("auroracore: native admission proof context mismatch")
+	}
+	// Production sessions always retain the issuer metadata from the validated
+	// provisioning bundle. Empty metadata is supported only by injected unit-test
+	// starters that bypass native provisioning validation.
+	if len(issuerMetadata) > 0 {
+		reader := wire.NewReader(issuerMetadata)
+		metadata := protocol.DecodeIssuerMetadata(reader)
+		if reader.Err() != nil || !reader.EOF() {
+			zeroNativeAdmissionProof(&proof)
+			return protocol.AdmissionProof{}, protocol.ReplayProof{}, fmt.Errorf("auroracore: malformed native issuer metadata")
+		}
+		if err := admission.VerifyBlindRSA2048WithIssuerMetadata(proof, metadata, nowUnix); err != nil {
+			zeroNativeAdmissionProof(&proof)
+			return protocol.AdmissionProof{}, protocol.ReplayProof{}, fmt.Errorf("auroracore: verify native admission proof: %w", err)
+		}
 	}
 	redemption, err := admission.TokenRedemptionHash(proof)
 	if err != nil {
@@ -736,6 +771,8 @@ func (s *nativeSession) close() error {
 	s.adapter = nil
 	s.localPackets = nil
 	zeroNativeProofRequest(&s.request)
+	zeroNativeBytes(s.issuerMetadata)
+	s.issuerMetadata = nil
 	s.issuerURL = ""
 	s.issuerCarrierPath = ""
 	s.mu.Unlock()

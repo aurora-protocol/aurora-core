@@ -17,6 +17,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/admission"
 	"github.com/aurora-protocol/aurora-core/client"
 	"github.com/aurora-protocol/aurora-core/handshake"
+	"github.com/aurora-protocol/aurora-core/issuerd"
 	"github.com/aurora-protocol/aurora-core/packet"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
@@ -275,6 +276,122 @@ func TestNativeSessionCompletionOwnsAndDestroysProvisioningSecrets(t *testing.T)
 	}
 	if !errors.Is(application.Err(), session.ErrClosed) {
 		t.Fatalf("closing a completed native session left application active: %v", application.Err())
+	}
+}
+
+func TestNativeSessionRejectsIssuerProofForDifferentHandshake(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	stub := &nativeTestHandshake{}
+	registry := newNativeSessionRegistry(nativeSessionRegistryOptions{
+		now:    func() time.Time { return now },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x67}, 64)),
+		start: func(context.Context, client.NativeProvisioning, time.Time) (nativeSessionHandshake, handshake.ClientProofRequest, error) {
+			return stub, nativeTestProofRequest(now), nil
+		},
+	})
+	work, err := registry.begin(client.NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeIssuerWork(&work)
+	proof := nativeTestAdmissionProof(now, bytes.Repeat([]byte{0xff}, 48))
+	encodedProof, err := protocol.Encode(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeBytes(encodedProof)
+	issuerResponse := server.EncodeCarrier(server.CarrierBlindRSAIssueResp, encodedProof)
+	defer zeroNativeBytes(issuerResponse)
+	if err := registry.complete(work.Handle, issuerResponse); err == nil {
+		t.Fatal("native session accepted an issuer proof bound to a different handshake")
+	}
+	if stub.completedWith(proof) {
+		t.Fatal("context-mismatched issuer proof reached the deferred handshake")
+	}
+	if !stub.closedValue() {
+		t.Fatal("rejecting a context-mismatched issuer proof left the handshake open")
+	}
+}
+
+func TestNativeSessionRejectsExpiredIssuerProof(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	stub := &nativeTestHandshake{}
+	registry := newNativeSessionRegistry(nativeSessionRegistryOptions{
+		now:    func() time.Time { return now },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x69}, 64)),
+		start: func(context.Context, client.NativeProvisioning, time.Time) (nativeSessionHandshake, handshake.ClientProofRequest, error) {
+			return stub, nativeTestProofRequest(now), nil
+		},
+	})
+	work, err := registry.begin(client.NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeIssuerWork(&work)
+	proof := nativeTestAdmissionProof(now, nativeTestProofRequest(now).AdmissionContextHash)
+	proof.ExpiryUnix = uint64(now.Unix())
+	encodedProof, err := protocol.Encode(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeBytes(encodedProof)
+	issuerResponse := server.EncodeCarrier(server.CarrierBlindRSAIssueResp, encodedProof)
+	defer zeroNativeBytes(issuerResponse)
+	if err := registry.complete(work.Handle, issuerResponse); err == nil {
+		t.Fatal("native session accepted an expired issuer proof")
+	}
+	if stub.completedValue() {
+		t.Fatal("expired issuer proof reached the deferred handshake")
+	}
+	if !stub.closedValue() {
+		t.Fatal("rejecting an expired issuer proof left the handshake open")
+	}
+}
+
+func TestNativeSessionVerifiesIssuerProofAgainstProvisionedMetadata(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	fixture := newNativeSessionFixture(t, now)
+	defer fixture.Close(t)
+	stub := &nativeTestHandshake{}
+	registry := newNativeSessionRegistry(nativeSessionRegistryOptions{
+		now:    func() time.Time { return now },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x68}, 64)),
+		start: func(context.Context, client.NativeProvisioning, time.Time) (nativeSessionHandshake, handshake.ClientProofRequest, error) {
+			return stub, nativeTestProofRequest(now), nil
+		},
+	})
+	work, err := registry.begin(fixture.Provisioning(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeIssuerWork(&work)
+	issuerResponse := fixture.Issue(t, work.RequestBody)
+	defer zeroNativeBytes(issuerResponse)
+	carrierType, payload, err := server.DecodeCarrier(issuerResponse)
+	if err != nil || carrierType != server.CarrierBlindRSAIssueResp {
+		t.Fatalf("decode fixture issuer response: type=%d err=%v", carrierType, err)
+	}
+	proof, err := issuerd.DecodeAdmissionProofBytes(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof.TokenAuthenticator[0] ^= 0xff
+	tamperedProof, err := protocol.Encode(proof)
+	zeroNativeAdmissionProof(&proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeBytes(tamperedProof)
+	tamperedResponse := server.EncodeCarrier(server.CarrierBlindRSAIssueResp, tamperedProof)
+	defer zeroNativeBytes(tamperedResponse)
+	if err := registry.complete(work.Handle, tamperedResponse); err == nil {
+		t.Fatal("native session accepted an issuer proof invalid under provisioned metadata")
+	}
+	if stub.completedValue() {
+		t.Fatal("issuer proof invalid under provisioned metadata reached the deferred handshake")
+	}
+	if !stub.closedValue() {
+		t.Fatal("rejecting an invalid issuer proof left the handshake open")
 	}
 }
 
@@ -868,6 +985,12 @@ func (h *nativeTestHandshake) closedValue() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.closed
+}
+
+func (h *nativeTestHandshake) completedValue() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.admission.TokenNonce) != 0
 }
 
 func (h *nativeTestHandshake) completedWith(want protocol.AdmissionProof) bool {

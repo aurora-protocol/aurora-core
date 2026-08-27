@@ -34,7 +34,7 @@ func (r *Reader) take(n int) []byte {
 	if r.err != nil {
 		return nil
 	}
-	if n < 0 || r.off+n > len(r.b) {
+	if n < 0 || r.off < 0 || r.off > len(r.b) || n > len(r.b)-r.off {
 		r.err = fmt.Errorf("wire: short read")
 		return nil
 	}

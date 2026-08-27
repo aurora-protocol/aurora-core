@@ -96,7 +96,8 @@ func NewReverseProxyCoverOriginWithTransport(target *url.URL, transport http.Rou
 	if target.Host == "" {
 		return nil, fmt.Errorf("server: cover origin URL host is required")
 	}
-	proxy := httputil.NewSingleHostReverseProxy(target)
+	ownedTarget := *target
+	proxy := httputil.NewSingleHostReverseProxy(&ownedTarget)
 	if transport != nil {
 		proxy.Transport = transport
 	}

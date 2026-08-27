@@ -1157,8 +1157,11 @@ func TestFirstHopHTTPServerOwnsHardenedTLSConfiguration(t *testing.T) {
 	if server.Protocols == nil || !server.Protocols.HTTP2() || server.Protocols.HTTP1() || server.Protocols.UnencryptedHTTP2() {
 		t.Fatalf("first-hop server protocols are not HTTP/2-only: %v", server.Protocols)
 	}
-	if server.ConnContext == nil || server.ReadHeaderTimeout <= 0 || server.IdleTimeout <= 0 || server.WriteTimeout <= 0 || server.MaxHeaderBytes <= 0 {
+	if server.ConnContext == nil || server.ReadHeaderTimeout <= 0 || server.IdleTimeout <= 0 || server.WriteTimeout <= 0 || server.MaxHeaderBytes != defaultFirstHopMaxHeaderBytes {
 		t.Fatalf("first-hop server bounds are incomplete: %+v", server)
+	}
+	if server.HTTP2 == nil || server.HTTP2.MaxConcurrentStreams != firstHopHTTP2MaxConcurrentStreams || server.HTTP2.SendPingTimeout != defaultFirstHopHTTP2PingInterval || server.HTTP2.PingTimeout != defaultFirstHopHTTP2PingTimeout || server.HTTP2.WriteByteTimeout != defaultFirstHopHTTP2WriteTimeout {
+		t.Fatalf("first-hop HTTP/2 bounds are incomplete: %+v", server.HTTP2)
 	}
 	input.NextProtos = []string{"http/1.1"}
 	if server.TLSConfig.NextProtos[0] != "h2" {

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -856,8 +857,15 @@ func validateNativeHTTPSURL(raw string, requirePath bool) error {
 	if err != nil {
 		return err
 	}
-	if parsed.Scheme != "https" || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.RawPath != "" {
+	if parsed.Scheme != "https" || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.RawPath != "" {
 		return fmt.Errorf("URL must be an HTTPS authority without user info, query, or fragment")
+	}
+	port := parsed.Port()
+	if strings.HasSuffix(parsed.Host, ":") || port != "" {
+		value, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || value == 0 {
+			return fmt.Errorf("URL port must be between 1 and 65535")
+		}
 	}
 	if requirePath {
 		if err := validateNativeCarrierPath(parsed.Path); err != nil {

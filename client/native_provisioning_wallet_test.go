@@ -65,6 +65,63 @@ func TestNativeProvisioningWalletCanonicalRoundTripAndReservation(t *testing.T) 
 	}
 }
 
+func TestNativeProvisioningReservationCallbackCannotMutateWalletKey(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	provisioning := validNativeProvisioning(t, now)
+	defer zeroNativeProvisioning(&provisioning)
+	wantKey := nativeProvisioningSpentHintKey(t, provisioning)
+	defer zeroNativeProvisioningBytes(wantKey)
+	encoded, err := EncodeNativeProvisioningWallet([]NativeProvisioning{provisioning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wallet, err := ParseNativeProvisioningWalletWithTrust(encoded, provisioning.signedSeedTrust, now)
+	zeroNativeProvisioningBytes(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wallet.Zero()
+	reservation, err := wallet.Reserve(func(key []byte) bool {
+		for index := range key {
+			key[index] = 0
+		}
+		return false
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reservation.Zero()
+	if !bytes.Equal(reservation.SpentHintKey, wantKey) {
+		t.Fatal("reservation callback mutated the wallet-owned spent-hint key")
+	}
+}
+
+func TestSingleNativeProvisioningReservationCallbackCannotMutateKey(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	provisioning := validNativeProvisioning(t, now)
+	defer zeroNativeProvisioning(&provisioning)
+	wantKey := nativeProvisioningSpentHintKey(t, provisioning)
+	defer zeroNativeProvisioningBytes(wantKey)
+	encoded, err := EncodeNativeProvisioning(provisioning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeProvisioningBytes(encoded)
+	reservation, err := ReserveNativeProvisioningWithTrust(encoded, provisioning.signedSeedTrust, func(key []byte) bool {
+		for index := range key {
+			key[index] = 0
+		}
+		return false
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reservation.Zero()
+	if !bytes.Equal(reservation.SpentHintKey, wantKey) {
+		t.Fatal("reservation callback mutated the derived spent-hint key")
+	}
+}
+
 func TestNativeProvisioningWalletRejectsDuplicateAndNonCanonicalEntries(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	first := validNativeProvisioning(t, now)

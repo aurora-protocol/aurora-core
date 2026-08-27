@@ -340,3 +340,26 @@ func TestScalarShortReadsSetError(t *testing.T) {
 		})
 	}
 }
+
+func TestOpaqueFixedRejectsOverflowingLength(t *testing.T) {
+	maximumInt := int(^uint(0) >> 1)
+	tests := []struct {
+		name string
+		read func(*Reader, int) []byte
+	}{
+		{"owned", func(r *Reader, n int) []byte { return r.ReadOpaqueFixed(n) }},
+		{"view", func(r *Reader, n int) []byte { return r.ReadOpaqueFixedView(n) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewReader([]byte{0})
+			r.ReadUint8()
+			if value := tt.read(r, maximumInt); value != nil {
+				t.Fatalf("overflowing fixed read = %x, want nil", value)
+			}
+			if err := r.Err(); err == nil {
+				t.Fatal("overflowing fixed read unexpectedly succeeded")
+			}
+		})
+	}
+}

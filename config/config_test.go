@@ -123,3 +123,59 @@ allow_lab_tokens = true
 		t.Fatalf("lab token enablement was not parsed")
 	}
 }
+
+func TestParseRejectsAmbiguousTablesAndKeys(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "unknown empty table",
+			input: "[securty]\n# misspelled security table\n",
+			want:  "unknown table",
+		},
+		{
+			name:  "empty table",
+			input: "[]\n",
+			want:  "unknown table",
+		},
+		{
+			name:  "malformed table",
+			input: "[security\nrequire_pq = true\n",
+			want:  "invalid table header",
+		},
+		{
+			name: "repeated table",
+			input: "[security]\nrequire_pq = true\n" +
+				"[security]\nrequire_split2_for_adversarial = true\n",
+			want: "repeats table",
+		},
+		{
+			name: "repeated key",
+			input: "[security]\nrequire_pq = true\n" +
+				"require_pq = false\n",
+			want: "repeats key",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Parse(strings.NewReader(test.input))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestParseRejectsNilInput(t *testing.T) {
+	if _, err := Parse(nil); err == nil || !strings.Contains(err.Error(), "input is required") {
+		t.Fatalf("Parse(nil) error = %v, want required-input error", err)
+	}
+}
+
+func TestParseDoesNotTreatBracketedExtensionValueAsTableHeader(t *testing.T) {
+	if _, err := Parse(strings.NewReader("[x.future]\npayload = \"opaque]\"\n")); err != nil {
+		t.Fatalf("opaque extension value rejected: %v", err)
+	}
+}

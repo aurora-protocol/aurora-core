@@ -2,6 +2,13 @@ package protocol
 
 import "github.com/aurora-protocol/aurora-core/wire"
 
+const (
+	minimumEncodedSignatureEntryBytes = 16 + 16 + 1 + 1 + 2
+	minimumEncodedRoutingRecordBytes  = 2 + 1 + 1 + 2 + 1 + 8 + 8
+	minimumEncodedRequestClassBytes   = 1 + 1 + 1 + 16 + 1 + 1 + 1 + 1
+	minimumEncodedPreHashBytes        = 48
+)
+
 type SignatureEntry struct {
 	AuthorityID     []byte
 	AuthorityKeyID  []byte
@@ -75,7 +82,10 @@ func DecodeDirectoryConsensus(r *wire.Reader) DirectoryConsensus {
 		BridgeBucketCommitment:  r.ReadPreHash(),
 		IssuerMetadataRoot:      r.ReadPreHash(),
 	}
-	count := r.ReadVectorCount("authority signature")
+	count := readVectorCountWithMinimum(r, "authority signature", minimumEncodedSignatureEntryBytes)
+	if r.Err() != nil {
+		return out
+	}
 	out.AuthoritySignatures = make([]SignatureEntry, 0, count)
 	for i := uint64(0); i < count; i++ {
 		out.AuthoritySignatures = append(out.AuthoritySignatures, DecodeSignatureEntry(r))
@@ -204,12 +214,18 @@ func DecodeRelayDescriptor(r *wire.Reader) RelayDescriptor {
 		SupportedPolicyIDsCommitment: r.ReadPreHash(),
 		SupportedShapeIDsCommitment:  r.ReadPreHash(),
 	}
-	records := r.ReadVectorCount("routing record")
+	records := readVectorCountWithMinimum(r, "routing record", minimumEncodedRoutingRecordBytes)
+	if r.Err() != nil {
+		return out
+	}
 	out.PublicRoutingRecords = make([]RoutingRecord, 0, records)
 	for i := uint64(0); i < records; i++ {
 		out.PublicRoutingRecords = append(out.PublicRoutingRecords, DecodeRoutingRecord(r))
 	}
-	hashes := r.ReadVectorCount("cover-template hash")
+	hashes := readVectorCountWithMinimum(r, "cover-template hash", minimumEncodedPreHashBytes)
+	if r.Err() != nil {
+		return out
+	}
 	out.CoverTemplateInstanceHashes = make([][]byte, 0, hashes)
 	for i := uint64(0); i < hashes; i++ {
 		out.CoverTemplateInstanceHashes = append(out.CoverTemplateInstanceHashes, r.ReadPreHash())
@@ -579,17 +595,26 @@ func DecodeCoverTemplate(r *wire.Reader) CoverTemplate {
 		PublicNameHash:        r.ReadPreHash(),
 		CoverOriginCommitment: r.ReadPreHash(),
 	}
-	classes := r.ReadVectorCount("request class")
+	classes := readVectorCountWithMinimum(r, "request class", minimumEncodedRequestClassBytes)
+	if r.Err() != nil {
+		return out
+	}
 	out.RequestClasses = make([]RequestClass, 0, classes)
 	for i := uint64(0); i < classes; i++ {
 		out.RequestClasses = append(out.RequestClasses, DecodeRequestClass(r))
 	}
-	gatewayCommitments := r.ReadVectorCount("gateway slot commitment")
+	gatewayCommitments := readVectorCountWithMinimum(r, "gateway slot commitment", minimumEncodedPreHashBytes)
+	if r.Err() != nil {
+		return out
+	}
 	out.GatewayOwnedSlotCommitments = make([][]byte, 0, gatewayCommitments)
 	for i := uint64(0); i < gatewayCommitments; i++ {
 		out.GatewayOwnedSlotCommitments = append(out.GatewayOwnedSlotCommitments, r.ReadPreHash())
 	}
-	passThroughCommitments := r.ReadVectorCount("origin pass-through slot commitment")
+	passThroughCommitments := readVectorCountWithMinimum(r, "origin pass-through slot commitment", minimumEncodedPreHashBytes)
+	if r.Err() != nil {
+		return out
+	}
 	out.OriginPassThroughSlotCommitments = make([][]byte, 0, passThroughCommitments)
 	for i := uint64(0); i < passThroughCommitments; i++ {
 		out.OriginPassThroughSlotCommitments = append(out.OriginPassThroughSlotCommitments, r.ReadPreHash())

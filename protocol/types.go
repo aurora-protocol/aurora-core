@@ -12,6 +12,8 @@ type Extension struct {
 	Body          []byte
 }
 
+const minimumEncodedExtensionBytes = 5 // varint type, bool, and opaque24 length
+
 func (x Extension) EncodeTo(e *wire.Encoder) {
 	e.WriteVarint(x.ExtensionType)
 	if x.Critical {
@@ -40,6 +42,10 @@ func DecodeExtension(r *wire.Reader) Extension {
 func DecodeExtensions(r *wire.Reader) []Extension {
 	n := r.ReadVectorCount("extension")
 	if r.Err() != nil {
+		return nil
+	}
+	if n > uint64(r.Remaining()/minimumEncodedExtensionBytes) {
+		r.SetErr(fmt.Errorf("protocol: extension count %d cannot fit in %d remaining bytes", n, r.Remaining()))
 		return nil
 	}
 	out := make([]Extension, 0, n)

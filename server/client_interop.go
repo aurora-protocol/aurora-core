@@ -135,7 +135,7 @@ func probeIsCoverNeutral(client *http.Client, url string, coverBody []byte) bool
 		return false
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(len(coverBody))+1))
 	if err != nil {
 		return false
 	}
@@ -203,7 +203,7 @@ func exerciseInvalidCarrierIsCover(client *http.Client, carrierURL string, cover
 		return false
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(len(coverBody))+1))
 	if err != nil {
 		return false
 	}

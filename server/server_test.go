@@ -88,6 +88,68 @@ func TestHarnessHandlerUsesInjectedSpentTokenCacheForIssuerHTTP(t *testing.T) {
 	}
 }
 
+func TestHarnessHandlerMapsMalformedTokenSpendToCover(t *testing.T) {
+	handler, err := NewHarnessHandler(HarnessOptions{
+		NowUnix:   200,
+		CoverBody: []byte("<html>cover</html>"),
+	})
+	if err != nil {
+		t.Fatalf("NewHarnessHandler failed: %v", err)
+	}
+
+	cover := serveRequest(handler, http.MethodGet, "/ordinary-origin-path", nil)
+	malformed := serveRequestWithContentType(
+		handler,
+		http.MethodPost,
+		DefaultPacketExchangePath,
+		EncodeCarrier(CarrierTokenSpendReq, []byte{0x01}),
+		"application/octet-stream",
+	)
+	if malformed.status != cover.status || !bytes.Equal(malformed.body, cover.body) {
+		t.Fatalf(
+			"malformed token spend was distinguishable: got status=%d body=%q, want status=%d body=%q",
+			malformed.status,
+			malformed.body,
+			cover.status,
+			cover.body,
+		)
+	}
+	if contentType := malformed.header.Get("Content-Type"); contentType == "application/octet-stream" {
+		t.Fatalf("malformed token spend returned carrier content type %q", contentType)
+	}
+}
+
+func TestHarnessHandlerMapsNoncanonicalMetadataRequestToCover(t *testing.T) {
+	handler, err := NewHarnessHandler(HarnessOptions{
+		NowUnix:   200,
+		CoverBody: []byte("<html>cover</html>"),
+	})
+	if err != nil {
+		t.Fatalf("NewHarnessHandler failed: %v", err)
+	}
+
+	cover := serveRequest(handler, http.MethodGet, "/ordinary-origin-path", nil)
+	noncanonical := serveRequestWithContentType(
+		handler,
+		http.MethodPost,
+		DefaultPacketExchangePath,
+		EncodeCarrier(CarrierIssuerMetadataReq, []byte{0x00}),
+		"application/octet-stream",
+	)
+	if noncanonical.status != cover.status || !bytes.Equal(noncanonical.body, cover.body) {
+		t.Fatalf(
+			"noncanonical metadata request was distinguishable: got status=%d body=%q, want status=%d body=%q",
+			noncanonical.status,
+			noncanonical.body,
+			cover.status,
+			cover.body,
+		)
+	}
+	if contentType := noncanonical.header.Get("Content-Type"); contentType == "application/octet-stream" {
+		t.Fatalf("noncanonical metadata request returned carrier content type %q", contentType)
+	}
+}
+
 func TestServeCoverCarrierScrubsIssueRequestInputsAfterDispatch(t *testing.T) {
 	issuer := &retainingCarrierIssuer{}
 	payload, err := EncodeCarrierIssueRequest(repeatedByte(0x41, carrierTokenNonceLen), repeatedByte(0x42, carrierRedemptionContextLen), 250)

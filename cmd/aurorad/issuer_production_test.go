@@ -566,6 +566,13 @@ func TestParseProductionIssuerConfigHelpDescribesArgumentsFile(t *testing.T) {
 	}
 }
 
+func TestProductionIssuerCommandListenAddressIsLoopback(t *testing.T) {
+	address := productionIssuerCommandListenAddress(t)
+	if err := validateProductionIssuerListenAddress(address); err != nil {
+		t.Fatalf("issuer subprocess test address %q is not a literal loopback: %v", address, err)
+	}
+}
+
 func TestProductionIssuerBinaryServesOnlySafeEndpointsAndStopsOnSIGTERM(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("SIGTERM process lifecycle is Linux-specific")
@@ -579,7 +586,7 @@ func TestProductionIssuerBinaryServesOnlySafeEndpointsAndStopsOnSIGTERM(t *testi
 	var command *exec.Cmd
 	var stderr *bytes.Buffer
 	for attempt := 0; attempt < 5; attempt++ {
-		config.listenAddress = productionCommandListenAddress(t)
+		config.listenAddress = productionIssuerCommandListenAddress(t)
 		candidate, candidateStderr, started := startProductionIssuerCommand(t, binary, productionIssuerCommandArguments(config))
 		if started {
 			command = candidate
@@ -682,6 +689,19 @@ func TestNewProductionIssuerServiceRejectsUnsafePrivateState(t *testing.T) {
 		_ = runtime.Close()
 		t.Fatal("group-readable spent-token cache directory accepted")
 	}
+}
+
+func productionIssuerCommandListenAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 }
 
 func newProductionIssuerCommandFixture(t *testing.T) issuerProductionConfig {

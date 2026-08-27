@@ -1,7 +1,6 @@
 [Unit]
-Description=Aurora credential issuer
-Wants=network-online.target
-After=network-online.target
+Description=Aurora private gateway-mTLS credential issuer backend
+After=network.target
 StartLimitIntervalSec=300
 StartLimitBurst=3
 
@@ -27,6 +26,9 @@ ProtectControlGroups=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=127.0.0.0/8
+IPAddressAllow=::1/128
 RestrictNamespaces=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes

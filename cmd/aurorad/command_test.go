@@ -78,7 +78,7 @@ func TestIssuerHelpSucceeds(t *testing.T) {
 	if code := run([]string{"issuer", "--help"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("issuer help code = %d, want 0", code)
 	}
-	for _, want := range []string{"-issuer-metadata", "-blind-rsa-key", "-spent-token-cache"} {
+	for _, want := range []string{"-gateway-client-ca", "-issuer-metadata", "-blind-rsa-key", "-spent-token-cache", "-max-concurrent-issues"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("issuer help missing %q: %s", want, stderr.String())
 		}

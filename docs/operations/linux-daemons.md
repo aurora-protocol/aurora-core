@@ -1,7 +1,7 @@
 # Linux Daemons
 
-`aurorad serve` and `aurorad issuer` are designed to run as independent
-unprivileged system services. The supplied units use the `aurora` account,
+`aurorad serve` and the private `aurorad issuer` backend are designed to run as
+independent unprivileged system services. The supplied units use the `aurora` account,
 dedicated persistent replay-state directories, strict file permissions, a
 controlled restart policy, and process sandboxing. They listen only on
 unprivileged ports, so they require no network-related capabilities.
@@ -60,3 +60,49 @@ journalctl -u aurorad-relay.service -u aurorad-issuer.service --since today
 ```
 
 Do not use the diagnostic `harness` command in either service unit.
+
+## Private issuer backend boundary
+
+`aurorad issuer` is not a public issuer URL and does not complete the
+production cover-slot requirement by itself. It is a loopback-only Blind-RSA
+signing backend for a separately deployed public cover gateway. That gateway
+remains an explicit external integration boundary: it must admit issuance only
+after the verified, nontrivial cover-slot predicate required by Section 35.6.1,
+without exposing a standalone public path, media type, status, or timing
+discriminator for issuer traffic. Public cover-gateway admission and deployment
+are incomplete in this repository.
+
+The backend accepts exactly one operation from an authenticated gateway:
+HTTP/2 over TLS 1.3, `POST /`, `application/octet-stream`, and an exact
+89-byte carrier containing type `0x04` plus its 88-byte Blind-RSA request. A
+successful response is carrier type `0x05`. All routes associated with health,
+metadata, JSON issuance, verifier, spend, packet exchange, or diagnostics are
+absent and receive the same empty redacted failure. Do not point public clients
+at this listener and do not use one of those routes as a readiness probe.
+
+Keep `--listen` on a literal loopback address. Wildcards, hostnames, and
+non-loopback addresses fail before files are loaded or a socket is opened. Set
+`--gateway-client-ca` to a dedicated certificate-signing CA containing only the
+trust roots used for gateway client identities; the gateway must present a
+client-auth certificate chaining to that CA. The server certificate and client
+CA are separate inputs. TLS is fixed to version 1.3 with h2-only ALPN, required
+and verified client certificates, and disabled session tickets. The supplied
+systemd unit additionally denies all process IP traffic except IPv4 and IPv6
+loopback.
+
+`--max-concurrent-issues` bounds global private-key operations for the process
+and must be between 1 and 64; the example uses 16. HTTP connection, stream,
+header, read, write, and idle limits provide separate outer bounds.
+Authenticated HTTP/2 requests that reach the backend handler but fail its
+method, path, media-type, body-size, cancellation, readiness, or signing checks
+receive the same empty redacted response. Client-certificate and ALPN failures
+terminate during TLS negotiation before any application response; malformed
+HTTP/2 framing and server resource-limit failures can likewise terminate before
+the handler. None of these paths exposes key material.
+
+The `auroractl issuer-check`, `issuerd-check`, and `issuerd-http-check`
+commands are deterministic lab/self-test harnesses. Their health and metadata
+checks describe those harnesses, not this production backend and not live
+gateway readiness. Monitor the service process and journal locally; validate
+end-to-end public issuance at the external cover gateway without adding a
+public backend probe route.

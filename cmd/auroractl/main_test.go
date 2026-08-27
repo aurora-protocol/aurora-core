@@ -951,11 +951,14 @@ func TestCapabilitiesCommandReportsMLDSAVerification(t *testing.T) {
 	if !strings.Contains(text, "cover-origin deployment conformance harness") {
 		t.Fatalf("capabilities output missing cover-origin deployment harness:\n%s", text)
 	}
-	if !strings.Contains(text, "issuer service readiness harness") {
+	if !strings.Contains(text, "issuer service lab readiness harness") {
 		t.Fatalf("capabilities output missing issuer service readiness harness:\n%s", text)
 	}
-	if !strings.Contains(text, "issuer HTTP daemon readiness harness") {
+	if !strings.Contains(text, "issuer HTTP lab-handler readiness harness") {
 		t.Fatalf("capabilities output missing issuer HTTP daemon harness:\n%s", text)
+	}
+	if !strings.Contains(text, "loopback-only gateway-mTLS Blind RSA backend") || !strings.Contains(text, "public cover-gateway admission/integration") {
+		t.Fatalf("capabilities output does not preserve the private/public issuer boundary:\n%s", text)
 	}
 	if !strings.Contains(text, "live HTTP/HTTPS server-client interop harness") {
 		t.Fatalf("capabilities output missing HTTP/HTTPS interop harness:\n%s", text)

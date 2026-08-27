@@ -138,6 +138,10 @@ func TestIssuerProductionConfigValidateRejectsEachInvalidField(t *testing.T) {
 			"zero origin info policy",
 			func(c *issuerProductionConfig) { c.originInfoPolicyID = 0 }, // -> line 173-174
 		},
+		{
+			"zero signing concurrency",
+			func(c *issuerProductionConfig) { c.maxConcurrentIssues = 0 },
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -166,11 +170,13 @@ func validIssuerProductionConfigForCoverage() issuerProductionConfig {
 		listenAddress:            "127.0.0.1:443",
 		tlsCertificatePath:       "/tls/cert.pem",
 		tlsPrivateKeyPath:        "/tls/key.pem",
+		gatewayClientCAPath:      "/tls/gateway-client-ca.pem",
 		issuerMetadataPath:       "/issuer/metadata.bin",
 		metadataAuthorityKeyPath: "/issuer/auth.key",
 		blindRSAKeyPath:          "/issuer/blind.key",
 		spentTokenCachePath:      "/issuer/spent.cache",
 		relayBucketID:            make([]byte, 16),
 		originInfoPolicyID:       1,
+		maxConcurrentIssues:      1,
 	}
 }

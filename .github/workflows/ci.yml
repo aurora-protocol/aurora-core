@@ -94,9 +94,9 @@ jobs:
         run: go run ./cmd/auroractl proof-check
       - name: Check issuer operations harness
         run: go run ./cmd/auroractl issuer-check
-      - name: Check issuer service readiness
+      - name: Check issuer service lab harness
         run: go run ./cmd/auroractl issuerd-check
-      - name: Check issuer HTTP daemon readiness
+      - name: Check issuer HTTP lab harness
         run: go run ./cmd/auroractl issuerd-http-check
       - name: Check runnable server harness
         if: matrix.os == 'ubuntu-latest'

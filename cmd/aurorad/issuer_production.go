@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
@@ -39,24 +40,28 @@ const (
 	issuerProductionMaxHeaderBytes            = 8 << 10
 	issuerProductionMaximumConnections        = 128
 	issuerProductionHTTP2MaxConcurrentStreams = 16
+	issuerProductionDefaultConcurrentIssues   = 16
 )
 
 type issuerProductionConfig struct {
 	listenAddress            string
 	tlsCertificatePath       string
 	tlsPrivateKeyPath        string
+	gatewayClientCAPath      string
 	issuerMetadataPath       string
 	metadataAuthorityKeyPath string
 	blindRSAKeyPath          string
 	spentTokenCachePath      string
 	relayBucketID            []byte
 	originInfoPolicyID       uint64
+	maxConcurrentIssues      int
 }
 
 type productionIssuerService struct {
 	service   *issuerd.Service
 	tlsConfig *tls.Config
 	cache     io.Closer
+	maxIssues int
 }
 
 func (s *productionIssuerService) Close() error {
@@ -100,7 +105,7 @@ func runProductionIssuer(issuerRuntime *productionIssuerService, listenAddress s
 	defer listener.Close()
 	ctx, stop := productionSignalContext()
 	defer stop()
-	fmt.Fprintln(stdout, "aurorad production issuer started")
+	fmt.Fprintln(stdout, "aurorad private issuer backend started; public cover gateway admission remains external and incomplete")
 	if err := serveProductionIssuer(ctx, issuerRuntime, listener); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -130,15 +135,17 @@ func parseProductionIssuerConfigArguments(args []string, stderr io.Writer) (issu
 	setProductionArgumentsFileUsage(flags)
 	config := issuerProductionConfig{}
 	var relayBucketID string
-	flags.StringVar(&config.listenAddress, "listen", "", "public TLS listen address")
+	flags.StringVar(&config.listenAddress, "listen", "", "private loopback gateway-backend listen address")
 	flags.StringVar(&config.tlsCertificatePath, "tls-cert", "", "TLS certificate path")
 	flags.StringVar(&config.tlsPrivateKeyPath, "tls-key", "", "TLS private key path")
+	flags.StringVar(&config.gatewayClientCAPath, "gateway-client-ca", "", "dedicated gateway client CA certificate path")
 	flags.StringVar(&config.issuerMetadataPath, "issuer-metadata", "", "signed issuer metadata path")
 	flags.StringVar(&config.metadataAuthorityKeyPath, "metadata-authority-key", "", "issuer metadata authority key path")
 	flags.StringVar(&config.blindRSAKeyPath, "blind-rsa-key", "", "Blind RSA private key path")
 	flags.StringVar(&config.spentTokenCachePath, "spent-token-cache", "", "durable spent-token cache path")
 	flags.StringVar(&relayBucketID, "relay-bucket-id", "", "16-byte relay bucket ID encoded as hexadecimal")
 	flags.Uint64Var(&config.originInfoPolicyID, "origin-info-policy", 0, "authorized origin-info policy ID")
+	flags.IntVar(&config.maxConcurrentIssues, "max-concurrent-issues", issuerProductionDefaultConcurrentIssues, "maximum concurrent Blind RSA signing operations")
 	if err := rejectDuplicateProductionFlags("issuer", flags, args); err != nil {
 		fmt.Fprintln(stderr, err)
 		return issuerProductionConfig{}, err
@@ -180,6 +187,9 @@ func (c issuerProductionConfig) validate() error {
 	if c.originInfoPolicyID == 0 {
 		return fmt.Errorf("issuer: origin-info policy is required")
 	}
+	if c.maxConcurrentIssues <= 0 || c.maxConcurrentIssues > issuerd.MaximumProductionBlindRSABackendConcurrency {
+		return fmt.Errorf("issuer: maximum concurrent issues must be between 1 and %d", issuerd.MaximumProductionBlindRSABackendConcurrency)
+	}
 	return nil
 }
 
@@ -191,6 +201,10 @@ func validateProductionIssuerListenAddress(address string) error {
 	port, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil || port == 0 || !isDecimalIssuerPort(portText) {
 		return fmt.Errorf("issuer: listen port is invalid")
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("issuer: private backend listen address must use a literal loopback IP")
 	}
 	return nil
 }
@@ -209,6 +223,7 @@ func (c issuerProductionConfig) validateRequiredFields() error {
 		{"listen address", c.listenAddress},
 		{"TLS certificate", c.tlsCertificatePath},
 		{"TLS private key", c.tlsPrivateKeyPath},
+		{"gateway client CA", c.gatewayClientCAPath},
 		{"issuer metadata", c.issuerMetadataPath},
 		{"metadata authority key", c.metadataAuthorityKeyPath},
 		{"Blind RSA key", c.blindRSAKeyPath},
@@ -225,6 +240,20 @@ func newProductionIssuerService(config issuerProductionConfig) (*productionIssue
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
+	tlsConfig, err := loadProductionTLSConfig(config.tlsCertificatePath, config.tlsPrivateKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	clientCAs, err := loadProductionGatewayClientCAs(config.gatewayClientCAPath)
+	if err != nil {
+		return nil, err
+	}
+	tlsConfig.MinVersion = tls.VersionTLS13
+	tlsConfig.MaxVersion = tls.VersionTLS13
+	tlsConfig.NextProtos = []string{"h2"}
+	tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+	tlsConfig.ClientCAs = clientCAs
+	tlsConfig.SessionTicketsDisabled = true
 	metadata, err := loadProductionIssuerMetadata(config.issuerMetadataPath)
 	if err != nil {
 		return nil, err
@@ -264,12 +293,49 @@ func newProductionIssuerService(config issuerProductionConfig) (*productionIssue
 	if err != nil {
 		return nil, errors.Join(err, cache.Close())
 	}
-	tlsConfig, err := loadProductionTLSConfig(config.tlsCertificatePath, config.tlsPrivateKeyPath)
+	return &productionIssuerService{
+		service:   service,
+		tlsConfig: tlsConfig,
+		cache:     cache,
+		maxIssues: config.maxConcurrentIssues,
+	}, nil
+}
+
+func loadProductionGatewayClientCAs(path string) (*x509.CertPool, error) {
+	encoded, err := readProductionFile(path)
 	if err != nil {
-		return nil, errors.Join(err, cache.Close())
+		return nil, err
 	}
-	tlsConfig.MinVersion = tls.VersionTLS13
-	return &productionIssuerService{service: service, tlsConfig: tlsConfig, cache: cache}, nil
+	pool := x509.NewCertPool()
+	remaining := encoded
+	count := 0
+	for len(bytes.TrimSpace(remaining)) > 0 {
+		remaining = bytes.TrimSpace(remaining)
+		if !bytes.HasPrefix(remaining, []byte("-----BEGIN CERTIFICATE-----")) {
+			return nil, fmt.Errorf("issuer: gateway client CA must contain only PEM certificates")
+		}
+		block, rest := pem.Decode(remaining)
+		if block == nil {
+			return nil, fmt.Errorf("issuer: gateway client CA must contain only PEM certificates")
+		}
+		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			return nil, fmt.Errorf("issuer: gateway client CA PEM block is invalid")
+		}
+		certificate, parseErr := x509.ParseCertificate(block.Bytes)
+		if parseErr != nil {
+			return nil, fmt.Errorf("issuer: parse gateway client CA: %w", parseErr)
+		}
+		if !certificate.BasicConstraintsValid || !certificate.IsCA || certificate.KeyUsage&x509.KeyUsageCertSign == 0 {
+			return nil, fmt.Errorf("issuer: gateway client CA certificate must be a certificate-signing CA")
+		}
+		pool.AddCert(certificate)
+		count++
+		remaining = rest
+	}
+	if count == 0 {
+		return nil, fmt.Errorf("issuer: gateway client CA certificate is required")
+	}
+	return pool, nil
 }
 
 func loadProductionIssuerMetadata(path string) (protocol.IssuerMetadata, error) {
@@ -421,17 +487,36 @@ func shutdownProductionIssuerHTTPServer(httpServer *http.Server) error {
 }
 
 func newProductionIssuerHTTPServer(runtime *productionIssuerService) (*http.Server, error) {
-	if runtime == nil || runtime.service == nil || runtime.tlsConfig == nil {
+	if runtime == nil || runtime.service == nil || runtime.tlsConfig == nil || runtime.maxIssues <= 0 {
 		return nil, fmt.Errorf("issuer: production service is required")
 	}
+	handler, err := issuerd.NewProductionBlindRSABackendHandler(runtime.service, issuerd.ProductionBlindRSABackendOptions{
+		MaxConcurrentIssues: runtime.maxIssues,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("issuer: production backend handler: %w", err)
+	}
+	tlsConfig, err := ownedProductionIssuerTLSConfig(runtime.tlsConfig)
+	if err != nil {
+		return nil, err
+	}
+	protocols := new(http.Protocols)
+	protocols.SetHTTP2(true)
 	httpServer := &http.Server{
-		Handler:           issuerd.NewHTTPHandler(runtime.service),
-		TLSConfig:         runtime.tlsConfig,
+		Handler:           handler,
+		TLSConfig:         tlsConfig,
 		ReadHeaderTimeout: issuerProductionReadHeaderTimeout,
 		ReadTimeout:       issuerProductionReadTimeout,
 		WriteTimeout:      issuerProductionWriteTimeout,
 		IdleTimeout:       issuerProductionIdleTimeout,
 		MaxHeaderBytes:    issuerProductionMaxHeaderBytes,
+		HTTP2: &http.HTTP2Config{
+			MaxConcurrentStreams: issuerProductionHTTP2MaxConcurrentStreams,
+			SendPingTimeout:      issuerProductionHTTP2ReadIdleTimeout,
+			PingTimeout:          issuerProductionHTTP2PingTimeout,
+			WriteByteTimeout:     issuerProductionWriteTimeout,
+		},
+		Protocols: protocols,
 	}
 	httpServer.ErrorLog = log.New(io.Discard, "", 0)
 	if err := http2.ConfigureServer(httpServer, &http2.Server{
@@ -442,7 +527,98 @@ func newProductionIssuerHTTPServer(runtime *productionIssuerService) (*http.Serv
 	}); err != nil {
 		return nil, fmt.Errorf("issuer: configure HTTP/2 server: %w", err)
 	}
+	httpServer.TLSConfig.NextProtos = []string{"h2"}
 	return httpServer, nil
+}
+
+func ownedProductionIssuerTLSConfig(source *tls.Config) (*tls.Config, error) {
+	if source == nil || len(source.Certificates) == 0 {
+		return nil, fmt.Errorf("issuer: backend TLS certificate is required")
+	}
+	if source.GetCertificate != nil || source.GetConfigForClient != nil || source.GetClientCertificate != nil || source.GetEncryptedClientHelloKeys != nil {
+		return nil, fmt.Errorf("issuer: backend dynamic TLS configuration is forbidden")
+	}
+	if source.VerifyPeerCertificate != nil || source.VerifyConnection != nil {
+		return nil, fmt.Errorf("issuer: backend dynamic TLS verification is forbidden")
+	}
+	if source.Rand != nil || source.Time != nil || source.KeyLogWriter != nil {
+		return nil, fmt.Errorf("issuer: backend custom TLS randomness, time, or key logging is forbidden")
+	}
+	//lint:ignore SA1019 Reject the deprecated map so it cannot bypass owned certificate selection.
+	if source.NameToCertificate != nil {
+		return nil, fmt.Errorf("issuer: backend deprecated TLS certificate map is forbidden")
+	}
+	if source.WrapSession != nil || source.UnwrapSession != nil || source.ClientSessionCache != nil {
+		return nil, fmt.Errorf("issuer: backend TLS session hooks are forbidden")
+	}
+	if source.MinVersion != tls.VersionTLS13 || source.MaxVersion != tls.VersionTLS13 {
+		return nil, fmt.Errorf("issuer: backend TLS version must be exactly TLS 1.3")
+	}
+	if len(source.NextProtos) != 1 || source.NextProtos[0] != "h2" {
+		return nil, fmt.Errorf("issuer: backend TLS ALPN must be h2 only")
+	}
+	if !source.SessionTicketsDisabled {
+		return nil, fmt.Errorf("issuer: backend TLS session tickets must be disabled")
+	}
+	if source.ClientAuth != tls.RequireAndVerifyClientCert || source.ClientCAs == nil || source.ClientCAs.Equal(x509.NewCertPool()) {
+		return nil, fmt.Errorf("issuer: backend requires a dedicated gateway client CA")
+	}
+	certificates := make([]tls.Certificate, len(source.Certificates))
+	for i, certificate := range source.Certificates {
+		if len(certificate.Certificate) == 0 || certificate.PrivateKey == nil {
+			return nil, fmt.Errorf("issuer: backend TLS certificate chain or private key is missing")
+		}
+		certificates[i] = tls.Certificate{
+			Certificate: cloneProductionIssuerByteSlices(certificate.Certificate),
+		}
+		leaf, err := x509.ParseCertificate(certificates[i].Certificate[0])
+		if err != nil {
+			return nil, fmt.Errorf("issuer: parse backend TLS leaf certificate: %w", err)
+		}
+		encodedPrivateKey, err := x509.MarshalPKCS8PrivateKey(certificate.PrivateKey)
+		if err != nil {
+			return nil, fmt.Errorf("issuer: clone backend TLS private key: %w", err)
+		}
+		privateKey, err := x509.ParsePKCS8PrivateKey(encodedPrivateKey)
+		zeroProductionBytes(encodedPrivateKey[:cap(encodedPrivateKey)])
+		if err != nil {
+			return nil, fmt.Errorf("issuer: clone backend TLS private key: %w", err)
+		}
+		signer, ok := privateKey.(crypto.Signer)
+		if !ok {
+			return nil, fmt.Errorf("issuer: backend TLS private key cannot sign")
+		}
+		certificatePublicKey, err := x509.MarshalPKIXPublicKey(leaf.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("issuer: encode backend TLS certificate public key: %w", err)
+		}
+		privatePublicKey, err := x509.MarshalPKIXPublicKey(signer.Public())
+		if err != nil {
+			return nil, fmt.Errorf("issuer: encode backend TLS private key public component: %w", err)
+		}
+		if !bytes.Equal(certificatePublicKey, privatePublicKey) {
+			return nil, fmt.Errorf("issuer: backend TLS private key does not match certificate")
+		}
+		certificates[i].PrivateKey = privateKey
+		certificates[i].Leaf = leaf
+	}
+	return &tls.Config{
+		Certificates:           certificates,
+		MinVersion:             tls.VersionTLS13,
+		MaxVersion:             tls.VersionTLS13,
+		NextProtos:             []string{"h2"},
+		ClientAuth:             tls.RequireAndVerifyClientCert,
+		ClientCAs:              source.ClientCAs.Clone(),
+		SessionTicketsDisabled: true,
+	}, nil
+}
+
+func cloneProductionIssuerByteSlices(values [][]byte) [][]byte {
+	cloned := make([][]byte, len(values))
+	for i, value := range values {
+		cloned[i] = append([]byte(nil), value...)
+	}
+	return cloned
 }
 
 func zeroRSAPrivateKey(privateKey *rsa.PrivateKey) {

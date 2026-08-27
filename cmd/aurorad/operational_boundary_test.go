@@ -22,14 +22,16 @@ func TestIssuerProductionConfigRejectsNonConcretePorts(t *testing.T) {
 	base := issuerProductionConfig{
 		tlsCertificatePath:       "certificate.pem",
 		tlsPrivateKeyPath:        "private-key.pem",
+		gatewayClientCAPath:      "gateway-ca.pem",
 		issuerMetadataPath:       "metadata.bin",
 		metadataAuthorityKeyPath: "authority.bin",
 		blindRSAKeyPath:          "blind-rsa.pem",
 		spentTokenCachePath:      "spent-token.log",
 		relayBucketID:            make([]byte, 16),
 		originInfoPolicyID:       1,
+		maxConcurrentIssues:      1,
 	}
-	for _, address := range []string{":9444", "0.0.0.0:0", "0.0.0.0:http", "0.0.0.0:+9444", "0.0.0.0:65536"} {
+	for _, address := range []string{":9444", "0.0.0.0:9444", "[::]:9444", "192.0.2.1:9444", "localhost:9444", "127.0.0.1:0", "127.0.0.1:http", "127.0.0.1:+9444", "127.0.0.1:65536"} {
 		t.Run(address, func(t *testing.T) {
 			config := base
 			config.listenAddress = address
@@ -41,6 +43,10 @@ func TestIssuerProductionConfigRejectsNonConcretePorts(t *testing.T) {
 	base.listenAddress = "127.0.0.1:9444"
 	if err := base.validate(); err != nil {
 		t.Fatalf("issuer loopback deployment rejected: %v", err)
+	}
+	base.listenAddress = "[::1]:9444"
+	if err := base.validate(); err != nil {
+		t.Fatalf("issuer IPv6 loopback deployment rejected: %v", err)
 	}
 }
 

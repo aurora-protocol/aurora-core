@@ -9,7 +9,7 @@ import (
 )
 
 func TestRetentionFileReplayCacheRejectsSymlinkEntries(t *testing.T) {
-	for _, name := range []string{"replay.log", "replay.log.lock"} {
+	for _, name := range []string{"replay.log", "replay.log.lock", "replay.log.generation"} {
 		t.Run(name, func(t *testing.T) {
 			directoryPath := t.TempDir()
 			target := filepath.Join(directoryPath, "target")

@@ -22,12 +22,8 @@ package admission
 //   - replay_cache_retention.go:104 RetentionFileReplayCache.Has   c == nil -> false
 //   - replay_cache_retention.go:117 RetentionFileReplayCache.Close c == nil -> nil
 //
-// NOTE: the admission package hosts the known flake TestRetentionFileReplayCache-
-// MatchesFullReload (a retention full-reload comparison that races on timing).
-// These nil-receiver guards are a SEPARATE code path — each returns at the first
-// statement without touching files, locks, or retention state — so there is no
-// overlap with that test. This test file adds only TestXxx entry points and uses
-// existing exported symbols, so it adds no U1000 surface.
+// This test file adds only TestXxx entry points and uses existing exported
+// symbols, so it adds no U1000 surface.
 
 import (
 	"strings"

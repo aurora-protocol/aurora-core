@@ -2,6 +2,7 @@ package admission
 
 import (
 	"bufio"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -26,9 +27,13 @@ type RetentionFileReplayCache struct {
 	// loaded identifies the data file region already parsed into seen. Records
 	// are only ever appended between compactions, so a reload parses just the
 	// appended tail; a compaction replaces the file and forces a full reload.
-	loadedInfo  os.FileInfo
-	loadedSize  int64
-	minDeadline uint64
+	loadedInfo os.FileInfo
+	loadedSize int64
+	// loadedGeneration is advanced before every in-process compaction. It
+	// closes an inode-reuse ABA hole on filesystems that can assign a replaced
+	// cache file the same identity as an older file after its last handle closes.
+	loadedGeneration uint64
+	minDeadline      uint64
 }
 
 func NewRetentionFileReplayCacheAt(directory *os.File, name string, nowUnix uint64) (*RetentionFileReplayCache, error) {
@@ -144,6 +149,10 @@ func (c *RetentionFileReplayCache) withLock(fn func() error) error {
 }
 
 func (c *RetentionFileReplayCache) load(nowUnix uint64) (bool, error) {
+	generation, err := c.readGeneration()
+	if err != nil {
+		return false, err
+	}
 	file, err := openReplayCacheFileAt(c.directory, c.name)
 	if err != nil {
 		return false, err
@@ -157,7 +166,7 @@ func (c *RetentionFileReplayCache) load(nowUnix uint64) (bool, error) {
 		return false, err
 	}
 	offset := c.loadedSize
-	if c.loadedInfo == nil || !os.SameFile(c.loadedInfo, info) || info.Size() < offset {
+	if c.loadedInfo == nil || generation != c.loadedGeneration || !os.SameFile(c.loadedInfo, info) || info.Size() < offset {
 		// The file was replaced or truncated behind this handle; reparse it all.
 		c.seen = make(map[string]uint64)
 		c.minDeadline = math.MaxUint64
@@ -174,11 +183,39 @@ func (c *RetentionFileReplayCache) load(nowUnix uint64) (bool, error) {
 	}
 	c.loadedInfo = info
 	c.loadedSize = consumed
+	c.loadedGeneration = generation
 	if c.minDeadline > nowUnix {
 		return false, nil
 	}
 	c.expireLoaded(nowUnix)
 	return true, nil
+}
+
+func (c *RetentionFileReplayCache) readGeneration() (uint64, error) {
+	file, err := openReplayCacheFileAt(c.directory, c.name+".generation")
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	if err := file.Chmod(0o600); err != nil {
+		return 0, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if info.Size() == 0 {
+		// Empty is the legacy state before the first compaction.
+		return 0, nil
+	}
+	if info.Size() != 8 {
+		return 0, fmt.Errorf("admission: retention replay cache %s has malformed generation", c.path)
+	}
+	var encoded [8]byte
+	if _, err := file.ReadAt(encoded[:], 0); err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint64(encoded[:]), nil
 }
 
 // consume parses records from the current file position and reports the offset
@@ -282,13 +319,61 @@ func (c *RetentionFileReplayCache) rewrite() error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
+	nextGeneration, err := c.advanceGeneration()
+	if err != nil {
+		return err
+	}
 	if err := replaceRetentionReplayCacheFile(c.directory, temporaryName, c.name); err != nil {
 		return err
 	}
 	// The compacted file is a new directory entry, so the next load reparses it.
 	c.loadedInfo = nil
 	c.loadedSize = 0
+	c.loadedGeneration = nextGeneration
 	return syncRetentionReplayCacheDirectory(c.directory)
+}
+
+func (c *RetentionFileReplayCache) advanceGeneration() (uint64, error) {
+	if c.loadedGeneration == math.MaxUint64 {
+		return 0, fmt.Errorf("admission: retention replay cache %s exhausted its generation", c.path)
+	}
+	next := c.loadedGeneration + 1
+	temporary, temporaryName, err := createRetentionReplayCacheTemporary(c.directory, c.name+".generation")
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = removeRetentionReplayCacheTemporary(c.directory, temporaryName) }()
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return 0, err
+	}
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], next)
+	written, err := temporary.Write(encoded[:])
+	if err != nil {
+		_ = temporary.Close()
+		return 0, err
+	}
+	if written != len(encoded) {
+		_ = temporary.Close()
+		return 0, io.ErrShortWrite
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return 0, err
+	}
+	if err := temporary.Close(); err != nil {
+		return 0, err
+	}
+	if err := replaceRetentionReplayCacheFile(c.directory, temporaryName, c.name+".generation"); err != nil {
+		return 0, err
+	}
+	// Persist the new generation before replacing the data file. A crash in
+	// between can cause an unnecessary full reload, but can never skip records.
+	if err := syncRetentionReplayCacheDirectory(c.directory); err != nil {
+		return 0, err
+	}
+	return next, nil
 }
 
 func (c *RetentionFileReplayCache) append(key string, deadline uint64) error {

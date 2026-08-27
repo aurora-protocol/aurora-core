@@ -1,9 +1,12 @@
 package admission
 
 import (
+	"encoding/binary"
 	"encoding/hex"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -84,6 +87,51 @@ func TestRetentionFileReplayCacheRejectsMalformedDeadline(t *testing.T) {
 				t.Fatal("malformed retention deadline accepted")
 			}
 		})
+	}
+}
+
+func TestRetentionFileReplayCacheRejectsMalformedGeneration(t *testing.T) {
+	for _, encoded := range [][]byte{{1}, make([]byte, 9)} {
+		directoryPath := t.TempDir()
+		if err := os.WriteFile(filepath.Join(directoryPath, "replay.log.generation"), encoded, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		directory, err := os.Open(directoryPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cache, err := NewRetentionFileReplayCacheAt(directory, "replay.log", 100)
+		if cache != nil {
+			_ = cache.Close()
+		}
+		_ = directory.Close()
+		if err == nil || !strings.Contains(err.Error(), "malformed generation") {
+			t.Fatalf("generation %x error = %v, want malformed generation", encoded, err)
+		}
+	}
+}
+
+func TestRetentionFileReplayCacheRejectsExhaustedGenerationDuringCompaction(t *testing.T) {
+	directoryPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directoryPath, "replay.log"), []byte(hex.EncodeToString([]byte("expired"))+"\t100\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var generation [8]byte
+	binary.BigEndian.PutUint64(generation[:], math.MaxUint64)
+	if err := os.WriteFile(filepath.Join(directoryPath, "replay.log.generation"), generation[:], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := os.Open(directoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	cache, err := NewRetentionFileReplayCacheAt(directory, "replay.log", 100)
+	if cache != nil {
+		_ = cache.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "exhausted its generation") {
+		t.Fatalf("exhausted generation error = %v", err)
 	}
 }
 

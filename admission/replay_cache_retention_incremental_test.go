@@ -89,6 +89,10 @@ func TestRetentionFileReplayCacheReloadsAfterConcurrentCompaction(t *testing.T) 
 	if info.Size() <= first.loadedSize {
 		t.Fatalf("compacted file is %d bytes, which does not exceed the stale offset %d", info.Size(), first.loadedSize)
 	}
+	// Simulate a filesystem reusing the old file identity for the replacement.
+	// The persisted compaction generation must still force a full reload instead
+	// of trusting the stale byte offset.
+	first.loadedInfo = info
 
 	// The first handle must notice the replacement rather than trusting the
 	// offset it had already consumed.

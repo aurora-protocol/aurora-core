@@ -352,6 +352,64 @@ func TestExitFlowHandlerAppliesByteRateLimitBeforeActivityMutation(t *testing.T)
 	}
 }
 
+func TestExitRateWindowAccumulatesAndResetsExactlyAtBoundary(t *testing.T) {
+	handler := NewExitFlowHandler(DefaultExitPolicy())
+	handler.RateLimit = ExitRateLimit{
+		WindowSeconds: 10,
+		MaxFlowOpens:  2,
+		MaxBytes:      8,
+	}
+	if err := handler.consumeRateLimit(100, 1, 3); err != nil {
+		t.Fatalf("first rate-limit charge: %v", err)
+	}
+	if err := handler.consumeRateLimit(109, 1, 5); err != nil {
+		t.Fatalf("accumulated rate-limit charge: %v", err)
+	}
+	if got := handler.rateWindow; got != (exitRateWindow{StartedAtUnix: 100, FlowOpens: 2, Bytes: 8}) {
+		t.Fatalf("accumulated rate window = %+v", got)
+	}
+	if err := handler.consumeRateLimit(109, 1, 0); err == nil {
+		t.Fatal("rate window reset before its exact boundary")
+	}
+	if err := handler.consumeRateLimit(110, 1, 1); err != nil {
+		t.Fatalf("charge at exact reset boundary: %v", err)
+	}
+	if err := handler.consumeRateLimit(110, 1, 1); err != nil {
+		t.Fatalf("second charge in reset window: %v", err)
+	}
+	if got := handler.rateWindow; got != (exitRateWindow{StartedAtUnix: 110, FlowOpens: 2, Bytes: 2}) {
+		t.Fatalf("reset rate window = %+v", got)
+	}
+	if err := handler.consumeRateLimit(110, 1, 0); err == nil {
+		t.Fatal("rate window reset more than once at the same timestamp")
+	}
+}
+
+func TestExitRateWindowRolloverIsOverflowSafeAndResetsOnClockRollback(t *testing.T) {
+	const maximum = ^uint64(0)
+	handler := NewExitFlowHandler(DefaultExitPolicy())
+	handler.RateLimit = ExitRateLimit{
+		WindowSeconds: 10,
+		MaxFlowOpens:  1,
+		MaxBytes:      1,
+	}
+	handler.rateWindowActive = true
+	handler.rateWindow = exitRateWindow{StartedAtUnix: maximum - 5, FlowOpens: 1, Bytes: 1}
+	if err := handler.consumeRateLimit(maximum-1, 1, 0); err == nil {
+		t.Fatal("near-MaxUint64 timestamp overflow reset an unexpired window")
+	}
+	if got := handler.rateWindow; got != (exitRateWindow{StartedAtUnix: maximum - 5, FlowOpens: 1, Bytes: 1}) {
+		t.Fatalf("near-MaxUint64 window mutated = %+v", got)
+	}
+
+	if err := handler.consumeRateLimit(maximum-6, 1, 1); err != nil {
+		t.Fatalf("clock rollback did not start a fresh window: %v", err)
+	}
+	if got := handler.rateWindow; got != (exitRateWindow{StartedAtUnix: maximum - 6, FlowOpens: 1, Bytes: 1}) {
+		t.Fatalf("rollback rate window = %+v", got)
+	}
+}
+
 func TestAdmissionPolicyRejectsVOPRFWithoutVerifierService(t *testing.T) {
 	proof := relayAdmissionProof(registry.ProofVOPRFP384SHA384)
 	if err := (AdmissionPolicy{NowUnix: 20}).AllowsProof(proof); err == nil {

@@ -381,6 +381,9 @@ func (c productionConfig) validate() error {
 	if err := relay.ValidateSocketEgressLimits(c.egressLimits); err != nil {
 		return fmt.Errorf("server: egress limits: %w", err)
 	}
+	if err := server.ValidateProductionFirstHopRateLimit(c.exitRateLimit); err != nil {
+		return err
+	}
 	if _, err := relay.NewUDPDNSMessageResolver(c.dnsUpstream); err != nil {
 		return fmt.Errorf("server: DNS upstream: %w", err)
 	}

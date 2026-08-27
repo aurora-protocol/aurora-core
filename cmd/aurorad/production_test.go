@@ -228,6 +228,105 @@ func TestParseProductionConfigLoadsOwnerOnlyArgumentsFile(t *testing.T) {
 	}
 }
 
+func TestParseProductionConfigRejectsUnsafeEgressRateLimits(t *testing.T) {
+	base := newProductionCommandFixture(t)
+	tests := []struct {
+		name   string
+		mutate func(*productionConfig)
+		want   string
+	}{
+		{
+			name:   "zero window",
+			mutate: func(config *productionConfig) { config.exitRateLimit.WindowSeconds = 0 },
+			want:   "egress rate window",
+		},
+		{
+			name:   "maximum uint64 window",
+			mutate: func(config *productionConfig) { config.exitRateLimit.WindowSeconds = ^uint64(0) },
+			want:   "egress rate window",
+		},
+		{
+			name:   "zero flow-open cap",
+			mutate: func(config *productionConfig) { config.egressMaxFlowOpens = 0 },
+			want:   "flow-open rate cap",
+		},
+		{
+			name: "flow-open cap above production maximum",
+			mutate: func(config *productionConfig) {
+				config.egressMaxFlowOpens = (1 << 20) + 1
+			},
+			want: "flow-open rate cap",
+		},
+		{
+			name:   "maximum uint32 flow-open cap",
+			mutate: func(config *productionConfig) { config.egressMaxFlowOpens = uint(^uint32(0)) },
+			want:   "flow-open rate cap",
+		},
+		{
+			name:   "zero byte cap",
+			mutate: func(config *productionConfig) { config.exitRateLimit.MaxBytes = 0 },
+			want:   "byte rate cap",
+		},
+		{
+			name: "byte cap above production maximum",
+			mutate: func(config *productionConfig) {
+				config.exitRateLimit.MaxBytes = (1 << 40) + 1
+			},
+			want: "byte rate cap",
+		},
+		{
+			name:   "maximum uint64 byte cap",
+			mutate: func(config *productionConfig) { config.exitRateLimit.MaxBytes = ^uint64(0) },
+			want:   "byte rate cap",
+		},
+	}
+	for _, test := range tests {
+		for _, source := range []string{"CLI", "configuration file"} {
+			t.Run(test.name+"/"+source, func(t *testing.T) {
+				candidate := base
+				test.mutate(&candidate)
+				arguments := productionCommandArguments(candidate)
+				if source == "configuration file" {
+					encoded, err := json.Marshal(struct {
+						Arguments []string `json:"arguments"`
+					}{Arguments: arguments})
+					if err != nil {
+						t.Fatal(err)
+					}
+					path := filepath.Join(t.TempDir(), "aurorad.json")
+					writeProductionCommandFile(t, path, encoded, 0o600)
+					arguments = []string{"--config", path}
+				}
+				_, err := parseProductionConfig(arguments, io.Discard)
+				if err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("unsafe production rate limit error = %v, want %q", err, test.want)
+				}
+			})
+		}
+	}
+}
+
+func TestParseProductionConfigAcceptsMaximumRateLimitBoundaries(t *testing.T) {
+	config := newProductionCommandFixture(t)
+	config.exitRateLimit.WindowSeconds = 24 * 60 * 60
+	config.egressMaxFlowOpens = 1 << 20
+	config.exitRateLimit.MaxBytes = 1 << 40
+	parsed, err := parseProductionConfig(productionCommandArguments(config), io.Discard)
+	if err != nil {
+		t.Fatalf("maximum production rate limit rejected: %v", err)
+	}
+	if parsed.exitRateLimit.WindowSeconds != config.exitRateLimit.WindowSeconds ||
+		parsed.egressMaxFlowOpens != config.egressMaxFlowOpens ||
+		parsed.exitRateLimit.MaxBytes != config.exitRateLimit.MaxBytes {
+		t.Fatalf(
+			"parsed production rate limit = {WindowSeconds:%d MaxFlowOpens:%d MaxBytes:%d}",
+			parsed.exitRateLimit.WindowSeconds,
+			parsed.egressMaxFlowOpens,
+			parsed.exitRateLimit.MaxBytes,
+		)
+	}
+}
+
 func TestParseProductionConfigRejectsArgumentsFileCombinedWithCLIOptions(t *testing.T) {
 	config := newProductionCommandFixture(t)
 	encoded, err := json.Marshal(struct {

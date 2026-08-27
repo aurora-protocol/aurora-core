@@ -25,7 +25,13 @@ import (
 const (
 	maximumProductionFirstHopSessions            = 4096
 	maximumProductionFirstHopPendingPreludeBytes = 64 << 20
-	productionFirstHopConnectionHeadroom         = 64
+	// These per-authenticated-session ceilings remain deliberately generous
+	// (one million opens and one TiB in at most one day) while rejecting sentinel
+	// and typo values that would make a production abuse limit meaningless.
+	maximumProductionExitRateWindowSeconds        = 24 * 60 * 60
+	maximumProductionExitRateFlowOpens            = 1 << 20
+	maximumProductionExitRateBytes         uint64 = 1 << 40
+	productionFirstHopConnectionHeadroom          = 64
 )
 
 var ErrProductionFirstHopSessionLimit = errors.New("server: production first-hop session limit reached")
@@ -187,6 +193,9 @@ func validateProductionFirstHopOptions(options ProductionFirstHopOptions) error 
 	if isNilFirstHopInterface(options.ProxySession.DNSResolver) {
 		return fmt.Errorf("server: production first-hop DNS resolver is required")
 	}
+	if err := validateProductionFirstHopRateLimit(options.ProxySession.RateLimit); err != nil {
+		return err
+	}
 	if options.MaxConcurrentSessions <= 0 || options.MaxConcurrentSessions > maximumProductionFirstHopSessions {
 		return fmt.Errorf("server: production first-hop session limit is invalid")
 	}
@@ -246,6 +255,25 @@ func isDecimalProductionPort(port string) bool {
 // before callers load private production dependencies or create durable state.
 func ValidateProductionFirstHopListenAddress(address string) error {
 	return validateProductionListenAddress(address)
+}
+
+// ValidateProductionFirstHopRateLimit requires explicit, bounded abuse limits
+// before callers load private production dependencies or create durable state.
+func ValidateProductionFirstHopRateLimit(limit relay.ExitRateLimit) error {
+	return validateProductionFirstHopRateLimit(limit)
+}
+
+func validateProductionFirstHopRateLimit(limit relay.ExitRateLimit) error {
+	if limit.WindowSeconds == 0 || limit.WindowSeconds > maximumProductionExitRateWindowSeconds {
+		return fmt.Errorf("server: production first-hop egress rate window is invalid")
+	}
+	if limit.MaxFlowOpens == 0 || limit.MaxFlowOpens > maximumProductionExitRateFlowOpens {
+		return fmt.Errorf("server: production first-hop flow-open rate cap is invalid")
+	}
+	if limit.MaxBytes == 0 || limit.MaxBytes > maximumProductionExitRateBytes {
+		return fmt.Errorf("server: production first-hop byte rate cap is invalid")
+	}
+	return nil
 }
 
 type productionFirstHopLimiter struct {

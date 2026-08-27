@@ -397,6 +397,10 @@ type ExitFlowHandler struct {
 const maxUDPConfirmTTLSeconds uint32 = 86400
 
 type ExitRateLimit struct {
+	// The all-zero value selects DefaultExitRateLimit. Otherwise, WindowSeconds
+	// defaults to the standard window when zero, while MaxFlowOpens and MaxBytes
+	// independently disable their generic-library limit when zero. Production
+	// entry points must require both caps explicitly.
 	WindowSeconds uint64
 	MaxFlowOpens  uint32
 	MaxBytes      uint64
@@ -639,7 +643,7 @@ func (h *ExitFlowHandler) consumeRateLimit(now uint64, flowOpens uint32, bytes u
 	if limit.WindowSeconds == 0 {
 		limit.WindowSeconds = DefaultExitRateLimit().WindowSeconds
 	}
-	if !h.rateWindowActive || now >= h.rateWindow.StartedAtUnix+limit.WindowSeconds {
+	if !h.rateWindowActive || exitRateWindowExpired(h.rateWindow.StartedAtUnix, now, limit.WindowSeconds) {
 		h.rateWindow = exitRateWindow{StartedAtUnix: now}
 		h.rateWindowActive = true
 	}
@@ -654,6 +658,16 @@ func (h *ExitFlowHandler) consumeRateLimit(now uint64, flowOpens uint32, bytes u
 	h.rateWindow.FlowOpens += flowOpens
 	h.rateWindow.Bytes += bytes
 	return nil
+}
+
+func exitRateWindowExpired(startedAtUnix, nowUnix, windowSeconds uint64) bool {
+	// A wall-clock rollback starts a fresh window. This prevents a future start
+	// time from extending a stale window indefinitely while keeping subtraction
+	// overflow-safe for timestamps near the uint64 boundary.
+	if nowUnix < startedAtUnix {
+		return true
+	}
+	return nowUnix-startedAtUnix >= windowSeconds
 }
 
 func (h *ExitFlowHandler) checkExitPolicy(open protocol.FlowOpen) error {

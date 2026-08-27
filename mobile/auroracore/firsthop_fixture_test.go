@@ -178,7 +178,7 @@ func newNativeSessionFixture(t testing.TB, now time.Time) *Fixture {
 		CarrierStatus:         http.StatusCreated,
 		CarrierHeader:         http.Header{"Content-Type": {"application/octet-stream"}, "X-Carrier-Mode": {"ordinary"}},
 		CoverOrigin:           coverOrigin,
-		ProxySession:          server.FirstHopProxySessionOptions{ExitPolicy: relay.ExitPolicy{AllowPrivate: true}, Dialer: &net.Dialer{}, Resolver: firstHopFixtureResolver{}, DNSResolver: firstHopFixtureDNSResolver{}, Limits: firstHopEgressLimits()},
+		ProxySession:          server.FirstHopProxySessionOptions{ExitPolicy: relay.ExitPolicy{AllowPrivate: true}, RateLimit: relay.DefaultExitRateLimit(), Dialer: &net.Dialer{}, Resolver: firstHopFixtureResolver{}, DNSResolver: firstHopFixtureDNSResolver{}, Limits: firstHopEgressLimits()},
 		MaxConcurrentSessions: 4,
 	})
 	if err != nil {

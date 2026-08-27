@@ -50,6 +50,18 @@ func TestNewProductionFirstHopServerRejectsInvalidOptions(t *testing.T) {
 		{name: "nil DNS resolver", mutate: func(options *ProductionFirstHopOptions) { options.ProxySession.DNSResolver = nil }},
 		{name: "implicit egress limits", mutate: func(options *ProductionFirstHopOptions) { options.ProxySession.Limits = relay.SocketEgressLimits{} }},
 		{name: "invalid egress limits", mutate: func(options *ProductionFirstHopOptions) { options.ProxySession.Limits.MaxFlows = -1 }},
+		{name: "zero egress rate window", mutate: func(options *ProductionFirstHopOptions) { options.ProxySession.RateLimit.WindowSeconds = 0 }},
+		{name: "oversized egress rate window", mutate: func(options *ProductionFirstHopOptions) {
+			options.ProxySession.RateLimit.WindowSeconds = maximumProductionExitRateWindowSeconds + 1
+		}},
+		{name: "zero flow-open rate cap", mutate: func(options *ProductionFirstHopOptions) { options.ProxySession.RateLimit.MaxFlowOpens = 0 }},
+		{name: "oversized flow-open rate cap", mutate: func(options *ProductionFirstHopOptions) {
+			options.ProxySession.RateLimit.MaxFlowOpens = maximumProductionExitRateFlowOpens + 1
+		}},
+		{name: "zero byte rate cap", mutate: func(options *ProductionFirstHopOptions) { options.ProxySession.RateLimit.MaxBytes = 0 }},
+		{name: "oversized byte rate cap", mutate: func(options *ProductionFirstHopOptions) {
+			options.ProxySession.RateLimit.MaxBytes = maximumProductionExitRateBytes + 1
+		}},
 		{name: "zero session cap", mutate: func(options *ProductionFirstHopOptions) { options.MaxConcurrentSessions = 0 }},
 		{name: "oversized session cap", mutate: func(options *ProductionFirstHopOptions) {
 			options.MaxConcurrentSessions = maximumProductionFirstHopSessions + 1
@@ -89,6 +101,54 @@ func TestValidateProductionFirstHopListenAddressRejectsNonConcreteOrLoopbackEndp
 		t.Run("valid "+address, func(t *testing.T) {
 			if err := ValidateProductionFirstHopListenAddress(address); err != nil {
 				t.Fatalf("ValidateProductionFirstHopListenAddress(%q) error = %v", address, err)
+			}
+		})
+	}
+}
+
+func TestValidateProductionFirstHopRateLimitBoundaries(t *testing.T) {
+	validLimits := []relay.ExitRateLimit{
+		{WindowSeconds: 1, MaxFlowOpens: 1, MaxBytes: 1},
+		{
+			WindowSeconds: maximumProductionExitRateWindowSeconds,
+			MaxFlowOpens:  maximumProductionExitRateFlowOpens,
+			MaxBytes:      maximumProductionExitRateBytes,
+		},
+	}
+	for _, limit := range validLimits {
+		if err := ValidateProductionFirstHopRateLimit(limit); err != nil {
+			t.Fatalf("valid production rate limit %+v rejected: %v", limit, err)
+		}
+	}
+
+	valid := relay.ExitRateLimit{
+		WindowSeconds: maximumProductionExitRateWindowSeconds,
+		MaxFlowOpens:  1,
+		MaxBytes:      1,
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*relay.ExitRateLimit)
+	}{
+		{name: "zero window", mutate: func(limit *relay.ExitRateLimit) { limit.WindowSeconds = 0 }},
+		{name: "oversized window", mutate: func(limit *relay.ExitRateLimit) { limit.WindowSeconds++ }},
+		{name: "zero flow cap", mutate: func(limit *relay.ExitRateLimit) { limit.MaxFlowOpens = 0 }},
+		{name: "flow cap above maximum", mutate: func(limit *relay.ExitRateLimit) {
+			limit.MaxFlowOpens = maximumProductionExitRateFlowOpens + 1
+		}},
+		{name: "maximum uint32 flow cap", mutate: func(limit *relay.ExitRateLimit) { limit.MaxFlowOpens = ^uint32(0) }},
+		{name: "zero byte cap", mutate: func(limit *relay.ExitRateLimit) { limit.MaxBytes = 0 }},
+		{name: "byte cap above maximum", mutate: func(limit *relay.ExitRateLimit) {
+			limit.MaxBytes = maximumProductionExitRateBytes + 1
+		}},
+		{name: "maximum uint64 byte cap", mutate: func(limit *relay.ExitRateLimit) { limit.MaxBytes = ^uint64(0) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := valid
+			test.mutate(&candidate)
+			if err := ValidateProductionFirstHopRateLimit(candidate); err == nil {
+				t.Fatalf("ValidateProductionFirstHopRateLimit accepted %+v", candidate)
 			}
 		})
 	}
@@ -524,7 +584,7 @@ func newProductionFirstHopTestOptions(t testing.TB) ProductionFirstHopOptions {
 		CarrierStatus:         http.StatusCreated,
 		CarrierHeader:         http.Header{"Content-Type": {"application/octet-stream"}, "X-Carrier-Mode": {"ordinary"}},
 		CoverOrigin:           coverOrigin,
-		ProxySession:          FirstHopProxySessionOptions{ExitPolicy: relay.ExitPolicy{AllowPrivate: true}, Dialer: &net.Dialer{}, Resolver: net.DefaultResolver, DNSResolver: productionFirstHopTestDNSResolver{}, Limits: productionFirstHopTestEgressLimits()},
+		ProxySession:          FirstHopProxySessionOptions{ExitPolicy: relay.ExitPolicy{AllowPrivate: true}, RateLimit: relay.DefaultExitRateLimit(), Dialer: &net.Dialer{}, Resolver: net.DefaultResolver, DNSResolver: productionFirstHopTestDNSResolver{}, Limits: productionFirstHopTestEgressLimits()},
 		MaxConcurrentSessions: 1,
 	}
 }

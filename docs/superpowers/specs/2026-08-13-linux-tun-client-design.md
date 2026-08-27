@@ -61,6 +61,9 @@ uses a caller-controlled command path.
    existing default for that family. A default with metric zero or custom
    policy rule causes a fail-closed error rather than an ambiguous route.
 4. Setup order is relay bypasses, link address and MTU, then tunnel defaults.
+   TUN creation requests kernel exclusivity and fails with the existing link
+   untouched when the configured name is already present; Aurora never adopts
+   an operator-owned interface as its dedicated link.
    Any failure removes only entries successfully added by this process in the
    reverse order. The command uses `route add`, never `replace`, so it
    cannot overwrite an operator-managed route.

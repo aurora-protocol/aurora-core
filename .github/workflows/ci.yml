@@ -39,6 +39,17 @@ jobs:
           fi
       - name: Test
         run: go test ./...
+      - name: Check exclusive Linux TUN ownership
+        # This test needs CAP_NET_ADMIN. Keep elevated execution off pull-request
+        # content; the ordinary Linux test job still checks the exact ioctl flags.
+        if: matrix.os == 'ubuntu-latest' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -c -o "$RUNNER_TEMP/platform.test" ./platform
+          sudo env AURORA_PRIVILEGED_TUN_TEST=1 "$RUNNER_TEMP/platform.test" \
+            -test.run '^TestOpenLinuxTUNDeviceRejectsPreexistingPersistentInterface$' \
+            -test.v
       - name: Test 32-bit decoders
         if: matrix.os == 'ubuntu-latest'
         env:

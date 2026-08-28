@@ -155,6 +155,43 @@ func TestVerifyExternalEvaluationEvidenceRejectsNonFiniteAllowedAdvantage(t *tes
 	}
 }
 
+// TestVerifyClassifierEvidenceCapsLooserAllowedAdvantage proves a bundle cannot
+// raise its own classifier bar: a self-reported AllowedAdvantage above the 0.02
+// deployment threshold must be capped, while a stricter bar must be honored.
+func TestVerifyClassifierEvidenceCapsLooserAllowedAdvantage(t *testing.T) {
+	bundle := ExternalEvaluationHarnessBundle()
+	bundle.ClassifierReports[0].AllowedAdvantage = 1.0
+	bundle.ClassifierReports[0].ClassifierAdvantage = 0.5
+
+	report, err := VerifyExternalEvaluationEvidence(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ClassifierEvidence || report.Passed {
+		t.Fatalf("looser allowed advantage 1.0 let advantage 0.5 through: %+v", report)
+	}
+	if !evaluationReportHasFinding(report, "classifier advantage exceeds deployment threshold") {
+		t.Fatalf("report missing threshold finding for capped bar: %+v", report)
+	}
+
+	// A stricter self-reported bar is still honored: advantage 0.015 clears the
+	// 0.02 deployment threshold but not the report's own 0.01 bar.
+	bundle = ExternalEvaluationHarnessBundle()
+	bundle.ClassifierReports[0].AllowedAdvantage = 0.01
+	bundle.ClassifierReports[0].ClassifierAdvantage = 0.015
+
+	report, err = VerifyExternalEvaluationEvidence(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ClassifierEvidence || report.Passed {
+		t.Fatalf("stricter allowed advantage 0.01 let advantage 0.015 through: %+v", report)
+	}
+	if !evaluationReportHasFinding(report, "classifier advantage exceeds deployment threshold") {
+		t.Fatalf("report missing threshold finding for stricter bar: %+v", report)
+	}
+}
+
 func evaluationReportHasFinding(report EvidenceReport, want string) bool {
 	for _, finding := range report.Findings {
 		if finding == want {

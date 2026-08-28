@@ -5,6 +5,11 @@ import (
 	"math"
 )
 
+// maxClassifierAllowedAdvantage is the deployment threshold for DPI classifier
+// advantage. It matches the 0.02 bar auroractl classifier-check enforces via
+// cover.EvaluateProductionCandidate.
+const maxClassifierAllowedAdvantage = 0.02
+
 type EvidenceBundle struct {
 	BundleID                     string
 	VectorPackageHash            []byte
@@ -233,9 +238,12 @@ func verifyClassifierEvidence(reports []ClassifierReport, out *EvidenceReport) b
 			out.addFinding("classifier report lacks ordinary or candidate samples")
 			passed = false
 		}
+		// A report may ask for a stricter bar than the deployment threshold but
+		// never a looser one: unset, non-finite, or inflated AllowedAdvantage
+		// values all fall back to maxClassifierAllowedAdvantage.
 		allowed := report.AllowedAdvantage
-		if allowed <= 0 || math.IsNaN(allowed) || math.IsInf(allowed, 0) {
-			allowed = 0.02
+		if allowed <= 0 || allowed > maxClassifierAllowedAdvantage || math.IsNaN(allowed) || math.IsInf(allowed, 0) {
+			allowed = maxClassifierAllowedAdvantage
 		}
 		if math.IsNaN(report.ClassifierAdvantage) || math.IsInf(report.ClassifierAdvantage, 0) {
 			out.addFinding("classifier advantage is not a finite measurement")

@@ -23,7 +23,7 @@ type DirectoryPublisher struct {
 
 func (p DirectoryPublisher) Publish(d ConsensusDraft) error {
 	threshold := p.Threshold
-	if threshold == 0 {
+	if threshold < 1 {
 		threshold = 1
 	}
 	if d.AuthoritySignatureCount < threshold {

@@ -100,6 +100,12 @@ func TestDirectoryPublisherPublishValidation(t *testing.T) {
 			t.Fatal("below-threshold consensus accepted")
 		}
 	})
+	t.Run("negative threshold fails closed on unsigned consensus", func(t *testing.T) {
+		p := DirectoryPublisher{Threshold: -3}
+		if err := p.Publish(ConsensusDraft{AuthoritySignatureCount: 0, PayloadHash: rb(0x01, 48)}); err == nil {
+			t.Fatal("negative-threshold publisher accepted an unsigned consensus")
+		}
+	})
 	t.Run("payload hash length must be 48", func(t *testing.T) {
 		p := DirectoryPublisher{Threshold: 1}
 		if err := p.Publish(ConsensusDraft{AuthoritySignatureCount: 2, PayloadHash: rb(0x01, 47)}); err == nil {

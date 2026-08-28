@@ -1,6 +1,9 @@
 package evaluation
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestVerifyExternalEvaluationEvidenceAcceptsCompleteBundle(t *testing.T) {
 	report, err := VerifyExternalEvaluationEvidence(ExternalEvaluationHarnessBundle())
@@ -114,6 +117,40 @@ func TestVerifyExternalEvaluationEvidenceRejectsIncompleteDeploymentSecurityAsse
 	} {
 		if !evaluationReportHasFinding(report, want) {
 			t.Fatalf("report missing %q: %+v", want, report)
+		}
+	}
+}
+
+func TestVerifyExternalEvaluationEvidenceRejectsNonFiniteClassifierAdvantage(t *testing.T) {
+	for _, advantage := range []float64{math.NaN(), math.Inf(-1), math.Inf(1)} {
+		bundle := ExternalEvaluationHarnessBundle()
+		bundle.ClassifierReports[0].ClassifierAdvantage = advantage
+
+		report, err := VerifyExternalEvaluationEvidence(bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.ClassifierEvidence || report.Passed {
+			t.Fatalf("non-finite classifier advantage %v passed: %+v", advantage, report)
+		}
+	}
+}
+
+func TestVerifyExternalEvaluationEvidenceRejectsNonFiniteAllowedAdvantage(t *testing.T) {
+	for _, allowed := range []float64{math.NaN(), math.Inf(1)} {
+		bundle := ExternalEvaluationHarnessBundle()
+		bundle.ClassifierReports[0].AllowedAdvantage = allowed
+		bundle.ClassifierReports[0].ClassifierAdvantage = 0.5
+
+		report, err := VerifyExternalEvaluationEvidence(bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.ClassifierEvidence || report.Passed {
+			t.Fatalf("allowed advantage %v let advantage 0.5 through: %+v", allowed, report)
+		}
+		if !evaluationReportHasFinding(report, "classifier advantage exceeds deployment threshold") {
+			t.Fatalf("report missing threshold finding for allowed %v: %+v", allowed, report)
 		}
 	}
 }

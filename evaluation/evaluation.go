@@ -1,6 +1,9 @@
 package evaluation
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 type EvidenceBundle struct {
 	BundleID                     string
@@ -231,10 +234,13 @@ func verifyClassifierEvidence(reports []ClassifierReport, out *EvidenceReport) b
 			passed = false
 		}
 		allowed := report.AllowedAdvantage
-		if allowed <= 0 {
+		if allowed <= 0 || math.IsNaN(allowed) || math.IsInf(allowed, 0) {
 			allowed = 0.02
 		}
-		if report.ClassifierAdvantage > allowed {
+		if math.IsNaN(report.ClassifierAdvantage) || math.IsInf(report.ClassifierAdvantage, 0) {
+			out.addFinding("classifier advantage is not a finite measurement")
+			passed = false
+		} else if report.ClassifierAdvantage > allowed {
 			out.addFinding("classifier advantage exceeds deployment threshold")
 			passed = false
 		}

@@ -92,6 +92,7 @@ func NewProductionBlindRSAService(options ProductionBlindRSAServiceOptions) (*Se
 func cloneRSAPrivateKey(key *rsa.PrivateKey) (*rsa.PrivateKey, error) {
 	keyCopy := *key
 	encoded := x509.MarshalPKCS1PrivateKey(&keyCopy)
+	defer zeroIssuerdOwnedBytes(encoded)
 	cloned, err := x509.ParsePKCS1PrivateKey(encoded)
 	if err != nil {
 		return nil, fmt.Errorf("issuerd: clone Blind RSA private key: %w", err)

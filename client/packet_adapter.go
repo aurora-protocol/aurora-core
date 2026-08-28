@@ -281,10 +281,10 @@ func (a *PacketAdapter) Close() {
 }
 
 // Ingress captures one local packet and queues the corresponding encrypted flow
-// frames. Well-formed packets the tunnel cannot serve (IP protocols other than
-// TCP/UDP, unsupported IPv6 extension headers, IPv6 options that require
-// discard handling) are dropped and report nil; malformed or contradictory
-// packets report errors.
+// frames. Well-formed packets the tunnel cannot serve (unsupported protocols or
+// IPv6 extensions) and packets refused for transient queue backpressure
+// (session.ErrBackpressure) are dropped and report nil; malformed or
+// contradictory packets report errors.
 func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Time) error {
 	if a == nil {
 		return fmt.Errorf("client: packet adapter is nil")
@@ -359,9 +359,9 @@ func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Ti
 	}
 	if packet.protocol == packetAdapterUDP && packet.udp.destinationPort == packetAdapterDNSPort {
 		if hasDNSAnswers {
-			return a.ingressDNS(ctx, packet, now)
+			return dropPacketAdapterBackpressure(a.ingressDNS(ctx, packet, now))
 		}
-		return a.ingressRelayedDNS(ctx, packet, now)
+		return dropPacketAdapterBackpressure(a.ingressRelayedDNS(ctx, packet, now))
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -370,9 +370,9 @@ func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Ti
 	}
 	switch packet.protocol {
 	case packetAdapterTCP:
-		return a.ingressTCPLocked(ctx, packet, now)
+		return dropPacketAdapterBackpressure(a.ingressTCPLocked(ctx, packet, now))
 	case packetAdapterUDP:
-		return a.ingressUDPLocked(ctx, packet, now)
+		return dropPacketAdapterBackpressure(a.ingressUDPLocked(ctx, packet, now))
 	default:
 		return fmt.Errorf("client: unsupported packet protocol %d", packet.protocol)
 	}
@@ -1737,6 +1737,17 @@ func packetAdapterChecksum(parts ...[]byte) uint16 {
 
 func tcpSequenceBefore(left, right uint32) bool {
 	return int32(left-right) < 0
+}
+
+// dropPacketAdapterBackpressure maps transient queue backpressure to a dropped
+// packet: the kernel retransmits TCP and UDP loss is acceptable, so the session
+// must survive instead of the read loop terminating. This matches the native
+// ABI, where backpressure maps to a status the mobile clients treat as a drop.
+func dropPacketAdapterBackpressure(err error) error {
+	if errors.Is(err, session.ErrBackpressure) {
+		return nil
+	}
+	return err
 }
 
 func zeroPacketAdapterBlocks(blocks []protocol.FrameBlock) {

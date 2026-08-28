@@ -323,6 +323,80 @@ func TestPacketTUNRuntimeTerminatesOnMalformedPacket(t *testing.T) {
 	}
 }
 
+func TestPacketTUNRuntimeSurvivesQueueBackpressure(t *testing.T) {
+	// Custom fixture: the shared one seeds only 32 random bytes, too few for
+	// seven synthetic server sequences.
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{
+		MaxFlows:       8,
+		MaxPacketBytes: 1500,
+		UDPMode:        transport.UDPOverStreamFallback,
+		Random:         bytes.NewReader(make([]byte, 512)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := newPacketTUNRuntimeDevice()
+	runtime, err := NewPacketTUNRuntime(adapter, device, PacketTUNRuntimeOptions{
+		ReadBufferBytes: 1500,
+		Now:             func() time.Time { return time.Unix(1_700_000_000, 0) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- runtime.Serve(context.Background())
+	}()
+
+	// Fill the session's bounded outbound queue (six data packets: MaxQueuedPackets
+	// 8 minus ControlReservedPackets 2). Each SYN/ACK device write proves the loop
+	// finished processing that packet.
+	source := [4]byte{10, 77, 0, 2}
+	target := [4]byte{93, 184, 216, 34}
+	for port := uint16(50000); port < 50006; port++ {
+		device.Inject(packetAdapterTCPv4(t, source, target, port, 443, 100, 0, tcpFlagSYN, nil))
+		device.NextWrite(t)
+	}
+	// The seventh SYN hits session.ErrBackpressure: it must be dropped, not
+	// terminate the read loop. The queue is still full at this point (nothing
+	// has drained it), so the drop is deterministic; the negative wait gives the
+	// loop a chance to report a pre-fix terminal error.
+	device.Inject(packetAdapterTCPv4(t, source, target, 50006, 443, 100, 0, tcpFlagSYN, nil))
+	select {
+	case err := <-result:
+		t.Fatalf("packet TUN runtime terminated on transient queue backpressure: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Drain the queue, then prove the loop survived: a retransmitted SYN is
+	// captured and answered.
+	for drained := 0; drained < 6; drained++ {
+		nextPacketTUNRuntime(t, clientApplication)
+	}
+	device.Inject(packetAdapterTCPv4(t, source, target, 50006, 443, 100, 0, tcpFlagSYN, nil))
+	synthetic := packetAdapterParseTCPv4(t, device.NextWrite(t))
+	if synthetic.flags != tcpFlagSYN|tcpFlagACK {
+		t.Fatalf("synthetic packet after backpressure = %+v, want SYN/ACK", synthetic)
+	}
+	nextPacketTUNRuntime(t, clientApplication)
+
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("packet TUN runtime stopped without a terminal device error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("packet TUN runtime did not stop after close")
+	}
+}
+
 func TestPacketTUNRuntimeRejectsInvalidConfiguration(t *testing.T) {
 	application, relayApplication := packetAdapterApplications(t)
 	defer application.Close()

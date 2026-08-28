@@ -106,7 +106,8 @@ uses a caller-controlled command path.
   and unexpected device errors as terminal errors. Well-formed local packets
   that carry a protocol the tunnel does not serve (for example ICMP or ICMPv6)
   or an IPv6 extension the adapter cannot walk are dropped, not terminal, so
-  routine host traffic cannot kill the session. Existing kernel TCP
+  routine host traffic cannot kill the session. Transient queue backpressure
+  (`session.ErrBackpressure`) is dropped the same way; existing kernel TCP
   retransmission handles a packet that is not accepted before an application
   frame is queued.
 - Linux host gating happens before provisioning access. Non-Linux builds still

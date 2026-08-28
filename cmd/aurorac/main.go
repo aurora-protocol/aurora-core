@@ -483,7 +483,7 @@ func runWithCarrierRecovery(ctx context.Context, policy carrierRecoveryPolicy, a
 		}
 		recoverable, err := attempt(ctx)
 		if ctx.Err() != nil {
-			if err == nil || err == ctx.Err() {
+			if err == nil || errors.Is(err, ctx.Err()) {
 				return nil
 			}
 			return err

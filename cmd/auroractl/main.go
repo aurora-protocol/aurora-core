@@ -1694,11 +1694,14 @@ func zeroNativeProvisioningSpecRecords(roots []protocol.AuthorityKeyRecord, depl
 }
 
 func writeNativeProvisioningTrustFile(path string, encoded []byte, force bool) error {
-	openFlags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
 	if force {
-		openFlags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+		// Remove any existing output (including a planted symlink) so the
+		// exclusive create below can never truncate an unrelated file.
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("build native provisioning trust: remove existing output: %w", err)
+		}
 	}
-	file, err := os.OpenFile(path, openFlags, 0o600)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("build native provisioning trust: output exists (use --force to overwrite)")

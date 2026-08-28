@@ -467,11 +467,19 @@ func labSessionLimits() session.Limits {
 	return session.Limits{MaxQueuedPackets: 64, MaxQueuedBytes: 1 << 20, ControlReservedPackets: 2, ControlReservedBytes: 8 << 10, ReplayWindow: 1024}
 }
 
-// labEgressLimits bounds the lab relay's socket egress.
+// labEgressLimits bounds the lab relay's socket egress. MaxFlows and
+// MaxBufferedBytes match the production default scale (256 flows / 16 MiB),
+// not the test-scale 16/1 MiB the fixture used: the production first hop
+// fails closed, so a flow-limit rejection escapes the frame handler and
+// resets the whole carrier stream (on-device: stream 1 RST_STREAM
+// INTERNAL_ERROR). A real TUN client bursts past 16 concurrent flows within
+// seconds of VPN startup — every DNS-driven UDP association lingers for the
+// 300 s confirm TTL — which killed Pixel-class sessions even though no flow
+// itself failed.
 func labEgressLimits() relay.SocketEgressLimits {
 	return relay.SocketEgressLimits{
-		MaxFlows:            16,
-		MaxBufferedBytes:    1 << 20,
+		MaxFlows:            256,
+		MaxBufferedBytes:    16 << 20,
 		TCPReadBufferBytes:  16 << 10,
 		MaxUDPDatagramBytes: 65535,
 		DialTimeout:         time.Second,

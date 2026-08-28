@@ -288,6 +288,64 @@ func TestLabPacketDataPlaneReproducesCarrierResetOnFailedEgress(t *testing.T) {
 	}
 }
 
+// TestLabPacketDataPlaneSurvivesDeviceFlowBurst is the regression test for the
+// second Pixel 7 failure mode: with lab loopback egress every flow succeeds
+// and lingers (UDP associations live for the 300 s confirm TTL), so a real TUN
+// client bursts past the relay's concurrent-flow limit within seconds of VPN
+// startup. The production first hop fails closed: the flow-limit rejection
+// escapes the frame handler and resets the carrier stream (on-device:
+// "stream error: stream ID 1; INTERNAL_ERROR; received from peer"). The lab
+// server must therefore wire device-scale flow limits. Before the fix this
+// test died mid-burst with exactly that carrier reset.
+func TestLabPacketDataPlaneSurvivesDeviceFlowBurst(t *testing.T) {
+	clientSide, labServer := startPacketLabClient(t, ServerOptions{})
+	if !labServer.LabEgress() {
+		t.Fatal("default options must wire lab loopback egress")
+	}
+
+	// 32 concurrent UDP flows (distinct source ports), each expecting an echo:
+	// double the old 16-flow lab limit.
+	const flows = 32
+	for index := 0; index < flows; index++ {
+		request := labUDPv4([4]byte{10, 0, 0, 2}, [4]byte{192, 0, 2, 9}, uint16(40000+index), 9999, []byte{byte(index)})
+		if err := clientSide.adapter.Ingress(context.Background(), request, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	echoes := 0
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && echoes < flows {
+		select {
+		case err := <-clientSide.pumpResult:
+			t.Fatalf("carrier died mid-burst after %d echoes: %v", echoes, err)
+		default:
+		}
+		if packets := drainLocalPackets(clientSide); len(packets) != 0 {
+			echoes += len(packets)
+			continue
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if echoes != flows {
+		t.Fatalf("UDP burst echoes = %d, want %d", echoes, flows)
+	}
+	// The carrier must still be alive and serving after the burst: one more
+	// flow completes an echo roundtrip.
+	request := labUDPv4([4]byte{10, 0, 0, 2}, [4]byte{192, 0, 2, 9}, 41000, 9999, []byte("post-burst"))
+	if err := clientSide.adapter.Ingress(context.Background(), request, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	response := nextLocalPacket(t, clientSide, 5*time.Second)
+	if len(response) < 28 || !bytes.Equal(response[28:], []byte("post-burst")) {
+		t.Fatalf("post-burst UDP echo response = %x", response)
+	}
+	select {
+	case err := <-clientSide.pumpResult:
+		t.Fatalf("carrier died after the burst: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
 func labTCPv4(source, target [4]byte, sourcePort, targetPort uint16, sequence, acknowledgment uint32, flags byte, payload []byte) []byte {
 	packet := make([]byte, 40+len(payload))
 	packet[0] = 0x45

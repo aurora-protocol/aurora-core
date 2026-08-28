@@ -87,8 +87,13 @@ would lose its session immediately. `auroralab serve` therefore defaults to
 **lab loopback egress**: every DNS A/AAAA lookup answers `127.0.0.1`/`::1`,
 other DNS queries get a fixture-style echo response, every TCP flow lands on
 the in-process cover origin, and every UDP flow lands on an in-process echo
-endpoint — no lab flow can fail, so the carrier survives. This is what makes
-the Pixel-class TUN data plane stable against the lab relay.
+endpoint — no lab flow can fail, so the carrier survives. The lab relay also
+wires device-scale flow limits (256 concurrent flows / 16 MiB of buffered
+egress, the production default scale): the first hop fails closed on a
+flow-limit rejection too, and a real TUN client bursts past test-scale limits
+within seconds of VPN startup because lab UDP associations linger for the
+300 s confirm TTL. This is what makes the Pixel-class TUN data plane stable
+against the lab relay.
 
 Pass `--dns-upstream IP:port` (a numeric UDP DNS resolver) to switch to real
 internet egress instead. In that mode the relay dials real targets and the

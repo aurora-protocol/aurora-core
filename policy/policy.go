@@ -52,6 +52,19 @@ func ProfileByName(name string) (Profile, error) {
 	return Profile{}, fmt.Errorf("policy: unknown profile %q", name)
 }
 
+// RequiresPQPreludeSignature reports whether the policy requires the
+// post-quantum prelude signature in addition to the classical one. Spec
+// section 14.5 mandates both prelude signatures under the adversarial
+// profiles.
+func RequiresPQPreludeSignature(policyID uint64) bool {
+	switch policyID {
+	case registry.PolicyAdversarialDPI, registry.PolicyAdversarialStrict, registry.PolicyEmergencyWeb:
+		return true
+	default:
+		return false
+	}
+}
+
 func SmartProfile(pathClass string) Profile {
 	switch pathClass {
 	case "clean":

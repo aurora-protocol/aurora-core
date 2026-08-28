@@ -12,6 +12,7 @@ import (
 
 	"github.com/aurora-protocol/aurora-core/admission"
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
+	"github.com/aurora-protocol/aurora-core/policy"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/session"
@@ -312,6 +313,13 @@ func (d *ClientDriver) Connect(ctx context.Context, opener ClientCarrierOpener) 
 	defer zeroCoverCapsule2(&capsule2)
 	if err := validateClientPolicyAccept(uint64(time.Now().Unix()), d.deployment, d.policyOffer, capsule2.PolicyAccept); err != nil {
 		return nil, err
+	}
+	// Spec section 14.5 requires both prelude signatures under the
+	// adversarial policies. The negotiated policy is only known once the
+	// PolicyAccept arrives, so fail closed here when the relay omitted the
+	// PQ prelude signature (RequirePQ already rejects that case earlier).
+	if policy.RequiresPQPreludeSignature(capsule2.PolicyAccept.SelectedPolicy) && len(prelude1.ServerPreludeSignaturePQ) == 0 {
+		return nil, fmt.Errorf("handshake: negotiated policy requires a PQ prelude signature")
 	}
 	expectedServerFinished, capsule1Hash, policyAcceptHash, err := ComputeServerFinished(d.suite, handshakeSecrets.ServerFinishedKey, preludeTranscriptHash, capsule1, capsule2.PolicyAccept)
 	if err != nil {

@@ -222,8 +222,17 @@ func (c Config) Validate() error {
 		return fmt.Errorf("config: unsupported version %q", c.Version)
 	}
 	if c.Profile != "smart" {
-		if _, err := policy.ProfileByName(c.Profile); err != nil {
+		profile, err := policy.ProfileByName(c.Profile)
+		if err != nil {
 			return err
+		}
+		if policy.RequiresPQPreludeSignature(profile.ID) {
+			if !c.RequirePQ {
+				return fmt.Errorf("config: require_pq cannot be disabled for profile %q", c.Profile)
+			}
+			if c.RequireSplit2ForAdversarial && c.Route == "fast-1" {
+				return fmt.Errorf("config: require_split2_for_adversarial forbids route %q for profile %q", c.Route, c.Profile)
+			}
 		}
 	}
 	if c.Route != "" {

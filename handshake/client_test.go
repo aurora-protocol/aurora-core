@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -693,6 +694,7 @@ type scriptedClientOpener struct {
 	mutateCapsule2       func(*protocol.CoverCapsule2Plain)
 	mutateCapsule2Record func([]byte)
 	capsule2Route        func(uint64) uint64
+	omitPQSignature      bool
 	allowInvalidPolicy   bool
 	skipRelayApplication bool
 	applicationRead      io.ReadCloser
@@ -733,6 +735,7 @@ func (o *scriptedClientOpener) Open(ctx context.Context, coverRandom []byte) (Bo
 		mutateCapsule2:       o.mutateCapsule2,
 		mutateCapsule2Record: o.mutateCapsule2Record,
 		capsule2Route:        o.capsule2Route,
+		omitPQSignature:      o.omitPQSignature,
 		allowInvalidPolicy:   o.allowInvalidPolicy,
 		skipRelayApplication: o.skipRelayApplication,
 		applicationRead:      o.applicationRead,
@@ -766,6 +769,7 @@ type scriptedClientCarrier struct {
 	mutateCapsule2       func(*protocol.CoverCapsule2Plain)
 	mutateCapsule2Record func([]byte)
 	capsule2Route        func(uint64) uint64
+	omitPQSignature      bool
 	allowInvalidPolicy   bool
 	skipRelayApplication bool
 	applicationRead      io.ReadCloser
@@ -880,9 +884,11 @@ func (c *scriptedClientCarrier) respondPrelude(record []byte) error {
 		if err != nil {
 			return protocol.CoverPrelude1{}, nil, err
 		}
-		value.ServerPreludeSignaturePQ = make([]byte, mldsa65.SignatureSize)
-		if err := mldsa65.SignTo(c.fixture.epochPQ, transcript, nil, false, value.ServerPreludeSignaturePQ); err != nil {
-			return protocol.CoverPrelude1{}, nil, err
+		if !c.omitPQSignature {
+			value.ServerPreludeSignaturePQ = make([]byte, mldsa65.SignatureSize)
+			if err := mldsa65.SignTo(c.fixture.epochPQ, transcript, nil, false, value.ServerPreludeSignaturePQ); err != nil {
+				return protocol.CoverPrelude1{}, nil, err
+			}
 		}
 		encoded, err := protocol.Encode(value)
 		return value, encoded, err
@@ -1186,5 +1192,83 @@ func assertApplicationsInteroperate(t *testing.T, client, relay *session.Applica
 				t.Fatal("application packet did not interoperate")
 			}
 		})
+	}
+}
+
+func TestClientDriverRejectsAdversarialPolicyWithoutPQPreludeSignature(t *testing.T) {
+	now := time.Now()
+	fixture := newTestVerifiedDeploymentFixture(t, now)
+	config, provider, driver := newClientDriverTestSetup(t, now, fixture, func(config *ClientDriverConfig) {
+		config.RequirePQ = false
+		config.PolicyOffer.MinimumPolicyID = registry.PolicyFastWeb
+		config.PolicyOffer.RequestedPolicyID = registry.PolicyAdversarialDPI
+	})
+	opener := &scriptedClientOpener{
+		fixture:              fixture,
+		config:               config,
+		omitPQSignature:      true,
+		skipRelayApplication: true,
+	}
+
+	established, err := driver.Connect(context.Background(), opener)
+	if established != nil {
+		_ = established.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "requires a PQ prelude signature") {
+		t.Fatalf("adversarial policy without PQ prelude signature error = %v", err)
+	}
+	carrier := opener.lastCarrier()
+	if carrier == nil {
+		t.Fatal("client did not open carrier")
+	}
+	if provider.calls.Load() != 1 {
+		t.Fatalf("proof provider calls = %d, want 1", provider.calls.Load())
+	}
+	if carrier.streamRequests.Load() != 0 {
+		t.Fatal("application streams released for adversarial policy without a PQ prelude signature")
+	}
+	if carrier.closes.Load() != 1 {
+		t.Fatalf("carrier closes = %d, want 1", carrier.closes.Load())
+	}
+}
+
+func TestClientDriverAllowsMissingPQPreludeSignatureOutsideAdversarialPolicies(t *testing.T) {
+	now := time.Now()
+	fixture := newTestVerifiedDeploymentFixture(t, now)
+	config, _, driver := newClientDriverTestSetup(t, now, fixture, func(config *ClientDriverConfig) {
+		config.RequirePQ = false
+	})
+	opener := &scriptedClientOpener{
+		fixture:              fixture,
+		config:               config,
+		omitPQSignature:      true,
+		skipRelayApplication: true,
+	}
+
+	established, err := driver.Connect(context.Background(), opener)
+	if err != nil {
+		t.Fatalf("balanced-web without PQ prelude signature rejected: %v", err)
+	}
+	if err := established.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClientDriverVerifiesPresentPQPreludeSignatureForAdversarialPolicy(t *testing.T) {
+	now := time.Now()
+	fixture := newTestVerifiedDeploymentFixture(t, now)
+	config, _, driver := newClientDriverTestSetup(t, now, fixture, func(config *ClientDriverConfig) {
+		config.RequirePQ = false
+		config.PolicyOffer.MinimumPolicyID = registry.PolicyFastWeb
+		config.PolicyOffer.RequestedPolicyID = registry.PolicyAdversarialDPI
+	})
+	opener := &scriptedClientOpener{fixture: fixture, config: config, skipRelayApplication: true}
+
+	established, err := driver.Connect(context.Background(), opener)
+	if err != nil {
+		t.Fatalf("adversarial policy with a verified PQ prelude signature rejected: %v", err)
+	}
+	if err := established.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

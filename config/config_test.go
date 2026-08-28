@@ -179,3 +179,47 @@ func TestParseDoesNotTreatBracketedExtensionValueAsTableHeader(t *testing.T) {
 		t.Fatalf("opaque extension value rejected: %v", err)
 	}
 }
+
+func TestRequirePQCannotBeDisabledForAdversarialProfiles(t *testing.T) {
+	for _, profile := range []string{"adversarial-dpi", "adversarial-dpi-strict", "emergency-web"} {
+		_, err := Parse(strings.NewReader("[aurora]\nprofile = \"" + profile + "\"\n\n[security]\nrequire_pq = false\n"))
+		if err == nil {
+			t.Fatalf("profile %q accepted require_pq = false", profile)
+		}
+	}
+
+	for _, profile := range []string{"smart", "fast-web", "balanced-web"} {
+		cfg, err := Parse(strings.NewReader("[aurora]\nprofile = \"" + profile + "\"\n\n[security]\nrequire_pq = false\n"))
+		if err != nil {
+			t.Fatalf("profile %q rejected require_pq = false: %v", profile, err)
+		}
+		if cfg.RequirePQ {
+			t.Fatalf("profile %q did not parse require_pq = false", profile)
+		}
+	}
+}
+
+func TestRequireSplit2ForAdversarialForbidsFast1(t *testing.T) {
+	for _, profile := range []string{"adversarial-dpi", "adversarial-dpi-strict", "emergency-web"} {
+		_, err := Parse(strings.NewReader("[aurora]\nprofile = \"" + profile + "\"\nroute = \"fast-1\"\n"))
+		if err == nil {
+			t.Fatalf("profile %q accepted route fast-1 with require_split2_for_adversarial", profile)
+		}
+
+		cfg, err := Parse(strings.NewReader("[aurora]\nprofile = \"" + profile + "\"\nroute = \"fast-1\"\n\n[security]\nrequire_split2_for_adversarial = false\n"))
+		if err != nil {
+			t.Fatalf("profile %q rejected fast-1 with the split2 requirement disabled: %v", profile, err)
+		}
+		if cfg.RequireSplit2ForAdversarial {
+			t.Fatalf("profile %q did not parse require_split2_for_adversarial = false", profile)
+		}
+	}
+
+	cfg, err := Parse(strings.NewReader("[aurora]\nprofile = \"fast-web\"\nroute = \"fast-1\"\n"))
+	if err != nil {
+		t.Fatalf("fast-web rejected route fast-1: %v", err)
+	}
+	if !cfg.RequireSplit2ForAdversarial {
+		t.Fatalf("default require_split2_for_adversarial changed")
+	}
+}

@@ -111,3 +111,16 @@ func TestPACECongestionReducesPadding(t *testing.T) {
 		t.Fatalf("unexpected PACE output: %+v", out)
 	}
 }
+
+func TestRequiresPQPreludeSignatureMatchesSpecAdversarialProfiles(t *testing.T) {
+	for _, id := range []uint64{registry.PolicyAdversarialDPI, registry.PolicyAdversarialStrict, registry.PolicyEmergencyWeb} {
+		if !RequiresPQPreludeSignature(id) {
+			t.Fatalf("policy 0x%x should require the PQ prelude signature", id)
+		}
+	}
+	for _, id := range []uint64{registry.PolicyFastWeb, registry.PolicyBalancedWeb, registry.PolicyLab, 0x00, 0x7e} {
+		if RequiresPQPreludeSignature(id) {
+			t.Fatalf("policy 0x%x should not require the PQ prelude signature", id)
+		}
+	}
+}

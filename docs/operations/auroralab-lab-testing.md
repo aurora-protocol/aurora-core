@@ -19,9 +19,25 @@ authority, issuer metadata plus its Blind RSA key, a signed-seed trust anchor,
 a sealed v2 native provisioning trust file (`native-provisioning-trust.bin`,
 independently verifiable with
 `go run ./cmd/auroractl check-native-provisioning-trust`), a native
-provisioning `wallet.bin` with one-time entries, a shared self-signed TLS
-certificate covering the relay/issuer host, and a `manifest.json` describing
-the layout and public endpoints.
+provisioning `wallet.bin` with one-time entries, a lab TLS CA hierarchy, and a
+`manifest.json` describing the layout and public endpoints.
+
+The TLS material is a two-level lab hierarchy:
+
+- `ca.pem` / `ca-key.pem`: the self-signed lab CA (`CA:TRUE`, cert-sign usage,
+  CN "auroralab lab CA (local lab testing only)"). **`ca.pem` is what lab
+  client devices install as a trust anchor** — Android's user trust store
+  requires a CA certificate, so installing the leaf alone does not work.
+- `tls-cert.pem` / `tls-key.pem`: the relay/issuer leaf certificate signed by
+  the lab CA, with SANs covering `--relay-host`. `tls-cert.pem` carries the
+  full chain (leaf first, then the CA) so both endpoints present a chain that
+  validates against `ca.pem`. `auroralab serve` fails closed at load time if
+  the chain does not verify against `ca.pem` or if the CA is not a
+  certificate-signing CA.
+
+The cover template continues to pin the **leaf** subject public key info
+(`OriginSPKIHash`), not the CA; the CA hierarchy change does not affect that
+binding or the relay handshake.
 
 `--relay-host` is the address clients will dial (e.g. the lab machine's LAN IP
 for a phone client); it is embedded in the wallet URLs and TLS SANs.
@@ -37,6 +53,14 @@ minted material; an in-process loopback cover origin doubles as an end-to-end
 egress target. The listen port must match the minted wallet port (the host may
 differ, e.g. `--listen 0.0.0.0:9443`). Non-loopback binding requires
 `--allow-non-loopback` and prints a warning; the default remains loopback.
+
+The presented chain can be verified exactly as a client device would:
+
+```sh
+echo Q | openssl s_client -connect 127.0.0.1:9444 -CAfile /path/to/lab/ca.pem \
+    -verify_return_error
+curl --cacert /path/to/lab/ca.pem https://127.0.0.1:9443/
+```
 
 ## Client
 
@@ -55,8 +79,8 @@ the printed `cover=` address proves the full chain (wallet reservation →
 handshake → live Blind RSA issuer exchange → relay egress).
 
 Note: `aurorac`'s issuer HTTP client trusts the system root store only, so on a
-real host the minted issuer certificate must be added to that store (or the
-issuer exchange fronted accordingly). The in-repo acceptance test
+real host install `ca.pem` into that store (on Android, install it as a user
+CA certificate). The in-repo acceptance test
 (`cmd/aurorac/auroralab_proxy_test.go`) and the library-level end-to-end test
 (`internal/labfixture/integration_test.go`) demonstrate the full flow on a
-development host using the minted certificate directly.
+development host trusting exactly `ca.pem`.

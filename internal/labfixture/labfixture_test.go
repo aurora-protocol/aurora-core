@@ -11,8 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"crypto/x509"
+	"encoding/pem"
+
 	"github.com/aurora-protocol/aurora-core/carrier"
 	"github.com/aurora-protocol/aurora-core/client"
+	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
 	"github.com/aurora-protocol/aurora-core/issuerd"
 )
 
@@ -109,6 +113,42 @@ func TestMintWriteLoadRoundTrip(t *testing.T) {
 		t.Fatal("loaded deployment did not verify")
 	}
 
+	// The minted CA hierarchy: ca.pem is a signing CA, tls-cert.pem is the
+	// leaf+CA chain, the leaf verifies against ca.pem for server auth, and
+	// the cover template still pins the LEAF subject public key info.
+	caCertificate := loaded.CACertificate
+	if caCertificate == nil || !caCertificate.IsCA || caCertificate.KeyUsage&x509.KeyUsageCertSign == 0 {
+		t.Fatal("minted ca.pem is not a certificate-signing CA")
+	}
+	if !strings.Contains(caCertificate.Subject.CommonName, "lab CA") {
+		t.Fatalf("lab CA CN = %q", caCertificate.Subject.CommonName)
+	}
+	if len(loaded.Certificate.Certificate) != 2 {
+		t.Fatalf("TLS chain length = %d, want leaf+CA", len(loaded.Certificate.Certificate))
+	}
+	leaf, err := x509.ParseCertificate(loaded.Certificate.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaf.IsCA {
+		t.Fatal("relay/issuer leaf must not be a CA")
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(caCertificate)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
+		t.Fatalf("leaf does not verify against ca.pem: %v", err)
+	}
+	chainCA, err := x509.ParseCertificate(loaded.Certificate.Certificate[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(chainCA.Raw, caCertificate.Raw) {
+		t.Fatal("tls-cert.pem chain CA does not match ca.pem")
+	}
+	if got := auroracrypto.PreHash(leaf.RawSubjectPublicKeyInfo); !bytes.Equal(loaded.Deployment.Template().OriginSPKIHash, got) {
+		t.Fatal("cover template no longer pins the leaf SPKI after the CA chain change")
+	}
+
 	// The minted trust file must round-trip through the production parser.
 	trustEncoded, err := os.ReadFile(filepath.Join(dir, FileNativeProvisioningTrust))
 	if err != nil {
@@ -203,6 +243,76 @@ func TestLoadRejectsMissingAndTamperedMaterial(t *testing.T) {
 	if _, err := Load(dir, time.Now()); err == nil {
 		t.Fatal("deployment with tampered descriptor hash loaded")
 	}
+}
+
+// TestLoadRejectsTamperedCA fails closed when the minted CA hierarchy is
+// tampered with: serve must never present a chain that does not verify
+// against the minted ca.pem.
+func TestLoadRejectsTamperedCA(t *testing.T) {
+	newDir := func(t *testing.T) string {
+		t.Helper()
+		material := mintForTest(t, nil)
+		defer material.Zero()
+		dir := filepath.Join(t.TempDir(), "deployment")
+		if err := material.WriteTo(dir); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+
+	t.Run("ca replaced with a different CA", func(t *testing.T) {
+		dir := newDir(t)
+		_, foreignCAPEM, foreignKeyPEM, _, foreignKey, err := mintLabCA(time.Now(), time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		zeroLabECDSAKey(foreignKey)
+		zeroLabBytes(foreignKeyPEM)
+		if err := os.WriteFile(filepath.Join(dir, FileCA), foreignCAPEM, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(dir, time.Now()); err == nil {
+			t.Fatal("deployment loaded with a foreign ca.pem")
+		}
+	})
+
+	t.Run("ca replaced with the leaf certificate", func(t *testing.T) {
+		dir := newDir(t)
+		chainPEM, err := os.ReadFile(filepath.Join(dir, FileTLSCertificate))
+		if err != nil {
+			t.Fatal(err)
+		}
+		block, _ := pem.Decode(chainPEM)
+		if block == nil {
+			t.Fatal("tls-cert.pem did not parse")
+		}
+		leafOnly := pem.EncodeToMemory(block)
+		if err := os.WriteFile(filepath.Join(dir, FileCA), leafOnly, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(dir, time.Now()); err == nil {
+			t.Fatal("deployment loaded with a non-CA ca.pem")
+		}
+	})
+
+	t.Run("chain missing the CA", func(t *testing.T) {
+		dir := newDir(t)
+		chainPEM, err := os.ReadFile(filepath.Join(dir, FileTLSCertificate))
+		if err != nil {
+			t.Fatal(err)
+		}
+		block, _ := pem.Decode(chainPEM)
+		if block == nil {
+			t.Fatal("tls-cert.pem did not parse")
+		}
+		leafOnly := pem.EncodeToMemory(block)
+		if err := os.WriteFile(filepath.Join(dir, FileTLSCertificate), leafOnly, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(dir, time.Now()); err == nil {
+			t.Fatal("deployment loaded with a chain missing the lab CA")
+		}
+	})
 }
 
 func TestLoadRejectsTamperedManifestWarning(t *testing.T) {

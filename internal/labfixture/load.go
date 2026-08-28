@@ -32,6 +32,7 @@ type Loaded struct {
 	IssuerAuthority protocol.AuthorityKeyRecord
 	BlindRSAKey     *rsa.PrivateKey
 	Certificate     tls.Certificate
+	CACertificate   *x509.Certificate
 
 	classicalSigner handshake.TranscriptSigner
 	pqSigner        handshake.TranscriptSigner
@@ -155,6 +156,12 @@ func Load(dir string, now time.Time) (*Loaded, error) {
 	}
 	loaded.BlindRSAKey = blindRSAKey
 
+	caCertificate, err := loadLabCACertificate(filepath.Join(dir, FileCA))
+	if err != nil {
+		return nil, err
+	}
+	loaded.CACertificate = caCertificate
+
 	certificatePEM, err := readLabFile(filepath.Join(dir, FileTLSCertificate), maximumLabFileBytes)
 	if err != nil {
 		return nil, err
@@ -170,8 +177,62 @@ func Load(dir string, now time.Time) (*Loaded, error) {
 	if err != nil {
 		return nil, fmt.Errorf("labfixture: load TLS certificate: %w", err)
 	}
+	if err := verifyLabCertificateChain(&certificate, caCertificate, uint64(now.Unix())); err != nil {
+		return nil, err
+	}
 	loaded.Certificate = certificate
 	return loaded, nil
+}
+
+// loadLabCACertificate loads and validates the minted lab CA certificate.
+func loadLabCACertificate(path string) (*x509.Certificate, error) {
+	encoded, err := readLabFile(path, maximumLabFileBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer zeroLabBytes(encoded)
+	block, rest := pem.Decode(encoded)
+	if block == nil || block.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
+		return nil, fmt.Errorf("labfixture: lab CA must contain one PEM certificate")
+	}
+	caCertificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("labfixture: parse lab CA certificate: %w", err)
+	}
+	if !caCertificate.BasicConstraintsValid || !caCertificate.IsCA || caCertificate.KeyUsage&x509.KeyUsageCertSign == 0 {
+		return nil, fmt.Errorf("labfixture: lab CA certificate must be a certificate-signing CA")
+	}
+	return caCertificate, nil
+}
+
+// verifyLabCertificateChain requires the loaded chain to be exactly leaf+CA
+// signed by the minted lab CA, currently valid for server authentication.
+// Anything less fails closed so a tampered ca.pem or chain can never serve.
+func verifyLabCertificateChain(certificate *tls.Certificate, caCertificate *x509.Certificate, nowUnix uint64) error {
+	if certificate == nil || len(certificate.Certificate) != 2 || certificate.PrivateKey == nil {
+		return fmt.Errorf("labfixture: TLS certificate chain must contain exactly the leaf and lab CA")
+	}
+	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("labfixture: parse TLS leaf certificate: %w", err)
+	}
+	chainCA, err := x509.ParseCertificate(certificate.Certificate[1])
+	if err != nil {
+		return fmt.Errorf("labfixture: parse TLS chain CA certificate: %w", err)
+	}
+	if !bytes.Equal(chainCA.Raw, caCertificate.Raw) {
+		return fmt.Errorf("labfixture: TLS chain CA does not match ca.pem")
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(caCertificate)
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:       roots,
+		CurrentTime: time.Unix(int64(nowUnix), 0),
+		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		return fmt.Errorf("labfixture: TLS leaf does not verify against the lab CA: %w", err)
+	}
+	return nil
 }
 
 // loadLabClassicalSigner loads a PEM P-256 epoch transcript signer key.

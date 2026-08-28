@@ -48,10 +48,16 @@ const (
 	FileNativeProvisioningTrust = "native-provisioning-trust.bin"
 	// FileWallet is the encoded native provisioning wallet.
 	FileWallet = "wallet.bin"
-	// FileTLSCertificate is the shared relay/issuer TLS certificate (PEM).
+	// FileTLSCertificate is the shared relay/issuer TLS certificate chain
+	// (leaf first, then the lab CA) in PEM form.
 	FileTLSCertificate = "tls-cert.pem"
 	// FileTLSPrivateKey is the shared relay/issuer TLS private key (PEM).
 	FileTLSPrivateKey = "tls-key.pem"
+	// FileCA is the self-signed lab CA certificate (PEM); client devices
+	// install it as a trust anchor for the relay/issuer HTTPS exchange.
+	FileCA = "ca.pem"
+	// FileCAKey is the lab CA private key (PEM).
+	FileCAKey = "ca-key.pem"
 
 	maximumLabFileBytes     = 16 << 20
 	maximumLabManifestBytes = 64 << 10
@@ -76,6 +82,8 @@ func manifestFiles() map[string]string {
 		"wallet":                    FileWallet,
 		"tls_certificate":           FileTLSCertificate,
 		"tls_private_key":           FileTLSPrivateKey,
+		"ca":                        FileCA,
+		"ca_key":                    FileCAKey,
 	}
 }
 

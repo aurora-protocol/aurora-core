@@ -26,8 +26,8 @@ import (
 // (internal/labfixture) on loopback. Only the two existing test seams are
 // overridden: the Linux host gate (aurorac proxy is Linux-only in production;
 // this test exercises the identical code path on the development host) and
-// the issuer HTTP client (production trusts system roots; the lab issuer is
-// self-signed, so the test client trusts exactly the minted certificate).
+// the issuer HTTP client (production trusts system roots; the lab issuer chain
+// is signed by the minted lab CA, so the test client trusts exactly ca.pem).
 //
 // This is the acceptance proof that a minted wallet + trust file drive a real
 // client handshake and proxied request end to end.
@@ -93,14 +93,15 @@ func TestProxyCompletesAgainstAuroralabDeployment(t *testing.T) {
 		_ = issuerServer.Shutdown(shutdownCtx)
 	})
 
-	// The lab issuer is self-signed; trust exactly the minted certificate.
-	certificatePEM, err := os.ReadFile(filepath.Join(dir, labfixture.FileTLSCertificate))
+	// The lab issuer presents a chain signed by the minted lab CA; trust
+	// exactly that CA, mirroring a lab device with ca.pem installed.
+	caPEM, err := os.ReadFile(filepath.Join(dir, labfixture.FileCA))
 	if err != nil {
 		t.Fatal(err)
 	}
 	issuerRoots := x509.NewCertPool()
-	if !issuerRoots.AppendCertsFromPEM(certificatePEM) {
-		t.Fatal("minted TLS certificate did not parse")
+	if !issuerRoots.AppendCertsFromPEM(caPEM) {
+		t.Fatal("minted lab CA certificate did not parse")
 	}
 	restoreIssuerClient := setNewIssuerHTTPClientForTest(func() *http.Client {
 		return &http.Client{Transport: &http.Transport{

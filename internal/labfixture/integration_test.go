@@ -99,16 +99,17 @@ func TestLabDeploymentEndToEnd(t *testing.T) {
 		_ = issuerServer.Shutdown(shutdownCtx)
 	})
 
-	// The client trusts only the minted lab TLS certificate for the issuer
-	// exchange; the relay carrier pins the same certificate through the
-	// provisioning trust roots.
-	certificatePEM, err := os.ReadFile(filepath.Join(dir, FileTLSCertificate))
+	// The client trusts only the minted lab CA certificate for the issuer
+	// exchange (this mirrors a lab device with ca.pem installed); the relay
+	// carrier additionally pins the leaf SPKI through the provisioning trust
+	// roots.
+	caPEM, err := os.ReadFile(filepath.Join(dir, FileCA))
 	if err != nil {
 		t.Fatal(err)
 	}
 	issuerRoots := x509.NewCertPool()
-	if !issuerRoots.AppendCertsFromPEM(certificatePEM) {
-		t.Fatal("minted TLS certificate did not parse as PEM")
+	if !issuerRoots.AppendCertsFromPEM(caPEM) {
+		t.Fatal("minted lab CA certificate did not parse as PEM")
 	}
 
 	trustEncoded, err := os.ReadFile(filepath.Join(dir, FileNativeProvisioningTrust))

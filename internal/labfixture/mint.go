@@ -167,11 +167,22 @@ func Mint(options MintOptions) (_ *Material, err error) {
 		}
 	}()
 
-	// Relay TLS certificate (self-signed, SANs cover the minted relay host).
-	certificateRaw, certificatePEM, keyPEM, err := mintLabTLSCertificate(options.RelayHost, options.Now, options.Validity)
+	// Lab CA hierarchy: a self-signed lab CA signs the relay/issuer leaf so
+	// client devices can install ca.pem as a trust anchor (Android's user
+	// trust store requires a CA certificate). The cover template continues to
+	// pin the LEAF subject public key info, not the CA.
+	caDER, caPEM, caKeyPEM, caCertificate, caKey, err := mintLabCA(options.Now, options.Validity)
 	if err != nil {
 		return nil, err
 	}
+	certificateRaw, certificatePEM, keyPEM, err := mintLabTLSCertificate(options.RelayHost, options.Now, options.Validity, caCertificate, caKey)
+	zeroLabECDSAKey(caKey)
+	if err != nil {
+		return nil, err
+	}
+	// tls-cert.pem carries the full chain (leaf first) so the relay and
+	// issuer present a chain that verifies against ca.pem.
+	chainPEM := append(certificatePEM, caPEM...)
 	originSPKIHash := auroracrypto.PreHash(certificateRawSPKI(certificateRaw))
 
 	// Relay deployment: cover template + descriptor + signatures.
@@ -236,8 +247,10 @@ func Mint(options MintOptions) (_ *Material, err error) {
 		return nil, err
 	}
 
-	// Wallet with one provisioning entry per access hint.
-	trustRoots, err := client.EncodeNativeTrustRoots([][]byte{certificateRaw})
+	// Wallet with one provisioning entry per access hint. The client-side TLS
+	// root set anchors on the lab CA (the leaf alone would not chain once it
+	// is CA-signed); the leaf SPKI pin in the cover template is unchanged.
+	trustRoots, err := client.EncodeNativeTrustRoots([][]byte{caDER})
 	if err != nil {
 		return nil, err
 	}
@@ -316,8 +329,10 @@ func Mint(options MintOptions) (_ *Material, err error) {
 		{name: FileSeedRootAuthorityKey, data: seedRootEncoded},
 		{name: FileNativeProvisioningTrust, data: trustEncoded},
 		{name: FileWallet, data: walletEncoded},
-		{name: FileTLSCertificate, data: certificatePEM},
+		{name: FileTLSCertificate, data: chainPEM},
 		{name: FileTLSPrivateKey, data: keyPEM},
+		{name: FileCA, data: caPEM},
+		{name: FileCAKey, data: caKeyPEM},
 	}
 	return material, nil
 }
@@ -717,10 +732,60 @@ func mintLabSignedSeed(now time.Time, validFrom, validUntil uint64, metadata pro
 	return seedEncoded, root, nil
 }
 
-// mintLabTLSCertificate creates a self-signed TLS server certificate whose
-// SANs cover the minted relay host. It returns the raw leaf DER plus the PEM
-// encodings for persistence.
-func mintLabTLSCertificate(host string, now time.Time, validity time.Duration) (rawDER, certificatePEM, keyPEM []byte, err error) {
+// mintLabCA creates the self-signed lab certificate authority that anchors
+// the relay/issuer leaf chain. Client devices install ca.pem as a trust
+// anchor (Android's user trust store requires a CA certificate). The caller
+// erases the returned private key after use.
+func mintLabCA(now time.Time, validity time.Duration) (caDER, caPEM, caKeyPEM []byte, certificate *x509.Certificate, key *ecdsa.PrivateKey, err error) {
+	key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, nil, nil, nil, err
+	}
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := rand.Int(rand.Reader, serialLimit)
+	if err != nil {
+		zeroLabECDSAKey(key)
+		return nil, nil, nil, nil, nil, err
+	}
+	template := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "auroralab lab CA (local lab testing only)"},
+		NotBefore:             now.Add(-5 * time.Minute),
+		NotAfter:              now.Add(validity),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		zeroLabECDSAKey(key)
+		return nil, nil, nil, nil, nil, err
+	}
+	certificate, err = x509.ParseCertificate(der)
+	if err != nil {
+		zeroLabECDSAKey(key)
+		return nil, nil, nil, nil, nil, err
+	}
+	caKeyPEM, err = mintLabECPrivateKeyPEM(key)
+	if err != nil {
+		zeroLabECDSAKey(key)
+		return nil, nil, nil, nil, nil, err
+	}
+	caPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if len(caPEM) == 0 {
+		zeroLabECDSAKey(key)
+		return nil, nil, nil, nil, nil, fmt.Errorf("labfixture: encode lab CA certificate failed")
+	}
+	return append([]byte(nil), der...), caPEM, caKeyPEM, certificate, key, nil
+}
+
+// mintLabTLSCertificate creates the relay/issuer leaf certificate signed by
+// the lab CA, whose SANs cover the minted relay host. It returns the raw leaf
+// DER plus the leaf PEM encodings for persistence.
+func mintLabTLSCertificate(host string, now time.Time, validity time.Duration, caCertificate *x509.Certificate, caKey *ecdsa.PrivateKey) (rawDER, certificatePEM, keyPEM []byte, err error) {
+	if caCertificate == nil || caKey == nil || !caCertificate.IsCA {
+		return nil, nil, nil, fmt.Errorf("labfixture: a lab CA is required to sign the leaf certificate")
+	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, nil, err
@@ -745,7 +810,7 @@ func mintLabTLSCertificate(host string, now time.Time, validity time.Duration) (
 	} else {
 		template.DNSNames = []string{host}
 	}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	der, err := x509.CreateCertificate(rand.Reader, template, caCertificate, &key.PublicKey, caKey)
 	if err != nil {
 		return nil, nil, nil, err
 	}

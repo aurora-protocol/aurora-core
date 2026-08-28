@@ -126,6 +126,8 @@ func runMint(args []string, stdout, stderr io.Writer) int {
 		manifest.Relay.URL, manifest.Issuer.URL, time.Unix(int64(manifest.ValidUntilUnix), 0).UTC().Format(time.RFC3339))
 	fmt.Fprintf(stdout, "auroralab client wallet=%s/%s trust=%s/%s\n",
 		config.dir, labfixture.FileWallet, config.dir, labfixture.FileNativeProvisioningTrust)
+	fmt.Fprintf(stdout, "auroralab client trust anchor=%s/%s — install this CA on lab client devices so the relay/issuer HTTPS exchange validates\n",
+		config.dir, labfixture.FileCA)
 	fmt.Fprintln(stdout, "auroralab reminder: LOCAL LAB TESTING ONLY — never deploy this material")
 	return 0
 }

@@ -40,7 +40,7 @@ package packet
 //   - Seal (193) non-in-place seal 229-231, aead.Seal err 232, sealed < tag 235.
 //     The non-in-place `else` branch (229) fires only when encodeFrameBlockForSeal
 //     returns reusable=false, which happens only when the block's EncodedLen is
-//     not known (line 353) — but a not-known length always fails Encode, so Seal
+//     not known (line 356) — but a not-known length always fails Encode, so Seal
 //     returns at 201 before reaching the seal. When the length is known and in
 //     range, EncodeWithReservedCapacity reserves exactly +packetAuthTagBytes so
 //     reusable is always true. aead.Seal/SealTo (232) never errors after
@@ -64,7 +64,7 @@ package packet
 //   - encodeFrameBlockForSeal (351) EncodeWithReservedCapacity err 358. The line
 //     358 branch is reached only when block.EncodedLen returns known=true, which
 //     means every varint and opaque-24 length in the block is in range (a
-//     not-known length short-circuits to line 353). With every length in range
+//     not-known length short-circuits to line 356). With every length in range
 //     the block encodes cleanly, so EncodeWithReservedCapacity never sets an
 //     encoder error and 358 is unreachable for any constructible block.
 //   - Seal/SealEncoded/open via a reserved suite. AppendPacketAD calls
@@ -221,9 +221,16 @@ func TestNewProtectorAndReplaceMaterialDecidesPerCondition(t *testing.T) {
 }
 
 func TestSealRejectionDecidesPerCondition(t *testing.T) {
+	t.Run("nil receiver", func(t *testing.T) {
+		var p *Protector
+		_, err := p.Seal(packetCovValidBlock())
+		if err == nil || !strings.Contains(err.Error(), "nil protector") {
+			t.Fatalf("err = %v, want %q", err, "nil protector")
+		}
+	})
 	t.Run("frame block encode error", func(t *testing.T) {
 		// A PADDING frame with an out-of-range flow_id makes encodeFrameBlockForSeal
-		// fail (line 201); the deferred plaintext destroy runs (line 206).
+		// fail (line 204); the deferred plaintext destroy runs (line 209).
 		p := sealEncodedProtector(t, 1, 0)
 		_, err := p.Seal(packetCovHugeFlowIDPaddingBlock())
 		if err == nil || !strings.Contains(err.Error(), "varint out of range") {
@@ -231,7 +238,7 @@ func TestSealRejectionDecidesPerCondition(t *testing.T) {
 		}
 	})
 	t.Run("packet AD route id out of range", func(t *testing.T) {
-		// An out-of-range route instance id makes PacketAD fail (line 212) after
+		// An out-of-range route instance id makes PacketAD fail (line 215) after
 		// the frame block encodes cleanly.
 		p := sealEncodedProtector(t, math.MaxUint64, 0)
 		_, err := p.Seal(packetCovValidBlock())
@@ -241,7 +248,7 @@ func TestSealRejectionDecidesPerCondition(t *testing.T) {
 	})
 	t.Run("XOR nonce bad static IV", func(t *testing.T) {
 		// A manually-constructed Protector with a 5-byte IV passes PacketAD and
-		// fails at XORNonce96 (line 216).
+		// fails at XORNonce96 (line 219).
 		p := &Protector{
 			Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 1, HopLayer: 1,
 			Direction: 0, KeyPhase: 0, Key: bytesOf(0x33, 32), StaticIV: bytesOf(0x44, 5),
@@ -252,7 +259,7 @@ func TestSealRejectionDecidesPerCondition(t *testing.T) {
 		}
 	})
 	t.Run("cached AEAD wrong key length", func(t *testing.T) {
-		// cachedAEAD (line 220) is reachable only after PacketAD and XORNonce96
+		// cachedAEAD (line 223) is reachable only after PacketAD and XORNonce96
 		// both pass. AppendPacketAD rejects an unsupported suite via
 		// AppendSuiteHash before any key material is touched, so a bad-suite
 		// protector cannot reach cachedAEAD; instead a *supported* suite with a
@@ -278,9 +285,9 @@ func TestSealEncodedDecidesPerCondition(t *testing.T) {
 		}
 	})
 	t.Run("layout unknown falls back to copy error", func(t *testing.T) {
-		// sealedPacketLayout returns ok=false (line 337, !known) for the
+		// sealedPacketLayout returns ok=false (line 340, !known) for the
 		// out-of-range flow_id block, so SealEncoded falls back to
-		// sealEncodedByCopy (line 270), whose Seal fails (line 326).
+		// sealEncodedByCopy (line 273), whose Seal fails (line 329).
 		p := sealEncodedProtector(t, 1, 0)
 		_, err := p.SealEncoded(packetCovHugeFlowIDPaddingBlock())
 		if err == nil || !strings.Contains(err.Error(), "varint out of range") {
@@ -316,7 +323,7 @@ func TestSealEncodedDecidesPerCondition(t *testing.T) {
 }
 
 // TestSealEncodedOversizedBlockFallsBackToCopy exercises the >0xffffff sub-condition
-// of sealedPacketLayout (line 337) and the sealEncodedByCopy happy-return path
+// of sealedPacketLayout (line 340) and the sealEncodedByCopy happy-return path
 // (lines 329/330). A single PADDING frame with a 0xffffff-byte payload has a
 // known EncodedLen but a plaintext length just over the 0xffffff packet-payload
 // envelope, so sealedPacketLayout returns false and SealEncoded falls back to
@@ -375,7 +382,7 @@ func TestOpenRejectionDecidesPerCondition(t *testing.T) {
 	}
 	t.Run("packet AD reserved direction", func(t *testing.T) {
 		// A reserved direction matches the protector (validatePacketMetadata
-		// passes) and fails at PacketAD (line 392) before any key material is
+		// passes) and fails at PacketAD (line 395) before any key material is
 		// touched.
 		p := &Protector{RouteInstanceID: 1, HopLayer: 1, Direction: 2, KeyPhase: 0}
 		if _, err := p.open(matchingPkt(p), []byte{0}, false); err == nil || !strings.Contains(err.Error(), "reserved packet direction") {
@@ -384,7 +391,7 @@ func TestOpenRejectionDecidesPerCondition(t *testing.T) {
 	})
 	t.Run("XOR nonce bad static IV", func(t *testing.T) {
 		// A supported suite lets PacketAD pass, so XORNonce96's 5-byte IV is the
-		// first failure (line 396). (Suite 0 would be rejected by
+		// first failure (line 399). (Suite 0 would be rejected by
 		// AppendPacketAD's AppendSuiteHash before the nonce is built.)
 		p := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 1, HopLayer: 1, Direction: 0, KeyPhase: 0, StaticIV: bytesOf(0x44, 5), Key: bytesOf(0x33, 32)}
 		if _, err := p.open(matchingPkt(p), []byte{0}, false); err == nil || !strings.Contains(err.Error(), "static IV length") {
@@ -393,7 +400,7 @@ func TestOpenRejectionDecidesPerCondition(t *testing.T) {
 	})
 	t.Run("cached AEAD wrong key length", func(t *testing.T) {
 		// A supported suite + 12-byte IV lets PacketAD and XORNonce96 pass, so
-		// cachedAEAD (line 400) is the first failure via a wrong-length key.
+		// cachedAEAD (line 403) is the first failure via a wrong-length key.
 		p := &Protector{Suite: registry.SuiteHybrid768AESGCM, RouteInstanceID: 1, HopLayer: 1, Direction: 0, KeyPhase: 0, StaticIV: bytesOf(0x44, 12), Key: bytesOf(0x33, 16)}
 		if _, err := p.open(matchingPkt(p), []byte{0}, false); err == nil || !strings.Contains(err.Error(), "AES-256 key length") {
 			t.Fatalf("err = %v, want %q", err, "AES-256 key length")
@@ -402,7 +409,7 @@ func TestOpenRejectionDecidesPerCondition(t *testing.T) {
 	t.Run("decode frame block error", func(t *testing.T) {
 		// Seal a one-byte plaintext (frame count 2, no frame bodies) with the
 		// protector's own key/nonce/AAD so AEAD Open authenticates it, then
-		// let DecodeFrameBlock reject the bogus plaintext (line 414).
+		// let DecodeFrameBlock reject the bogus plaintext (line 417).
 		p := sealEncodedProtector(t, 1, 0)
 		aad, err := auroracrypto.PacketAD(p.Suite, p.RouteInstanceID, p.HopLayer, p.Direction, p.KeyPhase, 0)
 		if err != nil {
@@ -433,7 +440,7 @@ func TestOpenRejectionDecidesPerCondition(t *testing.T) {
 func TestOpenOwnedAndBorrowedPayloadDecidesPerCondition(t *testing.T) {
 	t.Run("open owned metadata mismatch", func(t *testing.T) {
 		// Seal a real packet (sealedPayload set, borrowed payload OK), then mutate
-		// the route id so validatePacketMetadata rejects it (line 384) after the
+		// the route id so validatePacketMetadata rejects it (line 387) after the
 		// borrowed-payload guard passes.
 		p := sealEncodedProtector(t, 1, 0)
 		pkt, err := p.Seal(packetCovValidBlock())
@@ -466,7 +473,7 @@ func TestOpenOwnedAndBorrowedPayloadDecidesPerCondition(t *testing.T) {
 		}
 	})
 	t.Run("clear AEAD nil receiver", func(t *testing.T) {
-		// clearAEAD on a nil receiver must not panic (line 476).
+		// clearAEAD on a nil receiver must not panic (line 479).
 		var p *Protector
 		p.clearAEAD()
 	})

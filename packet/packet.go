@@ -191,6 +191,9 @@ func (p *Protector) Destroy() {
 }
 
 func (p *Protector) Seal(block protocol.FrameBlock) (AuroraPacket, error) {
+	if p == nil {
+		return AuroraPacket{}, fmt.Errorf("packet: nil protector")
+	}
 	if p.Direction > 1 {
 		return AuroraPacket{}, fmt.Errorf("packet: reserved packet direction 0x%x", p.Direction)
 	}

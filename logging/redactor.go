@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"unicode/utf8"
 )
 
 type SensitiveKind string
@@ -110,25 +111,44 @@ func replaceCaseInsensitive(msg, token, replacement string) string {
 	if token == "" || msg == "" {
 		return msg
 	}
-	lowerMsg := strings.ToLower(msg)
-	lowerToken := strings.ToLower(token)
-	start := 0
 	var out strings.Builder
-	for {
-		idx := strings.Index(lowerMsg[start:], lowerToken)
-		if idx < 0 {
-			break
+	start := 0
+	i := 0
+	for i < len(msg) {
+		if n := foldMatchLen(msg[i:], token); n > 0 {
+			out.WriteString(msg[start:i])
+			out.WriteString(replacement)
+			i += n
+			start = i
+			continue
 		}
-		idx += start
-		out.WriteString(msg[start:idx])
-		out.WriteString(replacement)
-		start = idx + len(token)
+		i++
 	}
 	if start == 0 {
 		return msg
 	}
 	out.WriteString(msg[start:])
 	return out.String()
+}
+
+// foldMatchLen returns the length in bytes of the prefix of s that matches
+// token under Unicode simple case folding, or 0 if there is no match. Matching
+// against s directly — rather than indexing s with offsets from a lowercased
+// copy — keeps byte offsets aligned even for runes whose folded form has a
+// different UTF-8 length (e.g. Ⱥ folds to the longer ⱥ, K folds to k).
+func foldMatchLen(s, token string) int {
+	n := 0
+	for _, tr := range token {
+		if n >= len(s) {
+			return 0
+		}
+		sr, size := utf8.DecodeRuneInString(s[n:])
+		if !strings.EqualFold(string(sr), string(tr)) {
+			return 0
+		}
+		n += size
+	}
+	return n
 }
 
 func isSensitiveFieldKey(key string) bool {
@@ -176,8 +196,14 @@ func isSensitiveValue(value any) bool {
 }
 
 func containsSensitiveValue(v reflect.Value, depth int) bool {
-	if !v.IsValid() || depth > 8 {
+	if !v.IsValid() {
 		return false
+	}
+	if depth > 8 {
+		// Fail closed: a value nested too deeply to scan within the
+		// recursion bound is treated as sensitive rather than passed
+		// through to the log unredacted.
+		return true
 	}
 	t := v.Type()
 	if isSensitiveType(t, depth) {

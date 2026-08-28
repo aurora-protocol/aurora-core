@@ -203,3 +203,44 @@ func TestSafeFieldRedactsRawCapsulePlaintextAliases(t *testing.T) {
 		})
 	}
 }
+
+// TestSanitizeMessageHandlesFoldLengthShiftingRunes proves sanitization is
+// robust against runes whose case-folded form has a different UTF-8 byte
+// length. Lowercasing a copy of the message and indexing the original with the
+// copy's offsets misaligns as soon as such a rune appears before a sensitive
+// token: Ⱥ (U+023A) folds to ⱥ (U+2C65), one byte longer, which used to slice
+// out of bounds and panic; K (U+212A) folds to k, two bytes shorter, which
+// used to re-emit the tail of the token (or the whole token, given enough
+// shifting runes) after the replacement.
+func TestSanitizeMessageHandlesFoldLengthShiftingRunes(t *testing.T) {
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("SanitizeMessage panicked on fold-lengthening rune: %v", r)
+			}
+		}()
+		if got := SanitizeMessage("Ⱥ admission_proof"); strings.Contains(got, "admission_proof") {
+			t.Fatalf("sensitive token survived sanitization: %q", got)
+		}
+	}()
+	got := SanitizeMessage(strings.Repeat("K", 8) + " admission_proof")
+	if strings.Contains(got, "admission_proof") {
+		t.Fatalf("sensitive token survived sanitization: %q", got)
+	}
+}
+
+// TestSafeFieldRedactsSensitiveValuesBeyondDepthGuard proves the value-driven
+// sensitivity scan fails closed: a sensitive value nested inside enough
+// interface containers to exceed the recursion depth guard must still be
+// redacted, not formatted raw (which leaks the proof bytes as a decimal byte
+// list via %v).
+func TestSafeFieldRedactsSensitiveValuesBeyondDepthGuard(t *testing.T) {
+	var value any = protocol.AdmissionProof{TokenAuthenticator: []byte{0xde, 0xad, 0xbe, 0xef}}
+	for i := 0; i < 5; i++ {
+		value = []any{value}
+	}
+	field := SafeField("context", value, false)
+	if field.Value != "[redacted-field]" {
+		t.Fatalf("deeply nested sensitive value was not redacted: %+v", field)
+	}
+}

@@ -4,17 +4,17 @@ package logging
 // to near-full coverage. Three statements remain uncovered and are intentionally
 // NOT contrived here:
 //
-//   - redactor.go:43 (LabString lab-formatting return): only reachable when the
+//   - redactor.go:44 (LabString lab-formatting return): only reachable when the
 //     lab build tag is set; redactor_lab_test.go exercises it conditionally.
-//   - redactor.go:196-198 (containsSensitiveValue struct-field early return):
-//     dead-by-design. The isSensitiveType(t) call at line 183 already scans every
+//   - redactor.go:222-224 (containsSensitiveValue struct-field early return):
+//     dead-by-design. The isSensitiveType(t) call at line 209 already scans every
 //     struct field with the identical predicate
 //     (isSensitiveFieldKey(field.Name) || isSensitiveType(field.Type, depth+1)),
-//     so any struct with a sensitive field name/type returns true at 183 and
+//     so any struct with a sensitive field name/type returns true at 209 and
 //     never enters the switch; a struct that does enter the switch has no such
-//     field, so line 196 re-evaluates the same (now-false) predicate. It cannot
+//     field, so line 222 re-evaluates the same (now-false) predicate. It cannot
 //     fire.
-//   - redactor.go:226-228 (isSensitiveType pointer-elem nil guard): dead-by-
+//   - redactor.go:251-253 (isSensitiveType pointer-elem nil guard): dead-by-
 //     design. reflect.Type.Elem() on a Pointer kind never returns nil for a real
 //     type, so the guard is purely defensive.
 
@@ -77,14 +77,15 @@ func TestIsSensitiveValueNil(t *testing.T) {
 }
 
 // TestContainsSensitiveValueGuards covers the !IsValid / depth>8 guard of
-// containsSensitiveValue (previously uncovered): a zero reflect.Value and a
-// too-deep recursion both short-circuit to "not sensitive".
+// containsSensitiveValue: a zero reflect.Value is not sensitive, while a
+// too-deep recursion fails CLOSED (reports sensitive) so that a value nested
+// beyond the scan bound is redacted rather than logged raw.
 func TestContainsSensitiveValueGuards(t *testing.T) {
 	if containsSensitiveValue(reflect.Value{}, 0) {
 		t.Fatal("invalid reflect.Value reported as sensitive")
 	}
-	if containsSensitiveValue(reflect.ValueOf("plain"), 9) {
-		t.Fatal("value beyond the depth guard reported as sensitive")
+	if !containsSensitiveValue(reflect.ValueOf("plain"), 9) {
+		t.Fatal("value beyond the depth guard not failed closed as sensitive")
 	}
 }
 

@@ -71,7 +71,13 @@ GOCACHE=/private/tmp/aurora-gocache go run ./cmd/aurorad issuer --listen 127.0.0
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/aurorac proxy --provisioning-wallet /etc/aurora/client-wallet.bin --wallet-state /var/lib/aurora/client-wallet-state.bin
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/aurorac tun --provisioning-wallet /etc/aurora/client-wallet.bin --wallet-state /var/lib/aurora/client-wallet-state.bin
 GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl capabilities
+GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl build-native-provisioning-trust --spec trust-spec.json --out AuroraSignedSeedTrust.bin
+GOCACHE=/private/tmp/aurora-gocache go run ./cmd/auroractl check-native-provisioning-trust AuroraSignedSeedTrust.bin
 ```
+
+The list above is a working subset; run `auroractl` without arguments for the
+full usage, including `active-probes`, `crypto-check`, `load-check`,
+`coverage-check`, and `check-config`.
 
 `aurorad harness` is a local diagnostic surface. `aurorad serve` is the Linux production entry point: it requires a verified canonical deployment, both epoch signing keys, bounded access-hint credentials, a validated admission verification key, three independent durable replay caches, TLS, a cover origin, and an explicit concurrent-session limit. Private key and access-hint files must be regular files with owner-only permissions. The daemon rejects harness flags, loopback listen addresses, malformed objects, mismatched epoch keys, and missing production dependencies before binding its socket. Egress defaults are bounded and deny private destination ranges; use `aurorad serve --help` to tune the explicit queue, rate, timeout, and destination-policy limits. The `serve` and `issuer` commands also accept an owner-only JSON argument file through `--config`; the [Linux daemon guide](docs/operations/linux-daemons.md) provides hardened systemd units and installation requirements.
 

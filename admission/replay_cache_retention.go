@@ -50,11 +50,11 @@ func NewRetentionFileReplayCacheAt(directory *os.File, name string, nowUnix uint
 	}
 	cache := &RetentionFileReplayCache{directory: directory, name: name, path: filepath.Join(directory.Name(), name), lock: lock, seen: make(map[string]uint64), minDeadline: math.MaxUint64}
 	if err := cache.withLock(func() error {
-		expired, err := cache.load(nowUnix)
+		expired, torn, err := cache.load(nowUnix)
 		if err != nil {
 			return err
 		}
-		if expired {
+		if expired || torn {
 			return cache.rewrite()
 		}
 		return syncRetentionReplayCacheDirectory(directory)
@@ -84,7 +84,7 @@ func (c *RetentionFileReplayCache) InsertIfAbsentUntil(key []byte, retainUntilUn
 		return false, fmt.Errorf("admission: replay cache is closed")
 	}
 	err = c.withLock(func() error {
-		expired, err := c.load(nowUnix)
+		expired, torn, err := c.load(nowUnix)
 		if err != nil {
 			return err
 		}
@@ -97,7 +97,10 @@ func (c *RetentionFileReplayCache) InsertIfAbsentUntil(key []byte, retainUntilUn
 			c.minDeadline = retainUntilUnix
 		}
 		inserted = true
-		if expired {
+		// A torn trailing record was parsed into seen but not consumed, so an
+		// append would concatenate with its bytes. Compact instead: rewrite
+		// persists the torn record durably and leaves a clean tail.
+		if expired || torn {
 			return c.rewrite()
 		}
 		return c.append(entry, retainUntilUnix)
@@ -148,22 +151,22 @@ func (c *RetentionFileReplayCache) withLock(fn func() error) error {
 	return fn()
 }
 
-func (c *RetentionFileReplayCache) load(nowUnix uint64) (bool, error) {
+func (c *RetentionFileReplayCache) load(nowUnix uint64) (expired, torn bool, err error) {
 	generation, err := c.readGeneration()
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	file, err := openReplayCacheFileAt(c.directory, c.name)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	defer file.Close()
 	if err := file.Chmod(0o600); err != nil {
-		return false, err
+		return false, false, err
 	}
 	info, err := file.Stat()
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	offset := c.loadedSize
 	if c.loadedInfo == nil || generation != c.loadedGeneration || !os.SameFile(c.loadedInfo, info) || info.Size() < offset {
@@ -174,21 +177,21 @@ func (c *RetentionFileReplayCache) load(nowUnix uint64) (bool, error) {
 	}
 	if offset > 0 {
 		if _, err := file.Seek(offset, io.SeekStart); err != nil {
-			return false, err
+			return false, false, err
 		}
 	}
-	consumed, err := c.consume(file, offset)
+	consumed, torn, err := c.consume(file, offset)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	c.loadedInfo = info
 	c.loadedSize = consumed
 	c.loadedGeneration = generation
 	if c.minDeadline > nowUnix {
-		return false, nil
+		return false, torn, nil
 	}
 	c.expireLoaded(nowUnix)
-	return true, nil
+	return true, torn, nil
 }
 
 func (c *RetentionFileReplayCache) readGeneration() (uint64, error) {
@@ -220,8 +223,9 @@ func (c *RetentionFileReplayCache) readGeneration() (uint64, error) {
 
 // consume parses records from the current file position and reports the offset
 // past the last newline-terminated record. A partial trailing record is parsed
-// but not consumed, so a completed record is never skipped.
-func (c *RetentionFileReplayCache) consume(file *os.File, offset int64) (int64, error) {
+// but not consumed, so a completed record is never skipped; it also reports
+// that trailing record as torn so callers compact rather than append after it.
+func (c *RetentionFileReplayCache) consume(file *os.File, offset int64) (int64, bool, error) {
 	reader := bufio.NewReader(file)
 	for {
 		line, readErr := reader.ReadString('\n')
@@ -230,7 +234,7 @@ func (c *RetentionFileReplayCache) consume(file *os.File, offset int64) (int64, 
 			if record := strings.TrimSuffix(line, "\n"); record != "" {
 				key, deadline, err := c.parseRecord(record)
 				if err != nil {
-					return 0, err
+					return 0, false, err
 				}
 				c.seen[key] = deadline
 				if deadline < c.minDeadline {
@@ -239,13 +243,15 @@ func (c *RetentionFileReplayCache) consume(file *os.File, offset int64) (int64, 
 			}
 			if terminated {
 				offset += int64(len(line))
+			} else if errors.Is(readErr, io.EOF) {
+				return offset, true, nil
 			}
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
-				return offset, nil
+				return offset, false, nil
 			}
-			return 0, readErr
+			return 0, false, readErr
 		}
 	}
 }

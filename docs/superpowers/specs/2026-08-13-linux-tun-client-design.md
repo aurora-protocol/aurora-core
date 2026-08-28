@@ -109,7 +109,10 @@ uses a caller-controlled command path.
   routine host traffic cannot kill the session. Transient queue backpressure
   (`session.ErrBackpressure`) is dropped the same way; existing kernel TCP
   retransmission handles a packet that is not accepted before an application
-  frame is queued.
+  frame is queued. Non-SYN TCP packets with no live flow are likewise dropped:
+  the kernel's final close-handshake ACK and late retransmits legitimately
+  arrive after the adapter has removed the flow, and no flow state exists to
+  desync.
 - Linux host gating happens before provisioning access. Non-Linux builds still
   compile the command but reject `tun` deterministically.
 

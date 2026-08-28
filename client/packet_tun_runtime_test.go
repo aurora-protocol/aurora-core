@@ -253,6 +253,76 @@ func TestPacketTUNRuntimeCanceledFrameHandlingClosesBlockedDeviceWrite(t *testin
 	}
 }
 
+func TestPacketTUNRuntimeDropsUnsupportedProtocolPackets(t *testing.T) {
+	runtime, clientApplication, relayApplication, device := packetTUNRuntimeFixture(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+
+	result := make(chan error, 1)
+	go func() {
+		result <- runtime.Serve(context.Background())
+	}()
+
+	// A well-formed ICMP echo must be dropped without terminating the read loop.
+	device.Inject(packetAdapterICMPv4Echo(t, [4]byte{10, 77, 0, 2}, [4]byte{93, 184, 216, 34}))
+	// Prove the loop survived by capturing a TCP SYN opened afterwards.
+	device.Inject(packetAdapterTCPv4(t, [4]byte{10, 77, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, 100, 0, tcpFlagSYN, nil))
+
+	encrypted := nextPacketTUNRuntime(t, clientApplication)
+	blocks, err := relayApplication.HandlePacket(context.Background(), time.Unix(1_700_000_000, 0), encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || len(blocks[0].Frames) != 1 || blocks[0].Frames[0].FrameType != registry.FrameFlowOpen {
+		t.Fatalf("SYN after dropped ICMP frames = %+v, want one flow open", blocks)
+	}
+	synthetic := packetAdapterParseTCPv4(t, device.NextWrite(t))
+	if synthetic.flags != tcpFlagSYN|tcpFlagACK {
+		t.Fatalf("synthetic local packet after dropped ICMP = %+v, want SYN/ACK", synthetic)
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("packet TUN runtime terminated on an unsupported-protocol packet: %v", err)
+	default:
+	}
+
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("packet TUN runtime stopped without a terminal device error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("packet TUN runtime did not stop after close")
+	}
+}
+
+func TestPacketTUNRuntimeTerminatesOnMalformedPacket(t *testing.T) {
+	runtime, clientApplication, relayApplication, device := packetTUNRuntimeFixture(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	defer runtime.Close()
+
+	result := make(chan error, 1)
+	go func() {
+		result <- runtime.Serve(context.Background())
+	}()
+	malformed := packetAdapterICMPv4Echo(t, [4]byte{10, 77, 0, 2}, [4]byte{93, 184, 216, 34})
+	malformed[10] ^= 0xff // corrupt the IPv4 header checksum
+	device.Inject(malformed)
+
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("packet TUN runtime survived a malformed local packet")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("packet TUN runtime did not fail on a malformed local packet")
+	}
+}
+
 func TestPacketTUNRuntimeRejectsInvalidConfiguration(t *testing.T) {
 	application, relayApplication := packetAdapterApplications(t)
 	defer application.Close()

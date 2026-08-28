@@ -982,14 +982,26 @@ func TestPacketAdapterRejectsUnsafeIPv6ExtensionsWithoutFlowAllocation(t *testin
 	tooManyOptions = packetAdapterIPv6WithOptionsHeader(t, tooManyOptions, 0)
 	badChecksum := packetAdapterIPv6WithOptionsHeader(t, packet, 60)
 	badChecksum[len(badChecksum)-1] ^= 0xff
+	// Well-formed packets the tunnel cannot serve (an extension header the
+	// adapter does not walk, an option whose action bits require discard) are
+	// dropped without an error so routine host traffic cannot kill the tunnel.
 	for name, encoded := range map[string][]byte{
-		"malformed options length":  malformedLength,
-		"unsupported option action": unsupportedOption,
 		"routing header":            routingHeader,
-		"fragment header":           fragmentHeader,
-		"invalid options order":     invalidOrder,
-		"too many options headers":  tooManyOptions,
-		"bad transport checksum":    badChecksum,
+		"unsupported option action": unsupportedOption,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := adapter.Ingress(context.Background(), encoded, time.Unix(1_700_000_000, 0)); err != nil {
+				t.Fatalf("unsupported IPv6 extension ingress err = %v, want nil (drop, not kill)", err)
+			}
+		})
+	}
+	// Malformed or contradictory extension chains stay terminal.
+	for name, encoded := range map[string][]byte{
+		"malformed options length": malformedLength,
+		"fragment header":          fragmentHeader,
+		"invalid options order":    invalidOrder,
+		"too many options headers": tooManyOptions,
+		"bad transport checksum":   badChecksum,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := adapter.Ingress(context.Background(), encoded, time.Unix(1_700_000_000, 0)); err == nil {

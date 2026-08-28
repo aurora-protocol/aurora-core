@@ -54,6 +54,12 @@ const (
 // ErrPacketAdapterClosed reports packet processing attempted after adapter shutdown.
 var ErrPacketAdapterClosed = errors.New("client: packet adapter is closed")
 
+// errPacketAdapterUnsupportedProtocol marks well-formed local packets that carry
+// a protocol or IPv6 extension the tunnel does not serve (for example ICMP and
+// ICMPv6). Ingress drops these packets and reports nil so that routine host
+// traffic cannot terminate the tunnel; only malformed packets report errors.
+var errPacketAdapterUnsupportedProtocol = errors.New("client: packet adapter protocol is unsupported")
+
 // LocalDNSAnswers resolves a captured local DNS query without exposing it to a public resolver.
 type LocalDNSAnswers func(context.Context, []byte) ([]string, error)
 
@@ -274,7 +280,11 @@ func (a *PacketAdapter) Close() {
 	a.dnsAnswers = nil
 }
 
-// Ingress captures one local packet and queues the corresponding encrypted flow frames.
+// Ingress captures one local packet and queues the corresponding encrypted flow
+// frames. Well-formed packets the tunnel cannot serve (IP protocols other than
+// TCP/UDP, unsupported IPv6 extension headers, IPv6 options that require
+// discard handling) are dropped and report nil; malformed or contradictory
+// packets report errors.
 func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Time) error {
 	if a == nil {
 		return fmt.Errorf("client: packet adapter is nil")
@@ -317,6 +327,11 @@ func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Ti
 		encoded = reassembled
 	}
 	if fragment, fragmented, err := parsePacketAdapterIPv6Fragment(encoded, a.maximumPacket); err != nil {
+		// The fragment pre-pass walks the IPv6 extension chain and can meet an
+		// unservable option before the main parse does; drop it the same way.
+		if errors.Is(err, errPacketAdapterUnsupportedProtocol) {
+			return nil
+		}
 		return err
 	} else if fragmented {
 		a.mu.Lock()
@@ -337,6 +352,9 @@ func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Ti
 	}
 	packet, err := parsePacketAdapterIPPacket(encoded, a.maximumPacket)
 	if err != nil {
+		if errors.Is(err, errPacketAdapterUnsupportedProtocol) {
+			return nil
+		}
 		return err
 	}
 	if packet.protocol == packetAdapterUDP && packet.udp.destinationPort == packetAdapterDNSPort {
@@ -1485,7 +1503,7 @@ func parsePacketAdapterIPv6Headers(encoded []byte) (uint8, int, error) {
 			}
 			seenFragment = true
 		default:
-			return 0, 0, fmt.Errorf("client: packet adapter IPv6 extension header is unsupported")
+			return 0, 0, fmt.Errorf("client: packet adapter IPv6 extension header is unsupported: %w", errPacketAdapterUnsupportedProtocol)
 		}
 		if headerCount >= maximumPacketAdapterIPv6Options {
 			return 0, 0, fmt.Errorf("client: packet adapter IPv6 extension header chain is too long")
@@ -1548,7 +1566,7 @@ func parsePacketAdapterIPv6Options(encoded []byte) error {
 			return fmt.Errorf("client: packet adapter IPv6 option is malformed")
 		}
 		if encoded[0]>>6 != 0 {
-			return fmt.Errorf("client: packet adapter IPv6 option requires unsupported handling")
+			return fmt.Errorf("client: packet adapter IPv6 option requires unsupported handling: %w", errPacketAdapterUnsupportedProtocol)
 		}
 		encoded = encoded[2+int(encoded[1]):]
 	}
@@ -1589,7 +1607,7 @@ func parsePacketAdapterTransport(packet packetAdapterIPPacket, segment []byte, r
 		}
 		return packet, nil
 	default:
-		return packetAdapterIPPacket{}, fmt.Errorf("client: packet adapter transport protocol is unsupported")
+		return packetAdapterIPPacket{}, fmt.Errorf("client: packet adapter transport protocol is unsupported: %w", errPacketAdapterUnsupportedProtocol)
 	}
 }
 

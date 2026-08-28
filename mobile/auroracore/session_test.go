@@ -882,6 +882,65 @@ func TestNativeSessionDispatchAdaptsRawLocalPackets(t *testing.T) {
 	}
 }
 
+func TestNativeSessionDispatchDropsUnsupportedLocalPackets(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	application := nativeTestApplication(t)
+	stub := &nativeTestHandshake{session: &handshake.EstablishedSession{Application: application}}
+	registry := newNativeSessionRegistry(nativeSessionRegistryOptions{
+		now:    func() time.Time { return now },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x89}, 64)),
+		start: func(context.Context, client.NativeProvisioning, time.Time) (nativeSessionHandshake, handshake.ClientProofRequest, error) {
+			return stub, nativeTestProofRequest(now), nil
+		},
+	})
+	previousRegistry := nativeSessions
+	nativeSessions = registry
+	defer func() { nativeSessions = previousRegistry }()
+	work, err := registry.begin(client.NativeProvisioning{IssuerURL: "https://issuer.example", IssuerCarrierPath: "/assets/issue/42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer registry.close(work.Handle)
+	proof := nativeTestAdmissionProof(now, nativeTestProofRequest(now).AdmissionContextHash)
+	encodedProof, err := protocol.Encode(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, payload := dispatch(opCompleteNativeSession, nativeHandlePayload(t, work.Handle, server.EncodeCarrier(server.CarrierBlindRSAIssueResp, encodedProof)), 0); status != statusOK || len(payload) != 0 {
+		t.Fatalf("complete dispatch = status %d payload %x", status, payload)
+	}
+
+	// A well-formed ICMP echo is dropped, not rejected: status OK keeps the
+	// Apple/Android packet loops alive (both treat ERROR as terminal).
+	status, payload := dispatch(opIngressLocalPacket, nativeICMPv4([4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}), work.Handle)
+	if status != statusOK {
+		t.Fatalf("unsupported-protocol ingress status = %d, want OK (drop, not kill)", status)
+	}
+	if local := nativeLocalPacketList(t, payload); len(local) != 0 {
+		t.Fatalf("unsupported-protocol ingress returned %d local packets, want 0", len(local))
+	}
+
+	// Malformed packets still surface ERROR so the clients terminate.
+	malformed := nativeICMPv4([4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34})
+	malformed[10] ^= 0xff // corrupt the IPv4 header checksum
+	if status, payload := dispatch(opIngressLocalPacket, malformed, work.Handle); status != statusError || len(payload) != 0 {
+		t.Fatalf("malformed ingress = status %d payload %x, want ERROR", status, payload)
+	}
+}
+
+func nativeICMPv4(source, target [4]byte) []byte {
+	packet := make([]byte, 28)
+	packet[0] = 0x45
+	binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
+	packet[8] = 64
+	packet[9] = 1 // ICMP
+	copy(packet[12:16], source[:])
+	copy(packet[16:20], target[:])
+	binary.BigEndian.PutUint16(packet[10:12], nativeChecksum(packet[:20]))
+	packet[20] = 8 // echo request
+	return packet
+}
+
 func TestNativeSessionRegistryConcurrentLifecycle(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	registry := newNativeSessionRegistry(nativeSessionRegistryOptions{

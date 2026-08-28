@@ -442,7 +442,7 @@ func provisionedSessionTestProvisioning(t testing.TB, now time.Time, issuer *iss
 		t.Fatal(err)
 	}
 	publishedMetadata := issuer.PublishIssuerMetadata()
-	signedSeed, signedSeedTrust := nativeProvisioningSignedSeedAndTrust(t, now, publishedMetadata, issuer.AuthorityKeys(), publishedMetadata.IssuerID, nil)
+	signedSeed, signedSeedTrust := nativeProvisioningSignedSeedAndTrust(t, now, publishedMetadata, issuer.AuthorityKeys(), publishedMetadata.IssuerID, nil, nil)
 	return NativeProvisioning{
 		IssuerURL:         "https://issuer.example",
 		IssuerCarrierPath: "/assets/issue/42",

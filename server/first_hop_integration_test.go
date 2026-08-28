@@ -1082,7 +1082,7 @@ func TestLiveFirstHopProvisionedSessionEgress(t *testing.T) {
 	harness := startLiveFirstHopHarnessWithSessionFactoryAndTLS(t, fixture, fixture.newRelayDriver(t), nil, nil, tlsMaterial)
 	issuer := startLiveFirstHopIssuer(t, fixture)
 	provisioning, signedSeedRoots := fixture.nativeProvisioningForHarness(t, harness, issuer.URL)
-	signedSeedTrust, err := auroraclient.NewNativeProvisioningTrust(signedSeedRoots)
+	signedSeedTrust, err := auroraclient.NewNativeProvisioningTrust(signedSeedRoots, fixture.nativeProvisioningDeploymentTrust())
 	zeroLiveFirstHopAuthorityKeys(signedSeedRoots)
 	if err != nil {
 		t.Fatal(err)
@@ -1173,7 +1173,7 @@ func TestLiveFirstHopProvisioningWalletRebuildsAfterCarrierLoss(t *testing.T) {
 	firstProvisioning, firstSignedSeedRoots := fixture.nativeProvisioningForHarness(t, harness, issuer.URL)
 	secondProvisioning, secondSignedSeedRoots := secondFixture.nativeProvisioningForHarness(t, harness, issuer.URL)
 	signedSeedRoots := append(firstSignedSeedRoots, secondSignedSeedRoots...)
-	signedSeedTrust, err := auroraclient.NewNativeProvisioningTrust(signedSeedRoots)
+	signedSeedTrust, err := auroraclient.NewNativeProvisioningTrust(signedSeedRoots, fixture.nativeProvisioningDeploymentTrust())
 	zeroLiveFirstHopAuthorityKeys(signedSeedRoots)
 	if err != nil {
 		t.Fatal(err)
@@ -2947,7 +2947,7 @@ func (f liveFirstHopFixture) nativeProvisioningForHarness(t testing.TB, harness 
 	if err != nil {
 		t.Fatal(err)
 	}
-	signedSeed, signedSeedRoots := liveFirstHopSignedSeed(t, time.Now().UTC(), f.issuerMetadata, f.issuerAuthorityKeys, f.accessHint.HintIssuerID)
+	signedSeed, signedSeedRoots := liveFirstHopSignedSeed(t, time.Now().UTC(), f.issuerMetadata, f.issuerAuthorityKeys, f.accessHint.HintIssuerID, f.deployment.TemplateHash())
 	return auroraclient.NativeProvisioning{
 		RelayURL:              "https://" + harness.authority + harness.path,
 		IssuerURL:             issuerURL,
@@ -2970,6 +2970,14 @@ func (f liveFirstHopFixture) nativeProvisioningForHarness(t testing.TB, harness 
 	}, signedSeedRoots
 }
 
+func (f liveFirstHopFixture) nativeProvisioningDeploymentTrust() auroraclient.NativeProvisioningDeploymentTrust {
+	return auroraclient.NativeProvisioningDeploymentTrust{
+		DescriptorHash:       f.deployment.DescriptorHash(),
+		CoverTemplateHash:    f.deployment.TemplateHash(),
+		TemplateAuthorityKey: f.templateAuthority,
+	}
+}
+
 func zeroLiveFirstHopBytes(value []byte) {
 	for index := range value {
 		value[index] = 0
@@ -2987,7 +2995,7 @@ func cloneLiveFirstHopAuthorityKeys(in []protocol.AuthorityKeyRecord) []protocol
 	return out
 }
 
-func liveFirstHopSignedSeed(t testing.TB, now time.Time, metadata protocol.IssuerMetadata, bootstrapKeys []protocol.AuthorityKeyRecord, issuerID []byte) ([]byte, []protocol.AuthorityKeyRecord) {
+func liveFirstHopSignedSeed(t testing.TB, now time.Time, metadata protocol.IssuerMetadata, bootstrapKeys []protocol.AuthorityKeyRecord, issuerID, bootstrapTemplateHash []byte) ([]byte, []protocol.AuthorityKeyRecord) {
 	t.Helper()
 	rootPrivateKey := generateLiveFirstHopECDSA(t)
 	rootPublicKey := liveFirstHopECDSAPublicRecord(t, rootPrivateKey)
@@ -3019,7 +3027,7 @@ func liveFirstHopSignedSeed(t testing.TB, now time.Time, metadata protocol.Issue
 		TokenIssuerHint:            append([]byte(nil), issuerID...),
 		IssuerMetadataHash:         metadataHash,
 		BootstrapAuthorityKeys:     cloneLiveFirstHopAuthorityKeys(bootstrapKeys),
-		BootstrapCoverTemplateHash: randomLiveFirstHopBytes(t, 48),
+		BootstrapCoverTemplateHash: append([]byte(nil), bootstrapTemplateHash...),
 		NextSeedCommitment:         randomLiveFirstHopBytes(t, 48),
 		SoftwareUpdateEpoch:        1,
 		SeedSignature: protocol.ObjectSignature{

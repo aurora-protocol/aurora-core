@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -91,6 +92,8 @@ func TestParseNativeProvisioningWithTrustRejectsSubstitutedSignedSeedRoot(t *tes
 		seed.BootstrapAuthorityKeys,
 		seed.TokenIssuerHint,
 		nil,
+		seed.BootstrapCoverTemplateHash,
+		input.signedSeedTrust.deployments...,
 	)
 	input.SignedSeed = replacementSeed
 	encoded, err := EncodeNativeProvisioning(input)
@@ -103,6 +106,102 @@ func TestParseNativeProvisioningWithTrustRejectsSubstitutedSignedSeedRoot(t *tes
 	}
 	if _, err := ParseNativeProvisioningWithTrust(encoded, replacementTrust, now); err != nil {
 		t.Fatalf("native provisioning rejected the independently supplied matching trust: %v", err)
+	}
+}
+
+func TestParseNativeProvisioningWithTrustRequiresIndependentDeploymentTrust(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	input := validNativeProvisioning(t, now)
+	rootOnly, err := NewNativeProvisioningTrust(input.signedSeedTrust.roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := EncodeNativeProvisioning(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeProvisioningBytes(encoded)
+	if _, err := ParseNativeProvisioningWithTrust(encoded, rootOnly, now); !errors.Is(err, ErrNativeProvisioningDeploymentTrustRequired) {
+		t.Fatalf("native provisioning without deployment trust error = %v, want %v", err, ErrNativeProvisioningDeploymentTrustRequired)
+	}
+}
+
+func TestParseNativeProvisioningWithTrustRejectsRelayDeploymentSubstitution(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	input := validNativeProvisioning(t, now)
+	substitute := validNativeProvisioning(t, now)
+
+	originalTemplate, err := decodeNativeCoverTemplate(input.Template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	substituteTemplate, err := decodeNativeCoverTemplate(substitute.Template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalTemplateHash, err := trust.CoverTemplateHash(originalTemplate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeProvisioningBytes(originalTemplateHash)
+	substituteTemplateHash, err := trust.CoverTemplateHash(substituteTemplate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeProvisioningBytes(substituteTemplateHash)
+	if !bytes.Equal(originalTemplateHash, substituteTemplateHash) {
+		t.Fatal("relay substitution fixture changed the root-signed unsigned template commitment")
+	}
+	if bytes.Equal(input.TrustedDescriptorHash, substitute.TrustedDescriptorHash) || bytes.Equal(input.TemplateAuthorityKey, substitute.TemplateAuthorityKey) {
+		t.Fatal("relay substitution fixture did not replace descriptor and template authority")
+	}
+
+	input.RelayURL = substitute.RelayURL
+	input.Descriptor = substitute.Descriptor
+	input.TrustedDescriptorHash = substitute.TrustedDescriptorHash
+	input.Template = substitute.Template
+	input.TemplateAuthorityKey = substitute.TemplateAuthorityKey
+	input.RelayTrustRoots = substitute.RelayTrustRoots
+	encoded, err := EncodeNativeProvisioning(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeProvisioningBytes(encoded)
+	if _, err := ParseNativeProvisioningWithTrust(encoded, input.signedSeedTrust, now); err == nil {
+		t.Fatal("native provisioning accepted a relay descriptor/template-authority tuple absent from independent trust")
+	}
+}
+
+func TestParseNativeProvisioningWithTrustRequiresSignedSeedTemplateCommitment(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	input := validNativeProvisioning(t, now)
+	seed, err := decodeNativeSignedSeed(input.SignedSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := decodeNativeIssuerMetadata(input.IssuerMetadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongTemplateHash := append([]byte(nil), seed.BootstrapCoverTemplateHash...)
+	wrongTemplateHash[0] ^= 0xff
+	input.SignedSeed, input.signedSeedTrust = nativeProvisioningSignedSeedAndTrust(
+		t,
+		now,
+		metadata,
+		seed.BootstrapAuthorityKeys,
+		seed.TokenIssuerHint,
+		nil,
+		wrongTemplateHash,
+		input.signedSeedTrust.deployments...,
+	)
+	encoded, err := EncodeNativeProvisioning(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeProvisioningBytes(encoded)
+	if _, err := ParseNativeProvisioningWithTrust(encoded, input.signedSeedTrust, now); err == nil {
+		t.Fatal("native provisioning accepted a cover template not committed by its signed seed")
 	}
 }
 
@@ -182,7 +281,7 @@ func TestNativeProvisioningRejectsUnboundSignedSeed(t *testing.T) {
 	}
 	wrongMetadataHash := append([]byte(nil), seed.IssuerMetadataHash...)
 	wrongMetadataHash[0] ^= 0xff
-	input.SignedSeed, input.signedSeedTrust = nativeProvisioningSignedSeedAndTrust(t, now, metadata, seed.BootstrapAuthorityKeys, seed.TokenIssuerHint, wrongMetadataHash)
+	input.SignedSeed, input.signedSeedTrust = nativeProvisioningSignedSeedAndTrust(t, now, metadata, seed.BootstrapAuthorityKeys, seed.TokenIssuerHint, wrongMetadataHash, seed.BootstrapCoverTemplateHash, input.signedSeedTrust.deployments...)
 	encoded, err := EncodeNativeProvisioning(input)
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +304,7 @@ func TestNativeProvisioningRejectsSignedSeedIssuerMismatch(t *testing.T) {
 	}
 	wrongIssuerID := append([]byte(nil), seed.TokenIssuerHint...)
 	wrongIssuerID[0] ^= 0xff
-	input.SignedSeed, input.signedSeedTrust = nativeProvisioningSignedSeedAndTrust(t, now, metadata, seed.BootstrapAuthorityKeys, wrongIssuerID, nil)
+	input.SignedSeed, input.signedSeedTrust = nativeProvisioningSignedSeedAndTrust(t, now, metadata, seed.BootstrapAuthorityKeys, wrongIssuerID, nil, seed.BootstrapCoverTemplateHash, input.signedSeedTrust.deployments...)
 	encoded, err := EncodeNativeProvisioning(input)
 	if err != nil {
 		t.Fatal(err)
@@ -620,7 +719,8 @@ func validNativeProvisioningWithOriginSPKI(t testing.TB, now time.Time, originSP
 	if err != nil {
 		t.Fatal(err)
 	}
-	templateAuthorityBytes, err := protocol.Encode(nativeProvisioningPublicRecord(t, templateAuthority))
+	templateAuthorityRecord := nativeProvisioningPublicRecord(t, templateAuthority)
+	templateAuthorityBytes, err := protocol.Encode(templateAuthorityRecord)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -645,7 +745,7 @@ func validNativeProvisioningWithOriginSPKI(t testing.TB, now time.Time, originSP
 	if err != nil {
 		t.Fatal(err)
 	}
-	signedSeed, signedSeedRoots := nativeProvisioningSignedSeed(t, now, issuerMetadata, issuer.AuthorityKeys(), issuerMetadata.IssuerID, nil)
+	signedSeed, signedSeedRoots := nativeProvisioningSignedSeed(t, now, issuerMetadata, issuer.AuthorityKeys(), issuerMetadata.IssuerID, nil, templateHash)
 	policyBytes, err := protocol.Encode(protocol.PolicyOffer{
 		OfferedVersions:         []uint64{registry.Version20},
 		OfferedSuites:           []uint64{registry.SuiteHybrid768P256AESGCM},
@@ -675,7 +775,11 @@ func validNativeProvisioningWithOriginSPKI(t testing.TB, now time.Time, originSP
 	if err != nil {
 		t.Fatal(err)
 	}
-	signedSeedTrust, err := NewNativeProvisioningTrust(signedSeedRoots)
+	signedSeedTrust, err := NewNativeProvisioningTrust(signedSeedRoots, NativeProvisioningDeploymentTrust{
+		DescriptorHash:       descriptorHash,
+		CoverTemplateHash:    templateHash,
+		TemplateAuthorityKey: templateAuthorityRecord,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -702,7 +806,7 @@ func validNativeProvisioningWithOriginSPKI(t testing.TB, now time.Time, originSP
 	}
 }
 
-func nativeProvisioningSignedSeed(t testing.TB, now time.Time, metadata protocol.IssuerMetadata, bootstrapKeys []protocol.AuthorityKeyRecord, issuerID, metadataHashOverride []byte) ([]byte, []protocol.AuthorityKeyRecord) {
+func nativeProvisioningSignedSeed(t testing.TB, now time.Time, metadata protocol.IssuerMetadata, bootstrapKeys []protocol.AuthorityKeyRecord, issuerID, metadataHashOverride, bootstrapTemplateHash []byte) ([]byte, []protocol.AuthorityKeyRecord) {
 	t.Helper()
 	privateKey := nativeProvisioningECDSAKey(t)
 	publicKey, err := privateKey.PublicKey.Bytes()
@@ -735,6 +839,9 @@ func nativeProvisioningSignedSeed(t testing.TB, now time.Time, metadata protocol
 	if metadataHashOverride != nil {
 		metadataHash = append([]byte(nil), metadataHashOverride...)
 	}
+	if bootstrapTemplateHash == nil {
+		bootstrapTemplateHash = nativeProvisioningBytes(0x28, 48)
+	}
 	seed := protocol.SignedSeedRecord{
 		SeedVersion:                registry.Version20,
 		SeedID:                     nativeProvisioningBytes(0x27, 16),
@@ -745,7 +852,7 @@ func nativeProvisioningSignedSeed(t testing.TB, now time.Time, metadata protocol
 		TokenIssuerHint:            append([]byte(nil), issuerID...),
 		IssuerMetadataHash:         metadataHash,
 		BootstrapAuthorityKeys:     cloneNativeProvisioningAuthorityKeys(bootstrapKeys),
-		BootstrapCoverTemplateHash: nativeProvisioningBytes(0x28, 48),
+		BootstrapCoverTemplateHash: append([]byte(nil), bootstrapTemplateHash...),
 		NextSeedCommitment:         nativeProvisioningBytes(0x29, 48),
 		SoftwareUpdateEpoch:        1,
 		SeedSignature: protocol.ObjectSignature{
@@ -769,10 +876,10 @@ func nativeProvisioningSignedSeed(t testing.TB, now time.Time, metadata protocol
 	return encodedSeed, []protocol.AuthorityKeyRecord{root}
 }
 
-func nativeProvisioningSignedSeedAndTrust(t testing.TB, now time.Time, metadata protocol.IssuerMetadata, bootstrapKeys []protocol.AuthorityKeyRecord, issuerID, metadataHashOverride []byte) ([]byte, NativeProvisioningTrust) {
+func nativeProvisioningSignedSeedAndTrust(t testing.TB, now time.Time, metadata protocol.IssuerMetadata, bootstrapKeys []protocol.AuthorityKeyRecord, issuerID, metadataHashOverride, bootstrapTemplateHash []byte, deployments ...NativeProvisioningDeploymentTrust) ([]byte, NativeProvisioningTrust) {
 	t.Helper()
-	seed, roots := nativeProvisioningSignedSeed(t, now, metadata, bootstrapKeys, issuerID, metadataHashOverride)
-	trusted, err := NewNativeProvisioningTrust(roots)
+	seed, roots := nativeProvisioningSignedSeed(t, now, metadata, bootstrapKeys, issuerID, metadataHashOverride, bootstrapTemplateHash)
+	trusted, err := NewNativeProvisioningTrust(roots, deployments...)
 	zeroNativeProvisioningAuthorityKeys(roots)
 	if err != nil {
 		t.Fatal(err)

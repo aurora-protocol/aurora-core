@@ -509,22 +509,37 @@ func nativeProvisioningSpentHintKey(t testing.TB, provisioning NativeProvisionin
 func nativeProvisioningTrustFor(t testing.TB, provisioning ...NativeProvisioning) NativeProvisioningTrust {
 	t.Helper()
 	roots := make([]protocol.AuthorityKeyRecord, 0, len(provisioning))
-	seen := make(map[string]struct{})
+	deployments := make([]NativeProvisioningDeploymentTrust, 0, len(provisioning))
+	seenRoots := make(map[string]struct{})
+	seenDeployments := make(map[string]struct{})
 	for _, value := range provisioning {
 		for _, root := range value.signedSeedTrust.roots {
 			encoded, err := protocol.Encode(root)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, exists := seen[string(encoded)]; !exists {
-				seen[string(encoded)] = struct{}{}
+			if _, exists := seenRoots[string(encoded)]; !exists {
+				seenRoots[string(encoded)] = struct{}{}
 				roots = append(roots, cloneNativeProvisioningAuthorityKeys([]protocol.AuthorityKeyRecord{root})[0])
 			}
 			zeroNativeProvisioningBytes(encoded)
 		}
+		for _, deployment := range value.signedSeedTrust.deployments {
+			encodedKey, err := protocol.Encode(deployment.TemplateAuthorityKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity := string(deployment.DescriptorHash) + string(deployment.CoverTemplateHash) + string(encodedKey)
+			zeroNativeProvisioningBytes(encodedKey)
+			if _, exists := seenDeployments[identity]; !exists {
+				seenDeployments[identity] = struct{}{}
+				deployments = append(deployments, cloneNativeProvisioningDeploymentTrusts([]NativeProvisioningDeploymentTrust{deployment})[0])
+			}
+		}
 	}
-	trusted, err := NewNativeProvisioningTrust(roots)
+	trusted, err := NewNativeProvisioningTrust(roots, deployments...)
 	zeroNativeProvisioningAuthorityKeys(roots)
+	zeroNativeProvisioningDeploymentTrusts(deployments)
 	if err != nil {
 		t.Fatal(err)
 	}

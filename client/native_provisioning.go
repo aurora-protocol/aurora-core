@@ -283,6 +283,11 @@ func (p NativeProvisioning) validatedObjectsAndDeploymentAt(now time.Time, requi
 	if !bytes.Equal(seed.TokenIssuerHint, objects.accessHint.HintIssuerID) {
 		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, fmt.Errorf("client: signed seed issuer does not match access hint")
 	}
+	deploymentTrust, err := p.authorizedDeployment(seed, objects)
+	if err != nil {
+		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, err
+	}
+	defer zeroNativeProvisioningDeploymentTrusts([]NativeProvisioningDeploymentTrust{deploymentTrust})
 	if err := validateNativeIssuerMetadata(objects.issuerMetadata, authorityKeys, uint64(now.Unix())); err != nil {
 		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, err
 	}
@@ -292,19 +297,46 @@ func (p NativeProvisioning) validatedObjectsAndDeploymentAt(now time.Time, requi
 	if err := validateNativePolicy(objects.policyOffer, objects.transportHints, p.Suite); err != nil {
 		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, err
 	}
-	deployment, err := p.verifyDeployment(now, objects)
+	deployment, err := p.verifyDeployment(now, objects, deploymentTrust)
 	if err != nil {
 		return nativeProvisioningObjects{}, trust.VerifiedRelayDeployment{}, fmt.Errorf("client: native provisioning relay deployment: %w", err)
 	}
 	return objects, deployment, nil
 }
 
-func (p NativeProvisioning) verifyDeployment(now time.Time, objects nativeProvisioningObjects) (trust.VerifiedRelayDeployment, error) {
+func (p NativeProvisioning) authorizedDeployment(seed protocol.SignedSeedRecord, objects nativeProvisioningObjects) (NativeProvisioningDeploymentTrust, error) {
+	templateHash, err := trust.CoverTemplateHash(objects.template)
+	if err != nil {
+		return NativeProvisioningDeploymentTrust{}, fmt.Errorf("client: native provisioning cover template hash: %w", err)
+	}
+	defer zeroNativeProvisioningBytes(templateHash)
+	if !hasNativeNonZeroPreHash(seed.BootstrapCoverTemplateHash) {
+		return NativeProvisioningDeploymentTrust{}, fmt.Errorf("client: signed seed does not commit to a bootstrap cover template")
+	}
+	if !bytes.Equal(seed.BootstrapCoverTemplateHash, templateHash) {
+		return NativeProvisioningDeploymentTrust{}, fmt.Errorf("client: signed seed bootstrap cover template hash mismatch")
+	}
+	descriptorHash, err := trust.RelayDescriptorHash(objects.descriptor)
+	if err != nil {
+		return NativeProvisioningDeploymentTrust{}, fmt.Errorf("client: native provisioning relay descriptor hash: %w", err)
+	}
+	defer zeroNativeProvisioningBytes(descriptorHash)
+	if !bytes.Equal(p.TrustedDescriptorHash, descriptorHash) {
+		return NativeProvisioningDeploymentTrust{}, fmt.Errorf("client: native provisioning relay descriptor hash mismatch")
+	}
+	trusted, err := p.signedSeedTrust.authorizeDeployment(descriptorHash, templateHash, objects.templateAuthorityKey)
+	if err != nil {
+		return NativeProvisioningDeploymentTrust{}, fmt.Errorf("client: native provisioning deployment trust: %w", err)
+	}
+	return trusted, nil
+}
+
+func (p NativeProvisioning) verifyDeployment(now time.Time, objects nativeProvisioningObjects, trusted NativeProvisioningDeploymentTrust) (trust.VerifiedRelayDeployment, error) {
 	return trust.VerifyRelayDeployment(trust.RelayDeploymentVerification{
 		Descriptor:               objects.descriptor,
-		TrustedDescriptorHash:    p.TrustedDescriptorHash,
+		TrustedDescriptorHash:    trusted.DescriptorHash,
 		Template:                 objects.template,
-		TemplateAuthorityKey:     objects.templateAuthorityKey,
+		TemplateAuthorityKey:     trusted.TemplateAuthorityKey,
 		RequestClassID:           p.RequestClassID,
 		Suite:                    p.Suite,
 		Method:                   registry.MethodWebH2Stream,

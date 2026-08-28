@@ -181,10 +181,10 @@ func TestNativeIntegrationCABIRejectsDuplicateOutputRelease(t *testing.T) {
 	}
 }
 
-func newNativeIntegrationCaller(t testing.TB) nativeIntegrationCaller {
+func newNativeIntegrationCaller(t testing.TB, trusted client.NativeProvisioningTrust) nativeIntegrationCaller {
 	t.Helper()
 	caller := newNativeIntegrationCallerWithoutTrust(t)
-	configureNativeIntegrationProvisioningTrust(t, caller)
+	configureNativeIntegrationProvisioningTrust(t, caller, trusted)
 	return caller
 }
 
@@ -200,9 +200,8 @@ func newNativeIntegrationCallerWithoutTrust(t testing.TB) nativeIntegrationCalle
 	return caller
 }
 
-func configureNativeIntegrationProvisioningTrust(t testing.TB, caller nativeIntegrationCaller) {
+func configureNativeIntegrationProvisioningTrust(t testing.TB, caller nativeIntegrationCaller, trusted client.NativeProvisioningTrust) {
 	t.Helper()
-	trusted := firstHopNativeProvisioningTrust(t)
 	encoded, err := client.EncodeNativeProvisioningTrust(trusted)
 	if err != nil {
 		t.Fatal(err)

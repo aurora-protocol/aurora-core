@@ -16,9 +16,9 @@ import (
 )
 
 func TestNativeSessionFFIExchangesTCPAndUDPThroughProductionFirstHop(t *testing.T) {
-	caller := newNativeIntegrationCaller(t)
 	fixture := newNativeSessionFixture(t, time.Now())
 	defer fixture.Close(t)
+	caller := newNativeIntegrationCaller(t, fixture.ProvisioningTrust(t))
 
 	work := nativeIntegrationBegin(t, caller, fixture.Provisioning(t))
 	defer nativeIntegrationClose(t, caller, work.handle)
@@ -49,9 +49,9 @@ func TestNativeSessionFFIExchangesTCPAndUDPThroughProductionFirstHop(t *testing.
 }
 
 func TestNativeSessionFFIExchangesDNSThroughProductionFirstHop(t *testing.T) {
-	caller := newNativeIntegrationCaller(t)
 	fixture := newNativeSessionFixture(t, time.Now())
 	defer fixture.Close(t)
+	caller := newNativeIntegrationCaller(t, fixture.ProvisioningTrust(t))
 
 	work := nativeIntegrationBegin(t, caller, fixture.Provisioning(t))
 	defer nativeIntegrationClose(t, caller, work.handle)
@@ -92,9 +92,9 @@ func TestNativeSessionFFIRejectsUnconfiguredProvisioningTrust(t *testing.T) {
 }
 
 func TestNativeSessionFFIExchangesSVCBDNSThroughProductionFirstHop(t *testing.T) {
-	caller := newNativeIntegrationCaller(t)
 	fixture := newNativeSessionFixture(t, time.Now())
 	defer fixture.Close(t)
+	caller := newNativeIntegrationCaller(t, fixture.ProvisioningTrust(t))
 
 	work := nativeIntegrationBegin(t, caller, fixture.Provisioning(t))
 	defer nativeIntegrationClose(t, caller, work.handle)
@@ -119,9 +119,9 @@ func TestNativeSessionFFIExchangesSVCBDNSThroughProductionFirstHop(t *testing.T)
 }
 
 func TestNativeSessionFFIRejectsDuplicateCompletionAndClosesHandle(t *testing.T) {
-	caller := newNativeIntegrationCaller(t)
 	fixture := newNativeSessionFixture(t, time.Now())
 	defer fixture.Close(t)
+	caller := newNativeIntegrationCaller(t, fixture.ProvisioningTrust(t))
 
 	work := nativeIntegrationBegin(t, caller, fixture.Provisioning(t))
 	issuerResponse := fixture.Issue(t, work.requestBody)
@@ -141,9 +141,9 @@ func TestNativeSessionFFIRejectsDuplicateCompletionAndClosesHandle(t *testing.T)
 }
 
 func TestNativeSessionFFIRejectsSpentAccessHintOnFreshConnection(t *testing.T) {
-	caller := newNativeIntegrationCaller(t)
 	fixture := newNativeSessionFixture(t, time.Now())
 	defer fixture.Close(t)
+	caller := newNativeIntegrationCaller(t, fixture.ProvisioningTrust(t))
 
 	provisioning := fixture.Provisioning(t)
 	work := nativeIntegrationBegin(t, caller, provisioning)
@@ -164,9 +164,9 @@ func TestNativeSessionFFIRejectsSpentAccessHintOnFreshConnection(t *testing.T) {
 }
 
 func TestNativeSessionFFIRejectsExpiredProvisioningBeforeNetworkOpen(t *testing.T) {
-	caller := newNativeIntegrationCaller(t)
 	fixture := newNativeSessionFixture(t, time.Now())
 	defer fixture.Close(t)
+	caller := newNativeIntegrationCaller(t, fixture.ProvisioningTrust(t))
 
 	provisioning := fixture.Provisioning(t)
 	accessHint, err := admission.DecodeAccessHintCredential(provisioning.AccessHint)
@@ -191,9 +191,9 @@ func TestNativeSessionFFIRejectsExpiredProvisioningBeforeNetworkOpen(t *testing.
 }
 
 func TestNativeSessionFFIStopsOnCarrierCancellation(t *testing.T) {
-	caller := newNativeIntegrationCaller(t)
 	fixture := newNativeSessionFixture(t, time.Now())
 	defer fixture.Close(t)
+	caller := newNativeIntegrationCaller(t, fixture.ProvisioningTrust(t))
 
 	work := nativeIntegrationBegin(t, caller, fixture.Provisioning(t))
 	if status, payload := nativeIntegrationCall(t, caller, opCompleteNativeSessionRaw, fixture.Issue(t, work.requestBody), work.handle); status != statusOK || len(payload) != 0 {

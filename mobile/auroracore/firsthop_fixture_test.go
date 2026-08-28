@@ -89,7 +89,6 @@ func newNativeSessionFixture(t testing.TB, now time.Time) *Fixture {
 		t.Fatal("first-hop fixture requires a valid time")
 	}
 	now = now.UTC().Truncate(time.Second)
-	configureNativeProvisioningTrustForTest(t)
 	nowUnix := uint64(now.Unix())
 
 	certificate, certificateRaw := firstHopCertificate(t)
@@ -108,6 +107,7 @@ func newNativeSessionFixture(t testing.TB, now time.Time) *Fixture {
 		MaxUses:       1,
 	}
 	deployment, authority, epochClassical, epochPQ := firstHopDeployment(t, now, auroracrypto.PreHash(certificateRawSPKI(t, certificateRaw)))
+	configureNativeProvisioningTrustForTest(t, deployment, authority)
 
 	resolver, err := handshake.NewStaticAccessHintResolver([]admission.AccessHintCredential{accessHint})
 	if err != nil {
@@ -250,7 +250,7 @@ func (f *Fixture) Provisioning(t testing.TB) client.NativeProvisioning {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signedSeed, signedSeedRoots := firstHopSignedSeed(t, time.Now().UTC(), publishedIssuerMetadata, f.issuer.AuthorityKeys(), f.accessHint.HintIssuerID)
+	signedSeed, signedSeedRoots := firstHopSignedSeed(t, time.Now().UTC(), publishedIssuerMetadata, f.issuer.AuthorityKeys(), f.accessHint.HintIssuerID, f.deployment.TemplateHash())
 	zeroFirstHopAuthorityKeys(signedSeedRoots)
 	policyOffer, err := protocol.Encode(protocol.PolicyOffer{
 		OfferedVersions:         []uint64{registry.Version20},
@@ -303,23 +303,41 @@ func (f *Fixture) Provisioning(t testing.TB) client.NativeProvisioning {
 	}
 }
 
-func configureNativeProvisioningTrustForTest(t testing.TB) {
+// ProvisioningTrust returns the independently authenticated roots and
+// deployment tuple needed to validate this fixture's provisioning bundle.
+func (f *Fixture) ProvisioningTrust(t testing.TB) client.NativeProvisioningTrust {
 	t.Helper()
-	trusted := firstHopNativeProvisioningTrust(t)
+	if f == nil || !f.deployment.Valid() {
+		t.Fatal("first-hop fixture trust is unavailable")
+	}
+	return firstHopNativeProvisioningTrust(t, f.deployment, f.templateAuthority)
+}
+
+func configureNativeProvisioningTrustForTest(t testing.TB, deployment trust.VerifiedRelayDeployment, authority protocol.PublicKeyRecord) {
+	t.Helper()
+	trusted := firstHopNativeProvisioningTrust(t, deployment, authority)
 	encoded, err := client.EncodeNativeProvisioningTrust(trusted)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer zeroNativeBytes(encoded)
-	if err := nativeProvisioningTrust.configure(encoded); err != nil {
-		t.Fatal(err)
-	}
+	// Each fixture has fresh relay keys and therefore a distinct authenticated
+	// deployment manifest. Replace the process-global test registry directly;
+	// production configuration remains immutable through configure().
+	nativeProvisioningTrust.mu.Lock()
+	nativeProvisioningTrust.encoded = append(nativeProvisioningTrust.encoded[:0], encoded...)
+	nativeProvisioningTrust.value = trusted
+	nativeProvisioningTrust.mu.Unlock()
 }
 
-func firstHopNativeProvisioningTrust(t testing.TB) client.NativeProvisioningTrust {
+func firstHopNativeProvisioningTrust(t testing.TB, deployment trust.VerifiedRelayDeployment, authority protocol.PublicKeyRecord) client.NativeProvisioningTrust {
 	t.Helper()
 	roots := firstHopSignedSeedRoots(t)
-	trusted, err := client.NewNativeProvisioningTrust(roots)
+	trusted, err := client.NewNativeProvisioningTrust(roots, client.NativeProvisioningDeploymentTrust{
+		DescriptorHash:       deployment.DescriptorHash(),
+		CoverTemplateHash:    deployment.TemplateHash(),
+		TemplateAuthorityKey: authority,
+	})
 	zeroFirstHopAuthorityKeys(roots)
 	if err != nil {
 		t.Fatal(err)
@@ -327,7 +345,7 @@ func firstHopNativeProvisioningTrust(t testing.TB) client.NativeProvisioningTrus
 	return trusted
 }
 
-func firstHopSignedSeed(t testing.TB, now time.Time, metadata protocol.IssuerMetadata, bootstrapKeys []protocol.AuthorityKeyRecord, issuerID []byte) ([]byte, []protocol.AuthorityKeyRecord) {
+func firstHopSignedSeed(t testing.TB, now time.Time, metadata protocol.IssuerMetadata, bootstrapKeys []protocol.AuthorityKeyRecord, issuerID, bootstrapTemplateHash []byte) ([]byte, []protocol.AuthorityKeyRecord) {
 	t.Helper()
 	rootPrivateKey := firstHopECDSAKey(t)
 	roots := firstHopSignedSeedRoots(t)
@@ -346,7 +364,7 @@ func firstHopSignedSeed(t testing.TB, now time.Time, metadata protocol.IssuerMet
 		TokenIssuerHint:            append([]byte(nil), issuerID...),
 		IssuerMetadataHash:         metadataHash,
 		BootstrapAuthorityKeys:     cloneFirstHopAuthorityKeys(bootstrapKeys),
-		BootstrapCoverTemplateHash: firstHopRandomBytes(t, 48),
+		BootstrapCoverTemplateHash: append([]byte(nil), bootstrapTemplateHash...),
 		NextSeedCommitment:         firstHopRandomBytes(t, 48),
 		SoftwareUpdateEpoch:        1,
 		SeedSignature: protocol.ObjectSignature{

@@ -17,9 +17,9 @@ import (
 const nativeReservationJSONOperation = 22
 
 func TestNativeProvisioningReservationJSONTraversesCABI(t *testing.T) {
-	caller := newNativeIntegrationCaller(t)
 	fixture := newNativeSessionFixture(t, time.Now())
 	defer fixture.Close(t)
+	caller := newNativeIntegrationCaller(t, fixture.ProvisioningTrust(t))
 	encoded, err := client.EncodeNativeProvisioning(fixture.Provisioning(t))
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +38,7 @@ func TestNativeProvisioningReservationJSONTraversesCABI(t *testing.T) {
 	defer zeroNativeBytes(payload)
 	result := decodeNativeProvisioningReservationJSONForTest(t, payload)
 	defer result.zero()
-	if _, err := client.ParseNativeProvisioningWithTrust(result.provisioning, firstHopNativeProvisioningTrust(t), time.Now()); err != nil {
+	if _, err := client.ParseNativeProvisioningWithTrust(result.provisioning, fixture.ProvisioningTrust(t), time.Now()); err != nil {
 		t.Fatalf("C ABI JSON reserved provisioning is invalid: %v", err)
 	}
 }
@@ -171,9 +171,9 @@ func TestNativeProvisioningReservationRejectsUnrepresentableSourceLength(t *test
 }
 
 func TestNativeProvisioningReservationTraversesCABI(t *testing.T) {
-	caller := newNativeIntegrationCaller(t)
 	fixture := newNativeSessionFixture(t, time.Now())
 	defer fixture.Close(t)
+	caller := newNativeIntegrationCaller(t, fixture.ProvisioningTrust(t))
 	provisioning := fixture.Provisioning(t)
 	encoded, err := client.EncodeNativeProvisioning(provisioning)
 	if err != nil {
@@ -197,15 +197,15 @@ func TestNativeProvisioningReservationTraversesCABI(t *testing.T) {
 	defer zeroNativeBytes(reservation.Provisioning)
 	defer zeroNativeBytes(reservation.SpentHintKey)
 	defer zeroNativeBytes(reservation.RelayBucketID)
-	if _, err := client.ParseNativeProvisioningWithTrust(reservation.Provisioning, firstHopNativeProvisioningTrust(t), time.Now()); err != nil {
+	if _, err := client.ParseNativeProvisioningWithTrust(reservation.Provisioning, fixture.ProvisioningTrust(t), time.Now()); err != nil {
 		t.Fatalf("C ABI reserved provisioning is invalid: %v", err)
 	}
 }
 
 func TestValidateNativeProvisioningSourceTraversesCABI(t *testing.T) {
-	caller := newNativeIntegrationCaller(t)
 	fixture := newNativeSessionFixture(t, time.Now())
 	defer fixture.Close(t)
+	caller := newNativeIntegrationCaller(t, fixture.ProvisioningTrust(t))
 	encoded, err := client.EncodeNativeProvisioning(fixture.Provisioning(t))
 	if err != nil {
 		t.Fatal(err)
@@ -222,9 +222,9 @@ func TestValidateNativeProvisioningSourceTraversesCABI(t *testing.T) {
 }
 
 func TestValidateNativeProvisioningSourceRejectsTamperedSignedSeed(t *testing.T) {
-	caller := newNativeIntegrationCaller(t)
 	fixture := newNativeSessionFixture(t, time.Now())
 	defer fixture.Close(t)
+	caller := newNativeIntegrationCaller(t, fixture.ProvisioningTrust(t))
 	provisioning := fixture.Provisioning(t)
 	provisioning.SignedSeed[0] ^= 0xff
 	encoded, err := client.EncodeNativeProvisioning(provisioning)
@@ -339,7 +339,11 @@ func reserveNativeProvisioningForTest(t testing.TB, input []byte) nativeProvisio
 	if len(reservation.Provisioning) == 0 || len(reservation.SpentHintKey) != 48 || len(reservation.RelayBucketID) != 16 || reservation.AccessHintExpiryUnix == 0 {
 		t.Fatalf("reservation JSON is incomplete: %+v", reservation)
 	}
-	if _, err := client.ParseNativeProvisioningWithTrust(reservation.Provisioning, firstHopNativeProvisioningTrust(t), time.Now()); err != nil {
+	trusted, err := nativeProvisioningTrust.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ParseNativeProvisioningWithTrust(reservation.Provisioning, trusted, time.Now()); err != nil {
 		t.Fatalf("reserved provisioning is invalid: %v", err)
 	}
 	return nativeProvisioningReservationTestResult{

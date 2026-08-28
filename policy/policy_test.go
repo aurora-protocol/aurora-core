@@ -46,6 +46,22 @@ func TestStrictRejectsFast1AndQUIC(t *testing.T) {
 	}
 }
 
+func TestSmartResolvedAdversarialProfilesRejectFast1(t *testing.T) {
+	// Config validation cannot see smart's dynamic resolution, so the
+	// stealth gate must refuse fast-1 for any smart-resolved profile that
+	// forbids it.
+	for _, pathClass := range []string{"clean", "strict", "severe"} {
+		profile := SmartProfile(pathClass)
+		candidate := safeCandidate(registry.RouteFast1, registry.MethodWebH2Stream, 1)
+		if profile.Fast1Forbidden && candidate.PassesStealthGate(profile) {
+			t.Fatalf("smart(%q) resolved to %s, which forbids fast-1, but the gate accepted it", pathClass, profile.Name)
+		}
+		if !profile.Fast1Forbidden && !candidate.PassesStealthGate(profile) {
+			t.Fatalf("smart(%q) resolved to %s, which allows fast-1, but the gate rejected a safe candidate", pathClass, profile.Name)
+		}
+	}
+}
+
 func TestAdversarialSelectionRequiresLowLatencyOverrideForFast1(t *testing.T) {
 	profile, _ := ProfileByID(registry.PolicyAdversarialDPI)
 	candidates := []Candidate{

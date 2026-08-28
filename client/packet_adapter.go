@@ -550,7 +550,13 @@ func (a *PacketAdapter) ingressTCPLocked(ctx context.Context, packet packetAdapt
 		return a.enqueueLocalPacketLocked(response)
 	}
 	if mapping == nil || mapping.kind != flow.FlowKindTCPStream || mapping.localClosed {
-		return fmt.Errorf("client: packet adapter received TCP data for an unknown flow")
+		// A non-SYN packet with no live flow is routine close-handshake fallout:
+		// the kernel's final ACK and late retransmits arrive after the flow was
+		// removed, and half-close ACKs arrive after the local FIN. No flow state
+		// exists to desync, so drop the packet instead of failing the session.
+		// A genuine kernel/adapter divergence still surfaces as a sequence
+		// mismatch on a live flow below.
+		return nil
 	}
 	if packet.tcp.flags&tcpFlagRST != 0 {
 		return a.closeLocalFlowLocked(ctx, mapping, now, false)

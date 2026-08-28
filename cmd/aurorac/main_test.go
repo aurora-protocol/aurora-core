@@ -625,6 +625,136 @@ func TestRunProxyComponentsStopsOnCancellation(t *testing.T) {
 	}
 }
 
+func TestRunProxyComponentsWaitsForDelayedThirdComponent(t *testing.T) {
+	application, err := session.NewApplication(session.Config{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		Write:           session.DirectionConfig{Direction: 0, Secret: bytes.Repeat([]byte{0x11}, 48), Key: bytes.Repeat([]byte{0x12}, 32), IV: bytes.Repeat([]byte{0x13}, 12)},
+		Read:            session.DirectionConfig{Direction: 1, Secret: bytes.Repeat([]byte{0x21}, 48), Key: bytes.Repeat([]byte{0x22}, 32), IV: bytes.Repeat([]byte{0x23}, 12)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	carrier := newDelayedProxyCarrier()
+	established := &handshake.EstablishedSession{Application: application, ReadCarrier: carrier, WriteCarrier: carrier}
+	runtime, err := client.NewTCPProxyRuntime(application, client.TCPProxyRuntimeOptions{MaxFlows: 1, ReadBufferBytes: 1024, MaxPendingWriteBytes: 1024})
+	if err != nil {
+		_ = established.Close()
+		t.Fatal(err)
+	}
+	httpListener := newDelayedProxyListener()
+	socksListener := newDelayedProxyListener()
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- runProxyComponents(ctx, established, runtime, httpListener, socksListener)
+	}()
+
+	for name, started := range map[string]<-chan struct{}{
+		"HTTP listener":  httpListener.acceptStarted,
+		"SOCKS listener": socksListener.acceptStarted,
+		"carrier read":   carrier.readStarted,
+	} {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatalf("%s did not start", name)
+		}
+	}
+	cancel()
+	for name, listener := range map[string]*delayedProxyListener{
+		"HTTP listener":  httpListener,
+		"SOCKS listener": socksListener,
+	} {
+		for closeCall := 1; closeCall <= 3; closeCall++ {
+			select {
+			case <-listener.closeCalls:
+			case <-time.After(time.Second):
+				t.Fatalf("%s close call %d did not occur", name, closeCall)
+			}
+		}
+		close(listener.releaseAccept)
+		select {
+		case <-listener.acceptReturned:
+		case <-time.After(time.Second):
+			t.Fatalf("%s accept did not return", name)
+		}
+	}
+
+	select {
+	case err := <-result:
+		t.Fatalf("proxy components returned before delayed carrier component: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(carrier.releaseRead)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("proxy cancellation error = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("proxy components did not return after delayed carrier completed")
+	}
+}
+
+type delayedProxyListener struct {
+	acceptStarted  chan struct{}
+	acceptReturned chan struct{}
+	releaseAccept  chan struct{}
+	closeCalls     chan struct{}
+	startOnce      sync.Once
+	returnOnce     sync.Once
+}
+
+func newDelayedProxyListener() *delayedProxyListener {
+	return &delayedProxyListener{
+		acceptStarted:  make(chan struct{}),
+		acceptReturned: make(chan struct{}),
+		releaseAccept:  make(chan struct{}),
+		closeCalls:     make(chan struct{}, 3),
+	}
+}
+
+func (l *delayedProxyListener) Accept() (net.Conn, error) {
+	l.startOnce.Do(func() { close(l.acceptStarted) })
+	<-l.releaseAccept
+	l.returnOnce.Do(func() { close(l.acceptReturned) })
+	return nil, net.ErrClosed
+}
+
+func (l *delayedProxyListener) Close() error {
+	l.closeCalls <- struct{}{}
+	return nil
+}
+
+func (l *delayedProxyListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}
+}
+
+type delayedProxyCarrier struct {
+	readStarted chan struct{}
+	releaseRead chan struct{}
+	startOnce   sync.Once
+}
+
+func newDelayedProxyCarrier() *delayedProxyCarrier {
+	return &delayedProxyCarrier{readStarted: make(chan struct{}), releaseRead: make(chan struct{})}
+}
+
+func (c *delayedProxyCarrier) Read([]byte) (int, error) {
+	c.startOnce.Do(func() { close(c.readStarted) })
+	<-c.releaseRead
+	return 0, io.EOF
+}
+
+func (*delayedProxyCarrier) Write(payload []byte) (int, error) {
+	return len(payload), nil
+}
+
+func (*delayedProxyCarrier) Close() error {
+	return nil
+}
+
 func TestRunProxyComponentsReturnsCloseFailureOnCancellation(t *testing.T) {
 	application, err := session.NewApplication(session.Config{
 		Suite:           registry.SuiteHybrid768AESGCM,

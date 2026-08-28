@@ -700,15 +700,18 @@ func runProxyComponents(ctx context.Context, established *handshake.EstablishedS
 	}()
 
 	var terminal proxyComponentResult
+	collected := 0
 	select {
 	case terminal = <-results:
+		collected = 1
 	case <-ctx.Done():
 		terminal = proxyComponentResult{err: ctx.Err()}
 	}
 	cancel()
 	closeErr := errors.Join(closeProxyListener(httpListener), closeProxyListener(socksListener), runtime.Close(), established.Close())
-	for remaining := 0; remaining < 2; remaining++ {
+	for collected < 3 {
 		<-results
+		collected++
 	}
 	if ctx.Err() != nil {
 		return closeErr

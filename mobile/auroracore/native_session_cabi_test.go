@@ -21,8 +21,13 @@ import (
 
 const (
 	nativeIntegrationMaximumABIFrame = 16 << 20
-	nativeIntegrationCallTimeout     = 4 * time.Second
-	nativeIntegrationCloseTimeout    = 4 * time.Second
+	// The call and close timeouts are watchdogs against a wedged harness, not
+	// latency assertions. Each call spawns a freshly compiled c-archive binary
+	// whose first response bears exec, dynamic linking, and Go runtime startup;
+	// under `go test -race ./...` load that cold start can legitimately take
+	// several seconds, so the bounds carry generous headroom.
+	nativeIntegrationCallTimeout  = 30 * time.Second
+	nativeIntegrationCloseTimeout = 10 * time.Second
 	nativeIntegrationOversizedCall   = 1<<31 - 1
 	nativeIntegrationOversizedFree   = nativeIntegrationOversizedCall - 1
 	nativeIntegrationDuplicateFree   = nativeIntegrationOversizedFree - 1

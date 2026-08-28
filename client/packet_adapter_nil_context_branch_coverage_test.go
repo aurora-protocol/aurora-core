@@ -3,22 +3,22 @@ package client
 // Adversarial white-box coverage for the count-0 nil-context guards of the
 // three public entry points of PacketAdapter (client/packet_adapter.go):
 //
-//   - :282 Ingress                -> error "client: packet adapter context is nil"
-//   - :386 HandleEncryptedPacket  -> (nil, "client: packet adapter context is nil")
-//   - :420 HandleFrameBlocks      -> (nil, "client: packet adapter context is nil")
+//   - :292 Ingress                -> error "client: packet adapter context is nil"
+//   - :404 HandleEncryptedPacket  -> (nil, "client: packet adapter context is nil")
+//   - :438 HandleFrameBlocks      -> (nil, "client: packet adapter context is nil")
 //
 // Each guard sits immediately after the `if a == nil` receiver guard
-// (:279/:383/:417) and rejects a nil context BEFORE ctx.Err() (:285/:423) or any
+// (:289/:401/:435) and rejects a nil context BEFORE ctx.Err() (:295/:441) or any
 // struct field is read, so a bare non-nil *PacketAdapter suffices (no flow, no
-// application, no harness). The :288/:389/:423 now-validity checks are also
+// application, no harness). The :298/:407/:444 now-validity checks are also
 // after the ctx guard, so the now argument is irrelevant to these guards.
 //
-// Coverage targets (baseline measured on main; bodies COUNT 0 while the :282 /
-// :386 / :420 conditions were already evaluated — every existing test passes a
+// Coverage targets (baseline measured on main; bodies COUNT 0 while the :292 /
+// :404 / :438 conditions were already evaluated — every existing test passes a
 // real context.Background(), so the ctx==nil body is never taken):
-//   - packet_adapter.go:282.16,284.3 0  — Ingress nil-context body
-//   - packet_adapter.go:386.16,388.3 0  — HandleEncryptedPacket nil-context body
-//   - packet_adapter.go:420.16,422.3 0  — HandleFrameBlocks nil-context body
+//   - packet_adapter.go:292.16,294.3 0  — Ingress nil-context body
+//   - packet_adapter.go:404.16,406.3 0  — HandleEncryptedPacket nil-context body
+//   - packet_adapter.go:438.16,440.3 0  — HandleFrameBlocks nil-context body
 //
 // SA1012 (nil Context literal) is suppressed for the three intentional
 // nil-context calls via the established codebase convention
@@ -44,21 +44,21 @@ func TestPacketAdapterRejectsNilContext(t *testing.T) {
 	adapter := &PacketAdapter{}
 	now := time.Unix(1_700_000_000, 0)
 
-	// :282 Ingress rejects a nil context before ctx.Err / field reads.
+	// :292 Ingress rejects a nil context before ctx.Err / field reads.
 	//lint:ignore SA1012 Verifies the public API's explicit nil-context rejection.
 	if err := adapter.Ingress(nil, nil, now); err == nil || !strings.Contains(err.Error(), "context is nil") {
-		t.Fatalf("Ingress(nil ctx) err = %v, want non-nil containing \"context is nil\" (:282)", err)
+		t.Fatalf("Ingress(nil ctx) err = %v, want non-nil containing \"context is nil\" (:292)", err)
 	}
 
-	// :386 HandleEncryptedPacket rejects a nil context, returning (nil, err).
+	// :404 HandleEncryptedPacket rejects a nil context, returning (nil, err).
 	//lint:ignore SA1012 Verifies the public API's explicit nil-context rejection.
 	if out, err := adapter.HandleEncryptedPacket(nil, nil, now); err == nil || !strings.Contains(err.Error(), "context is nil") || out != nil {
-		t.Fatalf("HandleEncryptedPacket(nil ctx) out=%v err=%v, want nil out + non-nil err containing \"context is nil\" (:386)", out, err)
+		t.Fatalf("HandleEncryptedPacket(nil ctx) out=%v err=%v, want nil out + non-nil err containing \"context is nil\" (:404)", out, err)
 	}
 
-	// :420 HandleFrameBlocks rejects a nil context, returning (nil, err).
+	// :438 HandleFrameBlocks rejects a nil context, returning (nil, err).
 	//lint:ignore SA1012 Verifies the public API's explicit nil-context rejection.
 	if out, err := adapter.HandleFrameBlocks(nil, nil, now); err == nil || !strings.Contains(err.Error(), "context is nil") || out != nil {
-		t.Fatalf("HandleFrameBlocks(nil ctx) out=%v err=%v, want nil out + non-nil err containing \"context is nil\" (:420)", out, err)
+		t.Fatalf("HandleFrameBlocks(nil ctx) out=%v err=%v, want nil out + non-nil err containing \"context is nil\" (:438)", out, err)
 	}
 }

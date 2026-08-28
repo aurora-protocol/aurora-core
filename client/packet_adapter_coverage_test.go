@@ -23,45 +23,45 @@ package client
 // is a required CI check).
 //
 // Uncovered blocks (measured count 0 before this file):
-//   - normalizePacketAdapterOptions (1029): the zero-value default fallbacks (1031/1038/
-//     1048) and the four invalid-value rejections (1034/1041/1048/1055).
-//   - parsePacketAdapterIPPacket (1061): unsupported IP version 1070.
-//   - parsePacketAdapterIPv4 (1075): header malformed 1076, packet malformed 1081,
-//     fragments unsupported 1085.
-//   - parsePacketAdapterIPv4Fragment (1100): header malformed 1104, packet malformed
-//     1109, reserved flag 1113, Don't-Fragment conflict 1118, fragment malformed 1125.
-//   - parsePacketAdapterIPv6Fragment (1255): malformed 1259, chain-too-long before
-//     fragment 1280, fragment-field parse error 1284, duplicate destination after
-//     fragment 1290.
-//   - parsePacketAdapterIPv6 (1444): malformed 1445.
-//   - parsePacketAdapterIPv6Headers (1464): hop-by-hop not first 1474, duplicate
-//     destination 1478, duplicate fragment 1483, unsupported extension 1488, chain too
-//     long 1490, sub-parse error 1499.
-//   - parsePacketAdapterIPv6FragmentHeader (1505): field parse error 1507, fragmented
-//     1510.
-//   - parsePacketAdapterIPv6FragmentFields (1516): malformed 1517, reserved bits 1521.
-//   - parsePacketAdapterIPv6OptionsHeader (1527): malformed 1528, length overflow 1532,
-//     option parse error 1535.
-//   - parsePacketAdapterTransport (1558): TCP header invalid 1565, UDP segment
-//     malformed 1578, UDP checksum invalid 1582, unsupported protocol 1591.
-//   - buildPacketAdapterUDPPacket (1610): payload too large 1611, zero-checksum -> 0xffff
-//     1620.
-//   - buildPacketAdapterIPPacket (1627): invalid addresses 1628, IPv4 too large 1633,
-//     IPv6 too large 1651, invalid version 1665.
-//   - tcpSequenceBefore (1714): the false return (0% before).
+//   - normalizePacketAdapterOptions (1053): the zero-value default fallbacks (1056/1063/
+//     1070) and the four invalid-value rejections (1058/1065/1072/1079).
+//   - parsePacketAdapterIPPacket (1085): unsupported IP version 1094.
+//   - parsePacketAdapterIPv4 (1099): header malformed 1100, packet malformed 1105,
+//     fragments unsupported 1109.
+//   - parsePacketAdapterIPv4Fragment (1124): header malformed 1128, packet malformed
+//     1133, reserved flag 1137, Don't-Fragment conflict 1142, fragment malformed 1149.
+//   - parsePacketAdapterIPv6Fragment (1279): malformed 1283, chain-too-long before
+//     fragment 1304, fragment-field parse error 1308, duplicate destination after
+//     fragment 1314.
+//   - parsePacketAdapterIPv6 (1468): malformed 1469.
+//   - parsePacketAdapterIPv6Headers (1488): hop-by-hop not first 1498, duplicate
+//     destination 1502, duplicate fragment 1507, unsupported extension 1512, chain too
+//     long 1514, sub-parse error 1523.
+//   - parsePacketAdapterIPv6FragmentHeader (1529): field parse error 1531, fragmented
+//     1534.
+//   - parsePacketAdapterIPv6FragmentFields (1540): malformed 1541, reserved bits 1545.
+//   - parsePacketAdapterIPv6OptionsHeader (1551): malformed 1552, length overflow 1556,
+//     option parse error 1559.
+//   - parsePacketAdapterTransport (1582): TCP header invalid 1589, UDP segment
+//     malformed 1602, UDP checksum invalid 1606, unsupported protocol 1615.
+//   - buildPacketAdapterUDPPacket (1634): payload too large 1635, zero-checksum -> 0xffff
+//     1644.
+//   - buildPacketAdapterIPPacket (1651): invalid addresses 1652, IPv4 too large 1657,
+//     IPv6 too large 1675, invalid version 1689.
+//   - tcpSequenceBefore (1738): the false return (0% before).
 //
 // Dead-by-design (documented, not covered):
-//   - parsePacketAdapterIPv4 1094, parsePacketAdapterIPv4Fragment 1139,
-//     parsePacketAdapterIPv6 1458, parsePacketAdapterIPv6Fragment 1315 — the "address is
+//   - parsePacketAdapterIPv4 1118, parsePacketAdapterIPv4Fragment 1163,
+//     parsePacketAdapterIPv6 1482, parsePacketAdapterIPv6Fragment 1339 — the "address is
 //     invalid" branches. Each builds the address with netip.AddrFrom4([4]byte(...)) /
 //     netip.AddrFrom16([16]byte(...)) from a fixed-size array slice whose length is
 //     already guaranteed by an earlier size check. AddrFrom4/AddrFrom16 always return a
 //     valid (non-zero) Addr for any fixed-size input (verified: even all-zero bytes
 //     report IsValid()==true), so the IsValid() guards can never fire.
-//   - parsePacketAdapterIPv6Fragment 1323 — the chain-too-long check at the bottom of
+//   - parsePacketAdapterIPv6Fragment 1347 — the chain-too-long check at the bottom of
 //     the extension-header loop. The only switch cases that fall through to it are
-//     hop-by-hop (which errors at 1271 when headerCount!=0) and destination (which
-//     errors at 1275 once seenDestination is set). At headerCount>=2 both have already
+//     hop-by-hop (which errors at 1295 when headerCount!=0) and destination (which
+//     errors at 1299 once seenDestination is set). At headerCount>=2 both have already
 //     errored, so the headerCount>=maximumPacketAdapterIPv6Options check is unreachable.
 //
 // Out of scope (already partially covered by the end-to-end suite; need live PacketAdapter
@@ -262,15 +262,15 @@ func TestNormalizePacketAdapterOptionsDecidesPerCondition(t *testing.T) {
 		opts    PacketAdapterOptions
 		wantSub string // non-empty => assert err contains this; empty => assert nil
 	}{
-		// 1031/1038/1048/1052 default fallbacks + happy return: all-zero options.
+		// 1056/1063/1070/1077 default fallbacks + happy return: all-zero options.
 		{"defaults accepted", PacketAdapterOptions{}, ""},
-		// 1034: flow limit above the maximum.
+		// 1058: flow limit above the maximum.
 		{"flow limit too large", PacketAdapterOptions{MaxFlows: maximumPacketAdapterFlows + 1}, "flow limit is invalid"},
-		// 1041: packet limit below the minimum.
+		// 1065: packet limit below the minimum.
 		{"packet limit too small", PacketAdapterOptions{MaxPacketBytes: 1}, "packet limit is invalid"},
-		// 1049: local packet limit above the maximum.
+		// 1072: local packet limit above the maximum.
 		{"local packet limit too large", PacketAdapterOptions{MaxLocalPackets: maximumPacketAdapterLocalPackets + 1}, "local packet limit is invalid"},
-		// 1055: UDP mode neither fallback nor native (0 is normalized to fallback, so
+		// 1079: UDP mode neither fallback nor native (0 is normalized to fallback, so
 		// pick a distinct uint8 value the validator does not recognize).
 		{"udp mode invalid", PacketAdapterOptions{UDPMode: transport.UDPMode(5)}, "UDP mode is invalid"},
 		// Explicit valid values (no defaults taken).
@@ -294,17 +294,17 @@ func TestNormalizePacketAdapterOptionsDecidesPerCondition(t *testing.T) {
 
 func TestParsePacketAdapterIPPacketDecidesPerCondition(t *testing.T) {
 	const max = 65535
-	// 1062: size invalid (empty).
+	// 1086: size invalid (empty).
 	if _, err := parsePacketAdapterIPPacket(nil, max); err == nil ||
 		!strings.Contains(err.Error(), "IP packet size is invalid") {
 		t.Fatalf("empty: err = %v, want IP packet size is invalid", err)
 	}
-	// 1062: size invalid (too large).
+	// 1086: size invalid (too large).
 	if _, err := parsePacketAdapterIPPacket(make([]byte, max+1), max); err == nil ||
 		!strings.Contains(err.Error(), "IP packet size is invalid") {
 		t.Fatalf("oversize: err = %v, want IP packet size is invalid", err)
 	}
-	// 1070: unsupported IP version (version 1).
+	// 1094: unsupported IP version (version 1).
 	if _, err := parsePacketAdapterIPPacket([]byte{0x10}, max); err == nil ||
 		!strings.Contains(err.Error(), "IP version is unsupported") {
 		t.Fatalf("version 1: err = %v, want IP version is unsupported", err)
@@ -320,40 +320,40 @@ func TestParsePacketAdapterIPPacketDecidesPerCondition(t *testing.T) {
 }
 
 func TestParsePacketAdapterIPv4DecidesPerCondition(t *testing.T) {
-	// 1076: header malformed — too short.
+	// 1100: header malformed — too short.
 	short := make([]byte, 19)
 	short[0] = 0x45
 	if _, err := parsePacketAdapterIPv4(short); err == nil ||
 		!strings.Contains(err.Error(), "IPv4 header is malformed") {
 		t.Fatalf("short: err = %v, want IPv4 header is malformed", err)
 	}
-	// 1076: header malformed — IHL < 5.
+	// 1100: header malformed — IHL < 5.
 	ihlBad := make([]byte, 20)
 	ihlBad[0] = 0x40 // IHL = 4
 	if _, err := parsePacketAdapterIPv4(ihlBad); err == nil ||
 		!strings.Contains(err.Error(), "IPv4 header is malformed") {
 		t.Fatalf("IHL<5: err = %v, want IPv4 header is malformed", err)
 	}
-	// 1081: packet malformed — corrupted header checksum (other fields still consistent).
+	// 1105: packet malformed — corrupted header checksum (other fields still consistent).
 	badChecksum := append([]byte(nil), covValidIPv4TCP()...)
 	badChecksum[10] ^= 0xff
 	if _, err := parsePacketAdapterIPv4(badChecksum); err == nil ||
 		!strings.Contains(err.Error(), "IPv4 packet is malformed") {
 		t.Fatalf("bad checksum: err = %v, want IPv4 packet is malformed", err)
 	}
-	// 1081: packet malformed — total length disagrees with buffer length.
+	// 1105: packet malformed — total length disagrees with buffer length.
 	badTotal := append([]byte(nil), covValidIPv4TCP()...)
 	badTotal[2] ^= 0xff
 	if _, err := parsePacketAdapterIPv4(badTotal); err == nil ||
 		!strings.Contains(err.Error(), "IPv4 packet is malformed") {
 		t.Fatalf("bad total length: err = %v, want IPv4 packet is malformed", err)
 	}
-	// 1085: fragments unsupported — non-zero fragment offset (checksum valid).
+	// 1109: fragments unsupported — non-zero fragment offset (checksum valid).
 	if _, err := parsePacketAdapterIPv4(covIPv4Packet(packetAdapterTCP, 64, 0x00, 0x08, []byte("payload"))); err == nil ||
 		!strings.Contains(err.Error(), "IPv4 fragments are unsupported") {
 		t.Fatalf("fragment offset: err = %v, want IPv4 fragments are unsupported", err)
 	}
-	// 1085: fragments unsupported — TTL of zero.
+	// 1109: fragments unsupported — TTL of zero.
 	if _, err := parsePacketAdapterIPv4(covIPv4Packet(packetAdapterTCP, 0, 0x40, 0x00, []byte("payload"))); err == nil ||
 		!strings.Contains(err.Error(), "IPv4 fragments are unsupported") {
 		t.Fatalf("ttl zero: err = %v, want IPv4 fragments are unsupported", err)
@@ -367,7 +367,7 @@ func TestParsePacketAdapterIPv4DecidesPerCondition(t *testing.T) {
 func TestParsePacketAdapterIPv4FragmentDecidesPerCondition(t *testing.T) {
 	const max = 65535
 
-	// 1101: not IPv4 / empty -> (zero, false, nil), not an error.
+	// 1125: not IPv4 / empty -> (zero, false, nil), not an error.
 	if _, ok, err := parsePacketAdapterIPv4Fragment(nil, max); err != nil || ok {
 		t.Fatalf("empty: ok=%v err=%v, want false nil", ok, err)
 	}
@@ -375,7 +375,7 @@ func TestParsePacketAdapterIPv4FragmentDecidesPerCondition(t *testing.T) {
 		t.Fatalf("v6: ok=%v err=%v, want false nil", ok, err)
 	}
 
-	// 1104: header malformed — too short.
+	// 1128: header malformed — too short.
 	short := make([]byte, 19)
 	short[0] = 0x45
 	if _, _, err := parsePacketAdapterIPv4Fragment(short, max); err == nil ||
@@ -383,42 +383,42 @@ func TestParsePacketAdapterIPv4FragmentDecidesPerCondition(t *testing.T) {
 		t.Fatalf("short: err = %v, want IPv4 header is malformed", err)
 	}
 
-	// 1109: packet malformed — corrupted header checksum.
+	// 1133: packet malformed — corrupted header checksum.
 	badChecksum := append([]byte(nil), covIPv4Packet(packetAdapterTCP, 64, 0x40, 0x00, []byte("payload"))...)
 	badChecksum[10] ^= 0xff
 	if _, _, err := parsePacketAdapterIPv4Fragment(badChecksum, max); err == nil ||
 		!strings.Contains(err.Error(), "IPv4 packet is malformed") {
 		t.Fatalf("bad checksum: err = %v, want IPv4 packet is malformed", err)
 	}
-	// 1109: packet malformed — TTL of zero.
+	// 1133: packet malformed — TTL of zero.
 	if _, _, err := parsePacketAdapterIPv4Fragment(covIPv4Packet(packetAdapterTCP, 0, 0x40, 0x00, []byte("payload")), max); err == nil ||
 		!strings.Contains(err.Error(), "IPv4 packet is malformed") {
 		t.Fatalf("ttl zero: err = %v, want IPv4 packet is malformed", err)
 	}
 
-	// 1113: reserved flag bit set (0x8000).
+	// 1137: reserved flag bit set (0x8000).
 	reserved := covIPv4Packet(packetAdapterTCP, 64, 0x80, 0x00, []byte("payload"))
 	if _, _, err := parsePacketAdapterIPv4Fragment(reserved, max); err == nil ||
 		!strings.Contains(err.Error(), "IPv4 fragment flags are invalid") {
 		t.Fatalf("reserved: err = %v, want IPv4 fragment flags are invalid", err)
 	}
-	// 1118: Don't-Fragment set together with a non-zero offset.
+	// 1142: Don't-Fragment set together with a non-zero offset.
 	dfConflict := covIPv4Packet(packetAdapterTCP, 64, 0x40, 0x08, []byte("payload"))
 	if _, _, err := parsePacketAdapterIPv4Fragment(dfConflict, max); err == nil ||
 		!strings.Contains(err.Error(), "Don't Fragment") {
 		t.Fatalf("df conflict: err = %v, want Don't Fragment", err)
 	}
-	// 1121: complete packet (DF, offset 0, no MF) -> (zero, false, nil).
+	// 1145: complete packet (DF, offset 0, no MF) -> (zero, false, nil).
 	if _, ok, err := parsePacketAdapterIPv4Fragment(covValidIPv4TCP(), max); err != nil || ok {
 		t.Fatalf("complete: ok=%v err=%v, want false nil", ok, err)
 	}
-	// 1125: fragment malformed — More-Fragments set but payload not a multiple of 8.
+	// 1149: fragment malformed — More-Fragments set but payload not a multiple of 8.
 	misaligned := covIPv4Packet(packetAdapterTCP, 64, 0x20, 0x00, []byte("12345"))
 	if _, _, err := parsePacketAdapterIPv4Fragment(misaligned, max); err == nil ||
 		!strings.Contains(err.Error(), "IPv4 fragment is malformed") {
 		t.Fatalf("misaligned: err = %v, want IPv4 fragment is malformed", err)
 	}
-	// 1125: fragment malformed — empty payload with More-Fragments.
+	// 1149: fragment malformed — empty payload with More-Fragments.
 	emptyPayload := covIPv4Packet(packetAdapterTCP, 64, 0x20, 0x00, nil)
 	if _, _, err := parsePacketAdapterIPv4Fragment(emptyPayload, max); err == nil ||
 		!strings.Contains(err.Error(), "IPv4 fragment is malformed") {
@@ -431,21 +431,21 @@ func TestParsePacketAdapterIPv4FragmentDecidesPerCondition(t *testing.T) {
 }
 
 func TestParsePacketAdapterIPv6DecidesPerCondition(t *testing.T) {
-	// 1445: malformed — too short.
+	// 1469: malformed — too short.
 	short := make([]byte, 30)
 	short[0] = 0x60
 	if _, err := parsePacketAdapterIPv6(short); err == nil ||
 		!strings.Contains(err.Error(), "IPv6 packet is malformed") {
 		t.Fatalf("short: err = %v, want IPv6 packet is malformed", err)
 	}
-	// 1445: malformed — payload length disagrees with buffer length.
+	// 1469: malformed — payload length disagrees with buffer length.
 	badLen := covIPv6Packet(packetAdapterTCP, nil, []byte("payload"))
 	badLen[4] ^= 0xff
 	if _, err := parsePacketAdapterIPv6(badLen); err == nil ||
 		!strings.Contains(err.Error(), "IPv6 packet is malformed") {
 		t.Fatalf("bad payload length: err = %v, want IPv6 packet is malformed", err)
 	}
-	// 1445: malformed — hop limit of zero.
+	// 1469: malformed — hop limit of zero.
 	hopZero := covIPv6Packet(packetAdapterTCP, nil, nil)
 	hopZero[7] = 0
 	if _, err := parsePacketAdapterIPv6(hopZero); err == nil ||
@@ -459,34 +459,34 @@ func TestParsePacketAdapterIPv6DecidesPerCondition(t *testing.T) {
 }
 
 func TestParsePacketAdapterIPv6HeadersDecidesPerCondition(t *testing.T) {
-	// 1474: hop-by-hop not first (destination -> hop-by-hop).
+	// 1498: hop-by-hop not first (destination -> hop-by-hop).
 	destThenHop := covIPv6Packet(60, /*destination*/
 		bytes.Join([][]byte{covIPv6ExtOptions(0 /*hop-by-hop*/, 0, nil)}, nil), nil)
 	if _, err := parsePacketAdapterIPv6(destThenHop); err == nil ||
 		!strings.Contains(err.Error(), "hop-by-hop header position is invalid") {
 		t.Fatalf("hop not first: err = %v, want hop-by-hop header position is invalid", err)
 	}
-	// 1478: duplicate destination options.
+	// 1502: duplicate destination options.
 	dupDest := covIPv6Packet(60,
 		bytes.Join([][]byte{covIPv6ExtOptions(60, 0, nil), covIPv6ExtOptions(6, 0, nil)}, nil), nil)
 	if _, err := parsePacketAdapterIPv6(dupDest); err == nil ||
 		!strings.Contains(err.Error(), "destination options are duplicated") {
 		t.Fatalf("dup destination: err = %v, want destination options are duplicated", err)
 	}
-	// 1483: duplicate fragment header.
+	// 1507: duplicate fragment header.
 	dupFrag := covIPv6Packet(44, /*fragment*/
 		bytes.Join([][]byte{covIPv6FragmentHeader(44, 0, false, 0), covIPv6FragmentHeader(6, 0, false, 0)}, nil), nil)
 	if _, err := parsePacketAdapterIPv6(dupFrag); err == nil ||
 		!strings.Contains(err.Error(), "fragment header is duplicated") {
 		t.Fatalf("dup fragment: err = %v, want fragment header is duplicated", err)
 	}
-	// 1488: unsupported extension header.
+	// 1512: unsupported extension header.
 	unsupported := covIPv6Packet(99, nil, nil)
 	if _, err := parsePacketAdapterIPv6(unsupported); err == nil ||
 		!strings.Contains(err.Error(), "extension header is unsupported") {
 		t.Fatalf("unsupported: err = %v, want extension header is unsupported", err)
 	}
-	// 1490: extension-header chain too long (hop-by-hop -> destination -> fragment).
+	// 1514: extension-header chain too long (hop-by-hop -> destination -> fragment).
 	longChain := covIPv6Packet(0, /*hop-by-hop*/
 		bytes.Join([][]byte{
 			covIPv6ExtOptions(60, 0, nil),         // hop-by-hop -> destination
@@ -497,7 +497,7 @@ func TestParsePacketAdapterIPv6HeadersDecidesPerCondition(t *testing.T) {
 		!strings.Contains(err.Error(), "extension header chain is too long") {
 		t.Fatalf("chain too long: err = %v, want extension header chain is too long", err)
 	}
-	// 1499: sub-parse error — truncated fragment header.
+	// 1523: sub-parse error — truncated fragment header.
 	truncatedFrag := covIPv6Packet(44, []byte{6, 0, 0, 0}, nil)
 	if _, err := parsePacketAdapterIPv6(truncatedFrag); err == nil ||
 		!strings.Contains(err.Error(), "fragment header is malformed") {
@@ -506,13 +506,13 @@ func TestParsePacketAdapterIPv6HeadersDecidesPerCondition(t *testing.T) {
 }
 
 func TestParsePacketAdapterIPv6FragmentHeaderDecidesPerCondition(t *testing.T) {
-	// 1507: fragment-field parse error — truncated fragment header.
+	// 1531: fragment-field parse error — truncated fragment header.
 	truncated := append(covIPv6Base(44), []byte{6, 0, 0, 0}...)
 	if _, _, err := parsePacketAdapterIPv6FragmentHeader(truncated, 40); err == nil ||
 		!strings.Contains(err.Error(), "fragment header is malformed") {
 		t.Fatalf("truncated: err = %v, want fragment header is malformed", err)
 	}
-	// 1510: fragmented (non-zero offset) is unsupported in the non-fragment parser path.
+	// 1534: fragmented (non-zero offset) is unsupported in the non-fragment parser path.
 	fragmented := append(covIPv6Base(44), covIPv6FragmentHeader(6, 8, false, 1)...)
 	if _, _, err := parsePacketAdapterIPv6FragmentHeader(fragmented, 40); err == nil ||
 		!strings.Contains(err.Error(), "fragmented packets are unsupported") {
@@ -528,20 +528,20 @@ func TestParsePacketAdapterIPv6FragmentHeaderDecidesPerCondition(t *testing.T) {
 }
 
 func TestParsePacketAdapterIPv6FragmentFieldsDecidesPerCondition(t *testing.T) {
-	// 1517: malformed — offset+8 beyond the buffer.
+	// 1541: malformed — offset+8 beyond the buffer.
 	short := append(covIPv6Base(44), []byte{6, 0, 0, 0}...)
 	if _, _, _, _, _, err := parsePacketAdapterIPv6FragmentFields(short, 40); err == nil ||
 		!strings.Contains(err.Error(), "fragment header is malformed") {
 		t.Fatalf("short: err = %v, want fragment header is malformed", err)
 	}
-	// 1517: malformed — next-header-length byte (offset+1) non-zero.
+	// 1541: malformed — next-header-length byte (offset+1) non-zero.
 	badLen := make([]byte, 48)
 	badLen[41] = 1
 	if _, _, _, _, _, err := parsePacketAdapterIPv6FragmentFields(badLen, 40); err == nil ||
 		!strings.Contains(err.Error(), "fragment header is malformed") {
 		t.Fatalf("bad len: err = %v, want fragment header is malformed", err)
 	}
-	// 1521: reserved bits set in the flags field.
+	// 1545: reserved bits set in the flags field.
 	reserved := append(covIPv6Base(44), covIPv6FragmentHeader(6, 0, false, 0)...)
 	binary.BigEndian.PutUint16(reserved[42:44], 0x0006) // reserved bits
 	if _, _, _, _, _, err := parsePacketAdapterIPv6FragmentFields(reserved, 40); err == nil ||
@@ -557,13 +557,13 @@ func TestParsePacketAdapterIPv6FragmentFieldsDecidesPerCondition(t *testing.T) {
 }
 
 func TestParsePacketAdapterIPv6OptionsHeaderDecidesPerCondition(t *testing.T) {
-	// 1528: malformed — offset+2 beyond the buffer.
+	// 1552: malformed — offset+2 beyond the buffer.
 	short := make([]byte, 41)
 	if _, _, err := parsePacketAdapterIPv6OptionsHeader(short, 40); err == nil ||
 		!strings.Contains(err.Error(), "options header is malformed") {
 		t.Fatalf("short: err = %v, want options header is malformed", err)
 	}
-	// 1532: declared length overflows the available bytes.
+	// 1556: declared length overflows the available bytes.
 	overflow := make([]byte, 48)
 	overflow[40] = 6  // next header
 	overflow[41] = 10 // length = (10+1)*8 = 88 > 8 available
@@ -571,7 +571,7 @@ func TestParsePacketAdapterIPv6OptionsHeaderDecidesPerCondition(t *testing.T) {
 		!strings.Contains(err.Error(), "options header is malformed") {
 		t.Fatalf("overflow: err = %v, want options header is malformed", err)
 	}
-	// 1535: options body is malformed (option length exceeds the option bytes).
+	// 1559: options body is malformed (option length exceeds the option bytes).
 	badOption := append(covIPv6Base(60), covIPv6ExtOptions(6, 0, []byte{1, 99, 0, 0, 0, 0})...)
 	if _, _, err := parsePacketAdapterIPv6OptionsHeader(badOption, 40); err == nil ||
 		!strings.Contains(err.Error(), "IPv6 option is malformed") {
@@ -588,18 +588,18 @@ func TestParsePacketAdapterIPv6OptionsHeaderDecidesPerCondition(t *testing.T) {
 func TestParsePacketAdapterIPv6FragmentDecidesPerCondition(t *testing.T) {
 	const max = 65535
 
-	// 1256: not IPv6 / empty -> (zero, false, nil).
+	// 1280: not IPv6 / empty -> (zero, false, nil).
 	if _, ok, err := parsePacketAdapterIPv6Fragment(nil, max); err != nil || ok {
 		t.Fatalf("empty: ok=%v err=%v, want false nil", ok, err)
 	}
-	// 1259: malformed — too short.
+	// 1283: malformed — too short.
 	short := make([]byte, 30)
 	short[0] = 0x60
 	if _, _, err := parsePacketAdapterIPv6Fragment(short, max); err == nil ||
 		!strings.Contains(err.Error(), "IPv6 packet is malformed") {
 		t.Fatalf("short: err = %v, want IPv6 packet is malformed", err)
 	}
-	// 1259: malformed — hop limit of zero.
+	// 1283: malformed — hop limit of zero.
 	hopZero := covIPv6Packet(packetAdapterTCP, nil, nil)
 	hopZero[7] = 0
 	if _, _, err := parsePacketAdapterIPv6Fragment(hopZero, max); err == nil ||
@@ -607,7 +607,7 @@ func TestParsePacketAdapterIPv6FragmentDecidesPerCondition(t *testing.T) {
 		t.Fatalf("hop zero: err = %v, want IPv6 packet is malformed", err)
 	}
 
-	// 1280: chain too long before the fragment (hop-by-hop -> destination -> fragment).
+	// 1304: chain too long before the fragment (hop-by-hop -> destination -> fragment).
 	longChain := covIPv6Packet(0, /*hop-by-hop*/
 		bytes.Join([][]byte{
 			covIPv6ExtOptions(60, 0, nil),         // hop-by-hop -> destination
@@ -618,13 +618,13 @@ func TestParsePacketAdapterIPv6FragmentDecidesPerCondition(t *testing.T) {
 		!strings.Contains(err.Error(), "extension header chain is too long") {
 		t.Fatalf("chain too long: err = %v, want extension header chain is too long", err)
 	}
-	// 1284: fragment-field parse error — truncated fragment header.
+	// 1308: fragment-field parse error — truncated fragment header.
 	truncatedFrag := covIPv6Packet(44, []byte{6, 0, 0, 0}, nil)
 	if _, _, err := parsePacketAdapterIPv6Fragment(truncatedFrag, max); err == nil ||
 		!strings.Contains(err.Error(), "fragment header is malformed") {
 		t.Fatalf("truncated fragment: err = %v, want fragment header is malformed", err)
 	}
-	// 1290: duplicate destination after the fragment (destination -> fragment -> destination).
+	// 1314: duplicate destination after the fragment (destination -> fragment -> destination).
 	destAfterFrag := covIPv6Packet(60, /*destination*/
 		bytes.Join([][]byte{
 			covIPv6ExtOptions(44, 0, nil),          // destination -> fragment
@@ -634,7 +634,7 @@ func TestParsePacketAdapterIPv6FragmentDecidesPerCondition(t *testing.T) {
 		!strings.Contains(err.Error(), "destination options are duplicated") {
 		t.Fatalf("dup dest after fragment: err = %v, want destination options are duplicated", err)
 	}
-	// 1293: atomic fragment (offset 0, !more) -> (zero, false, nil), not a fragment.
+	// 1317: atomic fragment (offset 0, !more) -> (zero, false, nil), not a fragment.
 	atomic := covIPv6Packet(44, covIPv6FragmentHeader(6, 0, false, 0), []byte("payload"))
 	if _, ok, err := parsePacketAdapterIPv6Fragment(atomic, max); err != nil || ok {
 		t.Fatalf("atomic: ok=%v err=%v, want false nil", ok, err)
@@ -651,26 +651,26 @@ func TestParsePacketAdapterTransportDecidesPerCondition(t *testing.T) {
 	v4UDP := packetAdapterIPPacket{version: 4, protocol: packetAdapterUDP, source: covIPv4Src, target: covIPv4Dst}
 	v6Packet := packetAdapterIPPacket{version: 6, protocol: packetAdapterUDP, source: covIPv6Src, target: covIPv6Dst}
 
-	// TCP 1561: segment too short.
+	// TCP 1585: segment too short.
 	if _, err := parsePacketAdapterTransport(v4Packet, []byte("short"), false); err == nil ||
 		!strings.Contains(err.Error(), "TCP segment is malformed") {
 		t.Fatalf("tcp short: err = %v, want TCP segment is malformed", err)
 	}
-	// TCP 1561: data-offset too large for the segment.
+	// TCP 1585: data-offset too large for the segment.
 	bigOffset := covTCPSegment(1234, 80, 0x02, nil)
 	bigOffset[12] = 6 << 4 // data offset 6 -> 24 bytes > 20
 	if _, err := parsePacketAdapterTransport(v4Packet, bigOffset, false); err == nil ||
 		!strings.Contains(err.Error(), "TCP segment is malformed") {
 		t.Fatalf("tcp big offset: err = %v, want TCP segment is malformed", err)
 	}
-	// TCP 1561: corrupted transport checksum.
+	// TCP 1585: corrupted transport checksum.
 	badChecksum := covTCPSegment(1234, 80, 0x02, []byte("hi"))
 	badChecksum[16] ^= 0xff
 	if _, err := parsePacketAdapterTransport(v4Packet, badChecksum, false); err == nil ||
 		!strings.Contains(err.Error(), "TCP segment is malformed") {
 		t.Fatalf("tcp bad checksum: err = %v, want TCP segment is malformed", err)
 	}
-	// TCP 1565: zero source port (checksum recomputed over the mutated header).
+	// TCP 1589: zero source port (checksum recomputed over the mutated header).
 	zeroSrcPort := covTCPSegment(0, 80, 0x02, nil)
 	if _, err := parsePacketAdapterTransport(v4Packet, zeroSrcPort, false); err == nil ||
 		!strings.Contains(err.Error(), "TCP header is invalid") {
@@ -681,31 +681,31 @@ func TestParsePacketAdapterTransportDecidesPerCondition(t *testing.T) {
 		t.Fatalf("tcp happy: unexpected error %v", err)
 	}
 
-	// UDP 1578: segment too short.
+	// UDP 1602: segment too short.
 	if _, err := parsePacketAdapterTransport(v4UDP, []byte("short"), false); err == nil ||
 		!strings.Contains(err.Error(), "UDP segment is malformed") {
 		t.Fatalf("udp short: err = %v, want UDP segment is malformed", err)
 	}
-	// UDP 1578: length field disagrees with the segment length.
+	// UDP 1602: length field disagrees with the segment length.
 	badLen := covUDPSegment(4, 1234, 80, []byte("hi"), 0)
 	badLen[4] = 99
 	if _, err := parsePacketAdapterTransport(v4UDP, badLen, false); err == nil ||
 		!strings.Contains(err.Error(), "UDP segment is malformed") {
 		t.Fatalf("udp bad length: err = %v, want UDP segment is malformed", err)
 	}
-	// UDP 1578: zero source port (length still consistent).
+	// UDP 1602: zero source port (length still consistent).
 	zeroSrc := covUDPSegment(4, 0, 80, []byte("hi"), covValidUDPChecksum(4, covUDPSegment(4, 0, 80, []byte("hi"), 0)))
 	if _, err := parsePacketAdapterTransport(v4UDP, zeroSrc, false); err == nil ||
 		!strings.Contains(err.Error(), "UDP segment is malformed") {
 		t.Fatalf("udp zero src port: err = %v, want UDP segment is malformed", err)
 	}
-	// UDP 1582: IPv6 requires a non-zero checksum; zero checksum is rejected.
+	// UDP 1606: IPv6 requires a non-zero checksum; zero checksum is rejected.
 	v6ZeroCsum := covUDPSegment(6, 1234, 80, []byte("hi"), 0)
 	if _, err := parsePacketAdapterTransport(v6Packet, v6ZeroCsum, true); err == nil ||
 		!strings.Contains(err.Error(), "UDP checksum is invalid") {
 		t.Fatalf("udp v6 zero checksum: err = %v, want UDP checksum is invalid", err)
 	}
-	// UDP 1582: non-zero but incorrect checksum is rejected.
+	// UDP 1606: non-zero but incorrect checksum is rejected.
 	corruptUDP := covUDPSegment(4, 1234, 80, []byte("hi"), covValidUDPChecksum(4, covUDPSegment(4, 1234, 80, []byte("hi"), 0)))
 	corruptUDP[6] ^= 0xff
 	if _, err := parsePacketAdapterTransport(v4UDP, corruptUDP, false); err == nil ||
@@ -718,7 +718,7 @@ func TestParsePacketAdapterTransportDecidesPerCondition(t *testing.T) {
 		t.Fatalf("udp happy: unexpected error %v", err)
 	}
 
-	// 1591: unsupported transport protocol.
+	// 1615: unsupported transport protocol.
 	other := packetAdapterIPPacket{version: 4, protocol: 99, source: covIPv4Src, target: covIPv4Dst}
 	if _, err := parsePacketAdapterTransport(other, nil, false); err == nil ||
 		!strings.Contains(err.Error(), "transport protocol is unsupported") {
@@ -727,12 +727,12 @@ func TestParsePacketAdapterTransportDecidesPerCondition(t *testing.T) {
 }
 
 func TestBuildPacketAdapterUDPPacketDecidesPerCondition(t *testing.T) {
-	// 1611: payload too large.
+	// 1635: payload too large.
 	if _, err := buildPacketAdapterUDPPacket(4, covIPv4Src, covIPv4Dst, 1234, 80, make([]byte, 65528), 1); err == nil ||
 		!strings.Contains(err.Error(), "UDP payload is too large") {
 		t.Fatalf("oversize: err = %v, want UDP payload is too large", err)
 	}
-	// 1620: a computed zero checksum maps to 0xffff. For fixed addresses, payload, and
+	// 1644: a computed zero checksum maps to 0xffff. For fixed addresses, payload, and
 	// target port there is exactly one source port whose ones-complement sum over the
 	// pseudo-header + segment is 0xffff (so the checksum is 0); the builder must then
 	// transmit 0xffff. Search for that source port (a local closure, so no package-level
@@ -777,22 +777,22 @@ func TestBuildPacketAdapterUDPPacketDecidesPerCondition(t *testing.T) {
 }
 
 func TestBuildPacketAdapterIPPacketDecidesPerCondition(t *testing.T) {
-	// 1628: invalid addresses (mismatched families).
+	// 1652: invalid addresses (mismatched families).
 	if _, err := buildPacketAdapterIPPacket(4, covIPv4Src, covIPv6Dst, packetAdapterTCP, []byte("x"), 1); err == nil ||
 		!strings.Contains(err.Error(), "IP addresses are invalid") {
 		t.Fatalf("mismatched addrs: err = %v, want IP addresses are invalid", err)
 	}
-	// 1633: IPv4 payload too large.
+	// 1657: IPv4 payload too large.
 	if _, err := buildPacketAdapterIPPacket(4, covIPv4Src, covIPv4Dst, packetAdapterTCP, make([]byte, 65516), 1); err == nil ||
 		!strings.Contains(err.Error(), "IPv4 packet is too large") {
 		t.Fatalf("v4 oversize: err = %v, want IPv4 packet is too large", err)
 	}
-	// 1651: IPv6 payload too large.
+	// 1675: IPv6 payload too large.
 	if _, err := buildPacketAdapterIPPacket(6, covIPv6Src, covIPv6Dst, packetAdapterTCP, make([]byte, 65536), 1); err == nil ||
 		!strings.Contains(err.Error(), "IPv6 packet is too large") {
 		t.Fatalf("v6 oversize: err = %v, want IPv6 packet is too large", err)
 	}
-	// 1665: invalid IP version.
+	// 1689: invalid IP version.
 	if _, err := buildPacketAdapterIPPacket(5, covIPv4Src, covIPv4Dst, packetAdapterTCP, []byte("x"), 1); err == nil ||
 		!strings.Contains(err.Error(), "IP version is invalid") {
 		t.Fatalf("bad version: err = %v, want IP version is invalid", err)
@@ -807,11 +807,11 @@ func TestBuildPacketAdapterIPPacketDecidesPerCondition(t *testing.T) {
 }
 
 func TestTCPSequenceBefore(t *testing.T) {
-	// 1714: true (left before right in TCP sequence space).
+	// 1738: true (left before right in TCP sequence space).
 	if !tcpSequenceBefore(10, 20) {
 		t.Fatal("tcpSequenceBefore(10, 20) = false, want true")
 	}
-	// 1714: false (right at or before left).
+	// 1738: false (right at or before left).
 	if tcpSequenceBefore(20, 10) {
 		t.Fatal("tcpSequenceBefore(20, 10) = true, want false")
 	}

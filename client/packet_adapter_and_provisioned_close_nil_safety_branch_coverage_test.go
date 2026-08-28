@@ -5,14 +5,14 @@ package client
 // nil-mapping guard in the relay-close handler, and a nil-second-argument
 // guard in the provisioned-close error combiner.
 //
-//   - packet_adapter.go:375 (*PacketAdapter).NextEncryptedPacket
+//   - packet_adapter.go:393 (*PacketAdapter).NextEncryptedPacket
 //     application == nil -> "client: packet adapter application is unavailable"
-//     (fires after the nil-receiver guard at :365 and the closed guard at :369,
-//     before the application.NextPacket call at :378).
-//   - packet_adapter.go:400 (*PacketAdapter).HandleEncryptedPacket
+//     (fires after the nil-receiver guard at :383 and the closed guard at :387,
+//     before the application.NextPacket call at :396).
+//   - packet_adapter.go:418 (*PacketAdapter).HandleEncryptedPacket
 //     application == nil -> "client: packet adapter application is unavailable"
-//     (fires after the nil-receiver guard at :383, the ctx == nil guard at :386,
-//     the now validity guard at :389, and the closed guard at :393, before the
+//     (fires after the nil-receiver guard at :401, the ctx == nil guard at :404,
+//     the now validity guard at :407, and the closed guard at :411, before the
 //     application.NextPackets call).
 //   - packet_adapter.go:832 (*PacketAdapter).handleRelayCloseLocked
 //     mapping == nil -> "client: packet adapter received close for unknown flow"
@@ -33,15 +33,15 @@ package client
 //
 //   - NextEncryptedPacket / HandleEncryptedPacket (nil-field clean return): a
 //     zero-value &PacketAdapter{} has a usable zero-value mutex, closed == false,
-//     and application == nil. The nil-receiver guards at :365 / :383 are false
-//     (a is non-nil), the closed guards at :369 / :393 are false, and (for
-//     HandleEncryptedPacket) the ctx == nil guard at :386 is false (a real
+//     and application == nil. The nil-receiver guards at :383 / :401 are false
+//     (a is non-nil), the closed guards at :387 / :411 are false, and (for
+//     HandleEncryptedPacket) the ctx == nil guard at :404 is false (a real
 //     context.Background is passed, so no SA1012 surface) and the now validity
-//     guard at :389 is false (time.Now is non-zero), so the nil-application
-//     guard at :375 / :400 fires and returns "packet adapter application is
+//     guard at :407 is false (time.Now is non-zero), so the nil-application
+//     guard at :393 / :418 fires and returns "packet adapter application is
 //     unavailable" before the application is invoked. The non-nil receiver, the
 //     real context / valid time, and the not-closed state uniquely identify
-//     :375 / :400 as the source (the nil-receiver and closed guards return
+//     :393 / :418 as the source (the nil-receiver and closed guards return
 //     different paths and are not reached). No network, no goroutine.
 //
 //   - handleRelayCloseLocked (nil-field clean return): a zero-value
@@ -61,7 +61,7 @@ package client
 //     ran. Pure (no IO).
 //
 // None of the exercised guards is a ctx == nil guard (the ctx == nil guards at
-// packet_adapter.go:286/386/420 are not triggered — a real context.Background
+// packet_adapter.go:292/404/438 are not triggered — a real context.Background
 // is passed), so there is no SA1012 surface. In-package (package client) because
 // handleRelayCloseLocked and combineProvisionedCloseErrors are unexported.
 //
@@ -82,30 +82,30 @@ import (
 )
 
 func TestPacketAdapterNextEncryptedPacketNilApplicationGuard(t *testing.T) {
-	// 375: a zero-value PacketAdapter is non-nil (skips :365), not closed
-	// (skips :369), and has application == nil, so :375 fires and returns
-	// "application is unavailable" before application.NextPacket at :378.
+	// 393: a zero-value PacketAdapter is non-nil (skips :383), not closed
+	// (skips :387), and has application == nil, so :393 fires and returns
+	// "application is unavailable" before application.NextPacket at :396.
 	a := &PacketAdapter{}
 	_, err := a.NextEncryptedPacket(context.Background())
 	if err == nil {
-		t.Fatal("NextEncryptedPacket(zero-value adapter) err = nil, want non-nil (:375 should reject nil application)")
+		t.Fatal("NextEncryptedPacket(zero-value adapter) err = nil, want non-nil (:393 should reject nil application)")
 	} else if !strings.Contains(err.Error(), "packet adapter application is unavailable") {
-		t.Fatalf("NextEncryptedPacket err = %q, want substring \"packet adapter application is unavailable\" (:375)", err.Error())
+		t.Fatalf("NextEncryptedPacket err = %q, want substring \"packet adapter application is unavailable\" (:393)", err.Error())
 	}
 }
 
 func TestPacketAdapterHandleEncryptedPacketNilApplicationGuard(t *testing.T) {
-	// 400: a zero-value PacketAdapter is non-nil (skips :383), a real
-	// context.Background is non-nil (skips :386, no SA1012), time.Now is valid
-	// (skips :389), not closed (skips :393), and application == nil, so :400
+	// 418: a zero-value PacketAdapter is non-nil (skips :401), a real
+	// context.Background is non-nil (skips :404, no SA1012), time.Now is valid
+	// (skips :407), not closed (skips :411), and application == nil, so :418
 	// fires before application.NextPackets. The encoded payload is nil and is
 	// never decoded (the guard returns first).
 	a := &PacketAdapter{}
 	_, err := a.HandleEncryptedPacket(context.Background(), nil, time.Now())
 	if err == nil {
-		t.Fatal("HandleEncryptedPacket(zero-value adapter) err = nil, want non-nil (:400 should reject nil application)")
+		t.Fatal("HandleEncryptedPacket(zero-value adapter) err = nil, want non-nil (:418 should reject nil application)")
 	} else if !strings.Contains(err.Error(), "packet adapter application is unavailable") {
-		t.Fatalf("HandleEncryptedPacket err = %q, want substring \"packet adapter application is unavailable\" (:400)", err.Error())
+		t.Fatalf("HandleEncryptedPacket err = %q, want substring \"packet adapter application is unavailable\" (:418)", err.Error())
 	}
 }
 

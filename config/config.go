@@ -226,11 +226,17 @@ func (c Config) Validate() error {
 		if err != nil {
 			return err
 		}
-		if policy.RequiresPQPreludeSignature(profile.ID) {
-			if !c.RequirePQ {
-				return fmt.Errorf("config: require_pq cannot be disabled for profile %q", c.Profile)
+		if policy.RequiresPQPreludeSignature(profile.ID) && !c.RequirePQ {
+			return fmt.Errorf("config: require_pq cannot be disabled for profile %q", c.Profile)
+		}
+		if c.Route == "fast-1" {
+			// Spec sections 21.4/21.5 forbid fast-1 under the strict and
+			// emergency profiles unconditionally; require_split2_for_adversarial
+			// only gates the adversarial-dpi low-latency escape hatch.
+			if profile.Fast1Forbidden {
+				return fmt.Errorf("config: route %q is forbidden for profile %q", c.Route, c.Profile)
 			}
-			if c.RequireSplit2ForAdversarial && c.Route == "fast-1" {
+			if c.RequireSplit2ForAdversarial && policy.RequiresPQPreludeSignature(profile.ID) {
 				return fmt.Errorf("config: require_split2_for_adversarial forbids route %q for profile %q", c.Route, c.Profile)
 			}
 		}

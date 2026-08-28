@@ -205,17 +205,27 @@ func TestRequireSplit2ForAdversarialForbidsFast1(t *testing.T) {
 		if err == nil {
 			t.Fatalf("profile %q accepted route fast-1 with require_split2_for_adversarial", profile)
 		}
+	}
 
-		cfg, err := Parse(strings.NewReader("[aurora]\nprofile = \"" + profile + "\"\nroute = \"fast-1\"\n\n[security]\nrequire_split2_for_adversarial = false\n"))
-		if err != nil {
-			t.Fatalf("profile %q rejected fast-1 with the split2 requirement disabled: %v", profile, err)
-		}
-		if cfg.RequireSplit2ForAdversarial {
-			t.Fatalf("profile %q did not parse require_split2_for_adversarial = false", profile)
+	// The low-latency escape hatch remains for plain adversarial-dpi only.
+	cfg, err := Parse(strings.NewReader("[aurora]\nprofile = \"adversarial-dpi\"\nroute = \"fast-1\"\n\n[security]\nrequire_split2_for_adversarial = false\n"))
+	if err != nil {
+		t.Fatalf("adversarial-dpi rejected fast-1 with the split2 requirement disabled: %v", err)
+	}
+	if cfg.RequireSplit2ForAdversarial {
+		t.Fatalf("adversarial-dpi did not parse require_split2_for_adversarial = false")
+	}
+
+	// Spec sections 21.4/21.5 forbid fast-1 under the strict and emergency
+	// profiles unconditionally; the knob cannot relax that.
+	for _, profile := range []string{"adversarial-dpi-strict", "emergency-web"} {
+		_, err := Parse(strings.NewReader("[aurora]\nprofile = \"" + profile + "\"\nroute = \"fast-1\"\n\n[security]\nrequire_split2_for_adversarial = false\n"))
+		if err == nil {
+			t.Fatalf("profile %q accepted route fast-1 with the split2 requirement disabled", profile)
 		}
 	}
 
-	cfg, err := Parse(strings.NewReader("[aurora]\nprofile = \"fast-web\"\nroute = \"fast-1\"\n"))
+	cfg, err = Parse(strings.NewReader("[aurora]\nprofile = \"fast-web\"\nroute = \"fast-1\"\n"))
 	if err != nil {
 		t.Fatalf("fast-web rejected route fast-1: %v", err)
 	}

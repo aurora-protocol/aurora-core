@@ -327,6 +327,16 @@ func TestVerifyRoutePrelude1RejectsEpochOutsideValidityWindow(t *testing.T) {
 	}
 }
 
+// Spec section 17.9 unconditionally requires both ROUTE_PRELUDE1 signatures;
+// there is no RequirePQ-style escape hatch on the route-prelude path.
+func TestVerifyRoutePrelude1SignaturesRequiresPQSignature(t *testing.T) {
+	in := signedRoutePreludeVerificationInput(t)
+	in.Prelude1.ServerPreludeSignaturePQ = nil
+	if _, err := VerifyRoutePrelude1Signatures(in); err == nil {
+		t.Fatalf("ROUTE_PRELUDE1 without a PQ signature was accepted")
+	}
+}
+
 func TestRouteClientDoesNotReleaseCapsuleBeforePreludeVerification(t *testing.T) {
 	session := NewClientSession()
 	capsule := protocol.RouteCapsule1Plain{
@@ -550,6 +560,12 @@ func signedRoutePreludeVerificationInputWithBinding(t *testing.T, bindingOverrid
 		t.Fatal(err)
 	}
 	p1.ServerPreludeSignatureClassical, err = ecdsa.SignASN1(rand.Reader, priv, transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fixture doubles the ECDSA epoch key as EpochAuthPQKey, so the PQ
+	// signature uses the same scheme; verification is scheme-driven.
+	p1.ServerPreludeSignaturePQ, err = ecdsa.SignASN1(rand.Reader, priv, transcript)
 	if err != nil {
 		t.Fatal(err)
 	}

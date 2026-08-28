@@ -829,7 +829,6 @@ func GenerateRoutePreludeRealCryptoBundle() (RoutePreludeRealCryptoBundle, error
 		Prelude0:        openedPrivate,
 		Prelude1:        p1,
 		Descriptor:      descriptor,
-		RequirePQ:       true,
 		NowUnix:         descriptor.EpochValidFromUnix,
 	}); err != nil {
 		return RoutePreludeRealCryptoBundle{}, err

@@ -341,7 +341,6 @@ type RoutePreludeVerificationInput struct {
 	Prelude0        PrivatePrelude
 	Prelude1        protocol.RoutePrelude1
 	Descriptor      protocol.RelayDescriptor
-	RequirePQ       bool
 	NowUnix         uint64
 }
 
@@ -428,13 +427,13 @@ func VerifyRoutePrelude1Signatures(in RoutePreludeVerificationInput) ([]byte, er
 	if err := auroracrypto.VerifySignature(in.Descriptor.EpochAuthClassicalKey.SignatureScheme, in.Descriptor.EpochAuthClassicalKey.KeyEncoding, in.Descriptor.EpochAuthClassicalKey.PublicKey, transcript, in.Prelude1.ServerPreludeSignatureClassical); err != nil {
 		return nil, err
 	}
-	if in.RequirePQ || len(in.Prelude1.ServerPreludeSignaturePQ) > 0 {
-		if len(in.Prelude1.ServerPreludeSignaturePQ) == 0 {
-			return nil, fmt.Errorf("route: missing PQ route prelude signature")
-		}
-		if err := auroracrypto.VerifySignature(in.Descriptor.EpochAuthPQKey.SignatureScheme, in.Descriptor.EpochAuthPQKey.KeyEncoding, in.Descriptor.EpochAuthPQKey.PublicKey, transcript, in.Prelude1.ServerPreludeSignaturePQ); err != nil {
-			return nil, err
-		}
+	// Spec section 17.9: both ROUTE_PRELUDE1 signatures are REQUIRED, with no
+	// profile conditional like the first-hop prelude has in section 14.5.
+	if len(in.Prelude1.ServerPreludeSignaturePQ) == 0 {
+		return nil, fmt.Errorf("route: missing PQ route prelude signature")
+	}
+	if err := auroracrypto.VerifySignature(in.Descriptor.EpochAuthPQKey.SignatureScheme, in.Descriptor.EpochAuthPQKey.KeyEncoding, in.Descriptor.EpochAuthPQKey.PublicKey, transcript, in.Prelude1.ServerPreludeSignaturePQ); err != nil {
+		return nil, err
 	}
 	return transcript, nil
 }

@@ -10,18 +10,18 @@ package route
 //     binding, p0, p1.Unsigned()) — i.e. p0 plus p1 with its signature fields zeroed —
 //     NOT the relay descriptor. So mutating the descriptor (RoleFlags/RelayID/EpochID/
 //     SupportedSuiteIDs) changes the descriptor hash but not the transcript, and the
-//     descriptor-bound checks (408/415/418) fire before the signature check at 425.
+//     descriptor-bound checks (407/413/417) fire before the signature check at 424.
 //     Likewise, mutating a p0 field that no earlier validator inspects (ClientNonce at
-//     402, RequestedRouteModeID at 422) changes the transcript, but the target branch
-//     fires before 425. Every late branch 402-437 is therefore reachable by perturbing
+//     401, RequestedRouteModeID at 421) changes the transcript, but the target branch
+//     fires before 424. Every late branch 401-437 is therefore reachable by perturbing
 //     exactly one field of the already-signed fixture (signedRoutePreludeVerification
 //     Input) without regenerating any signature. This is the opposite of the
 //     deployment.go situation, where the descriptor hash gates everything.
 //
 //  2. RoutePrelude1.ValidateStructural (bootstrap.go:441) already enforces
 //     MsgType==MsgRoutePrelude1 and validateVersionKnown (which accepts ONLY Version20),
-//     so the re-checks at 372-374 (MsgType) and 375-377 (Version) inside
-//     VerifyRoutePrelude1Signatures are unreachable after 369 passes — DEAD by design.
+//     so the re-checks at 371-373 (MsgType) and 374-376 (Version) inside
+//     VerifyRoutePrelude1Signatures are unreachable after 368 passes — DEAD by design.
 //
 // Coverage is re-measured per target to confirm the intended branch moved (no
 // wrong-branch bugs). Each rejection case asserts exactly one error so the failure is
@@ -40,25 +40,25 @@ package route
 //   - OpenAndVerifyPrivatePreludeWithWrapNonceCache (266): propagation 268-270.
 //   - WrapNonceReplayCache.InsertIfAbsent (306): nil receiver 307-309, malformed key
 //     311-313 (also covers routeWrapNonceReplayKey 332-334).
-//   - HopPreludeTranscriptHash (348): Encode(p0) error 350-352, Encode(p1.Unsigned())
-//     error 354-356.
-//   - validateRoutePreludeMetadata (442): response/request mismatch 446-448, server
-//     nonce length 449-451.
-//   - ValidateRoutePreludeHybridShares (455): client/server classical + client/server
-//     ML-KEM malformed 456-467.
-//   - ValidatePrivatePreludeHeader (471): version check 475-477. (The MsgType check
-//     472-474 and the extensions check 478-480 are already covered by
+//   - HopPreludeTranscriptHash (347): Encode(p0) error 349-351, Encode(p1.Unsigned())
+//     error 353-355.
+//   - validateRoutePreludeMetadata (441): response/request mismatch 445-447, server
+//     nonce length 448-450.
+//   - ValidateRoutePreludeHybridShares (454): client/server classical + client/server
+//     ML-KEM malformed 455-466.
+//   - ValidatePrivatePreludeHeader (470): version check 474-476. (The MsgType check
+//     471-473 and the extensions check 477-479 are already covered by
 //     TestOpenPrivatePreludeRejectsMalformedPrivateHeader and
 //     TestValidatePrivatePreludeHeaderRejectsUnknownCriticalExtension — not
 //     duplicated.)
-//   - containsUint64 (484): the not-found return 490.
-//   - VerifyRoutePrelude1Signatures (365): the decision cascade 366-437 reachable via
+//   - containsUint64 (483): the not-found return 489.
+//   - VerifyRoutePrelude1Signatures (364): the decision cascade 365-437 reachable via
 //     single-field mutations of the signed fixture (see plan above).
 //
 // Dead-by-design (documented, not covered):
-//   - VerifyRoutePrelude1Signatures 372-374 (MsgType re-check) and 375-377 (Version
-//     re-check). ValidateStructural at 369 already enforces MsgType==MsgRoutePrelude1 and
-//     validateVersionKnown accepts only Version20, so after 369 passes both re-checks
+//   - VerifyRoutePrelude1Signatures 371-373 (MsgType re-check) and 374-376 (Version
+//     re-check). ValidateStructural at 368 already enforces MsgType==MsgRoutePrelude1 and
+//     validateVersionKnown accepts only Version20, so after 368 passes both re-checks
 //     are always false. Reaching them would require a RoutePrelude1 that fails
 //     ValidateStructural yet passes the re-check, which is impossible.
 //
@@ -86,8 +86,8 @@ import (
 
 // routeCovMaxVarint exceeds wire.MaxVarint (1<<62 - 1), so WriteVarint/VarintLen reject
 // it. Used by the encoder-overflow branches of PreviousHopFullTranscriptHash (33),
-// HopPreludeTranscriptHash (350/354), SealPrivatePrelude (185), and
-// VerifyRoutePrelude1Signatures (415/422) — >=5 references, so not U1000.
+// HopPreludeTranscriptHash (349/353), SealPrivatePrelude (185), and
+// VerifyRoutePrelude1Signatures (414/421) — >=5 references, so not U1000.
 const routeCovMaxVarint uint64 = ^uint64(0)
 
 // routeCovEncodablePrivatePrelude returns a PrivatePrelude that round-trips cleanly
@@ -414,60 +414,60 @@ func TestVerifyRoutePrelude1SignaturesDecidesPerCondition(t *testing.T) {
 		wantAnyErr bool   // true => assert err != nil without a substring (crypto/wire msg)
 	}{
 		{"valid signatures accepted", nil, "", false},
-		// 366-368: private header invalid (version 0 fails the header check before any
+		// 365-367: private header invalid (version 0 fails the header check before any
 		// p1/descriptor check).
 		{"private header invalid", func(in *RoutePreludeVerificationInput) { in.Prelude0.Version = 0 }, "private prelude version", false},
-		// 369-371: Prelude1 fails ValidateStructural (message type).
+		// 368-370: Prelude1 fails ValidateStructural (message type).
 		{"prelude1 structural invalid", func(in *RoutePreludeVerificationInput) { in.Prelude1.MsgType = 0xBAD }, "message type", false},
-		// 378-380: SelectedSuite != Suite.
+		// 377-379: SelectedSuite != Suite.
 		{"selected suite mismatch", func(in *RoutePreludeVerificationInput) { in.Suite = registry.SuiteHybrid1024AESGCM }, "selected suite mismatch", false},
-		// 381-383: suite matches but was not offered by the client.
+		// 380-382: suite matches but was not offered by the client.
 		{"selected suite not offered", func(in *RoutePreludeVerificationInput) {
 			in.Suite = registry.SuiteHybrid1024AESGCM
 			in.Prelude1.SelectedSuite = registry.SuiteHybrid1024AESGCM
 		}, "selected suite was not offered", false},
-		// 384-386: suite offered but not in the descriptor's supported list.
+		// 383-385: suite offered but not in the descriptor's supported list.
 		{"selected suite not supported by descriptor", func(in *RoutePreludeVerificationInput) {
 			in.Descriptor.SupportedSuiteIDs = []uint64{registry.SuiteHybrid1024AESGCM}
 		}, "selected suite is not supported by descriptor", false},
-		// 387-389: metadata mismatch (RouteInstanceID differs).
+		// 386-388: metadata mismatch (RouteInstanceID differs).
 		{"metadata mismatch", func(in *RoutePreludeVerificationInput) {
 			in.Prelude1.RouteInstanceID = in.Prelude0.RouteInstanceID + 1
 		}, "does not match request", false},
-		// 390-392: malformed client classical share.
+		// 389-391: malformed client classical share.
 		{"malformed hybrid shares", func(in *RoutePreludeVerificationInput) {
 			in.Prelude0.ClientClassicalEphPub = []byte{0x01}
 		}, "malformed client classical share", false},
-		// 402-404: RouteHopBinding fails (ClientNonce wrong length).
+		// 401-403: RouteHopBinding fails (ClientNonce wrong length).
 		{"route hop binding error", func(in *RoutePreludeVerificationInput) {
 			in.Prelude0.ClientNonceForThisHop = rb(0x45, 31)
 		}, "fixed opaque length", false},
-		// 408-410: NextRelayEpochID != descriptor EpochID (NowUnix stays 0 so the
-		// validity-window check at 411 is skipped).
+		// 407-409: NextRelayEpochID != descriptor EpochID (NowUnix stays 0 so the
+		// validity-window check at 410 is skipped).
 		{"next relay epoch mismatch", func(in *RoutePreludeVerificationInput) {
 			in.Descriptor.EpochID = 99
 		}, "next relay epoch mismatch", false},
-		// 415-417: RelayDescriptorHash fails to encode (SupportedSuiteIDs overflow;
-		// 768 still present so 384 passes).
+		// 414-416: RelayDescriptorHash fails to encode (SupportedSuiteIDs overflow;
+		// 768 still present so 383 passes).
 		{"descriptor hash computation error", func(in *RoutePreludeVerificationInput) {
 			in.Descriptor.SupportedSuiteIDs = append(in.Descriptor.SupportedSuiteIDs, routeCovMaxVarint)
 		}, "varint out of range", false},
-		// 418-420: descriptor hash recomputes to a different value (RelayID changed);
+		// 417-419: descriptor hash recomputes to a different value (RelayID changed);
 		// p0/p1 still carry the original hash.
 		{"descriptor hash mismatch", func(in *RoutePreludeVerificationInput) {
 			in.Descriptor.RelayID = append([]byte(nil), in.Descriptor.RelayID...)
 			in.Descriptor.RelayID[0] ^= 0xff
 		}, "next relay descriptor hash mismatch", false},
-		// 422-424: HopPreludeTranscriptHash fails (RequestedRouteModeID overflow; not
+		// 421-423: HopPreludeTranscriptHash fails (RequestedRouteModeID overflow; not
 		// part of RouteHopBinding or the descriptor hash, so all prior checks pass).
 		{"transcript hash error", func(in *RoutePreludeVerificationInput) {
 			in.Prelude0.RequestedRouteModeID = routeCovMaxVarint
 		}, "varint out of range", false},
-		// 425-427: classical signature absent.
+		// 424-426: classical signature absent.
 		{"missing classical signature", func(in *RoutePreludeVerificationInput) {
 			in.Prelude1.ServerPreludeSignatureClassical = nil
 		}, "missing classical route prelude signature", false},
-		// 428-430: classical signature present but invalid (corrupted).
+		// 427-429: classical signature present but invalid (corrupted).
 		{"classical signature invalid", func(in *RoutePreludeVerificationInput) {
 			sig := append([]byte(nil), in.Prelude1.ServerPreludeSignatureClassical...)
 			if len(sig) > 0 {
@@ -475,9 +475,8 @@ func TestVerifyRoutePrelude1SignaturesDecidesPerCondition(t *testing.T) {
 			}
 			in.Prelude1.ServerPreludeSignatureClassical = sig
 		}, "", true},
-		// 431-434: PQ required but signature absent.
-		{"missing PQ signature when required", func(in *RoutePreludeVerificationInput) {
-			in.RequirePQ = true
+		// 432-434: PQ signature absent (always required per spec section 17.9).
+		{"missing PQ signature", func(in *RoutePreludeVerificationInput) {
 			in.Prelude1.ServerPreludeSignaturePQ = nil
 		}, "missing PQ route prelude signature", false},
 		// 435-437: PQ signature present but invalid (garbage verified against the

@@ -16,7 +16,7 @@ package route
 //     drives VerifyRoutePrelude1Signatures directly (route/route.go), never
 //     through the ClientSession wrapper, so the wrapper's propagation return
 //     is unreached. A PrivatePrelude with a wrong MsgType fails
-//     ValidatePrivatePreludeHeader at route.go:366 (the first check inside
+//     ValidatePrivatePreludeHeader at route.go:365 (the first check inside
 //     VerifyRoutePrelude1Signatures), so the wrapper surfaces the error and
 //     never reaches the ActivateRoute call at session.go:30 (the session
 //     stays unverified, asserted via AcceptsRouteInstance).
@@ -55,7 +55,7 @@ import (
 
 func TestClientSessionVerifyRoutePrelude1PropagatesHeaderError(t *testing.T) {
 	// 27-29: a PrivatePrelude with a wrong MsgType fails
-	// ValidatePrivatePreludeHeader (route.go:366) as the first check inside
+	// ValidatePrivatePreludeHeader (route.go:365) as the first check inside
 	// VerifyRoutePrelude1Signatures, so the ClientSession wrapper surfaces the
 	// error and never activates the session.
 	s := NewClientSession()

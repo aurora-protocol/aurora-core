@@ -50,7 +50,7 @@ func main() {
 func run(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stderr, labBanner)
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: auroralab <mint|serve> [options]")
+		fmt.Fprintln(stderr, "usage: auroralab <mint|serve|import-code> [options]")
 		return 2
 	}
 	switch args[0] {
@@ -58,8 +58,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runMint(args[1:], stdout, stderr)
 	case "serve":
 		return runServe(args[1:], stdout, stderr)
+	case "import-code":
+		return runImportCode(args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "auroralab: unknown command %q; use mint or serve\n", args[0])
+		fmt.Fprintf(stderr, "auroralab: unknown command %q; use mint, serve, or import-code\n", args[0])
 		return 2
 	}
 }

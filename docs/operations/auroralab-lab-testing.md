@@ -42,6 +42,22 @@ binding or the relay handshake.
 `--relay-host` is the address clients will dial (e.g. the lab machine's LAN IP
 for a phone client); it is embedded in the wallet URLs and TLS SANs.
 
+## Export a provisioning code for a client app
+
+```sh
+go run ./cmd/auroralab import-code --dir /path/to/lab   # or --wallet /path/to/wallet.bin
+```
+
+This wraps the minted `wallet.bin` in the mobile-FFI import envelope
+(`uint32-BE sourceLength || source || uint8 spentKeyCount || count×48-byte
+spent hint keys`, zero spent keys — the format is exported from the `client`
+package as `EncodeNativeProvisioningImportEnvelope` /
+`DecodeNativeProvisioningImportEnvelope`), prints the canonical base64
+provisioning code for the app's "import provisioning code" field, and writes
+it owner-only to `import-code.txt` beside the wallet. The envelope limits
+(16 MiB source, 64 spent keys, 48-byte keys) are pinned to the Android
+parser's constants by `cmd/auroralab/import_code_test.go`.
+
 ## Serve the lab deployment
 
 ```sh

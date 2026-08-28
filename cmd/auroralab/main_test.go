@@ -21,7 +21,7 @@ func TestRunRequiresSubcommandAndPrintsLabBanner(t *testing.T) {
 	if code := run(nil, &stdout, &stderr); code != 2 {
 		t.Fatalf("run(nil) code = %d, want 2", code)
 	}
-	if !strings.Contains(stderr.String(), "auroralab <mint|serve>") {
+	if !strings.Contains(stderr.String(), "auroralab <mint|serve|import-code>") {
 		t.Fatalf("usage = %q", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "LOCAL LAB TESTING ONLY") {

@@ -80,9 +80,11 @@ const (
 	nativeProvisioningReservationCountBytes        = 1
 	nativeProvisioningReservationSpentHintKeyBytes = 48
 	nativeProvisioningReservationRelayBucketBytes  = 16
-	maximumNativeProvisioningReservationKeys       = 64
-	maximumNativeProvisioningReservationInput      = client.MaximumNativeProvisioningWalletBytes + nativeProvisioningReservationSourceLengthBytes + nativeProvisioningReservationCountBytes + maximumNativeProvisioningReservationKeys*nativeProvisioningReservationSpentHintKeyBytes
-	maximumNativeCallInputBytes                    = maximumNativeProvisioningReservationInput
+	// The import envelope limits live in the client package so every client
+	// app shares one definition; these aliases keep local call sites stable.
+	maximumNativeProvisioningReservationKeys  = client.MaximumNativeProvisioningImportSpentHintKeys
+	maximumNativeProvisioningReservationInput = client.MaximumNativeProvisioningImportEnvelopeBytes
+	maximumNativeCallInputBytes               = maximumNativeProvisioningReservationInput
 )
 
 type parsedAdmissionProof struct {
@@ -478,6 +480,13 @@ func reserveNativeProvisioning(encoded []byte, now time.Time) (client.NativeProv
 	if err != nil {
 		return client.NativeProvisioningReservation{}, err
 	}
+	// The decoder returns caller-owned copies; erase them after selection.
+	defer func() {
+		zeroNativeBytes(source)
+		for _, spentHintKey := range spentHintKeys {
+			zeroNativeBytes(spentHintKey)
+		}
+	}()
 	trustConfig, err := nativeProvisioningTrust.load()
 	if err != nil {
 		return client.NativeProvisioningReservation{}, err
@@ -492,53 +501,16 @@ func reserveNativeProvisioning(encoded []byte, now time.Time) (client.NativeProv
 	}, now)
 }
 
+// encodeNativeProvisioningReservationRequest delegates to the canonical
+// client-package import envelope encoder shared with all client apps.
 func encodeNativeProvisioningReservationRequest(source []byte, spentHintKeys [][]byte) ([]byte, error) {
-	if len(source) == 0 || len(source) > client.MaximumNativeProvisioningWalletBytes || len(spentHintKeys) > maximumNativeProvisioningReservationKeys {
-		return nil, fmt.Errorf("auroracore: native provisioning reservation request is invalid")
-	}
-	encoded := make([]byte, nativeProvisioningReservationSourceLengthBytes+len(source)+nativeProvisioningReservationCountBytes+len(spentHintKeys)*nativeProvisioningReservationSpentHintKeyBytes)
-	binary.BigEndian.PutUint32(encoded[:nativeProvisioningReservationSourceLengthBytes], uint32(len(source)))
-	copy(encoded[nativeProvisioningReservationSourceLengthBytes:], source)
-	offset := nativeProvisioningReservationSourceLengthBytes + len(source)
-	encoded[offset] = byte(len(spentHintKeys))
-	offset += nativeProvisioningReservationCountBytes
-	for _, spentHintKey := range spentHintKeys {
-		if len(spentHintKey) != nativeProvisioningReservationSpentHintKeyBytes {
-			zeroNativeBytes(encoded)
-			return nil, fmt.Errorf("auroracore: native provisioning reservation spent hint key is invalid")
-		}
-		copy(encoded[offset:], spentHintKey)
-		offset += nativeProvisioningReservationSpentHintKeyBytes
-	}
-	return encoded, nil
+	return client.EncodeNativeProvisioningImportEnvelope(source, spentHintKeys)
 }
 
+// decodeNativeProvisioningReservationRequest delegates to the canonical
+// client-package import envelope decoder, which returns caller-owned copies.
 func decodeNativeProvisioningReservationRequest(encoded []byte) ([]byte, [][]byte, error) {
-	if len(encoded) < nativeProvisioningReservationSourceLengthBytes+nativeProvisioningReservationCountBytes || len(encoded) > maximumNativeProvisioningReservationInput {
-		return nil, nil, fmt.Errorf("auroracore: native provisioning reservation request size is invalid")
-	}
-	encodedSourceLength := binary.BigEndian.Uint32(encoded[:nativeProvisioningReservationSourceLengthBytes])
-	if encodedSourceLength == 0 || uint64(encodedSourceLength) > uint64(client.MaximumNativeProvisioningWalletBytes) {
-		return nil, nil, fmt.Errorf("auroracore: native provisioning reservation source is invalid")
-	}
-	sourceLength := int(encodedSourceLength)
-	offset := nativeProvisioningReservationSourceLengthBytes
-	if sourceLength > len(encoded)-offset-nativeProvisioningReservationCountBytes {
-		return nil, nil, fmt.Errorf("auroracore: native provisioning reservation source is truncated")
-	}
-	source := encoded[offset : offset+sourceLength]
-	offset += sourceLength
-	count := int(encoded[offset])
-	offset += nativeProvisioningReservationCountBytes
-	if count > maximumNativeProvisioningReservationKeys || len(encoded)-offset != count*nativeProvisioningReservationSpentHintKeyBytes {
-		return nil, nil, fmt.Errorf("auroracore: native provisioning reservation spent hint keys are invalid")
-	}
-	spentHintKeys := make([][]byte, count)
-	for index := range count {
-		spentHintKeys[index] = encoded[offset : offset+nativeProvisioningReservationSpentHintKeyBytes]
-		offset += nativeProvisioningReservationSpentHintKeyBytes
-	}
-	return source, spentHintKeys, nil
+	return client.DecodeNativeProvisioningImportEnvelope(encoded)
 }
 
 func encodeNativeProvisioningReservation(reservation client.NativeProvisioningReservation) ([]byte, error) {

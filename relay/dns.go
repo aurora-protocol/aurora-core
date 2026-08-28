@@ -268,6 +268,7 @@ func validateSocketDNSResponseRecord(message []byte, offset *int, policy ExitPol
 	if rdataLength > len(message)-*offset {
 		return ErrExitEventInvalid
 	}
+	rdataOffset := *offset
 	rdata := message[*offset : *offset+rdataLength]
 	*offset += rdataLength
 	if recordClass != socketDNSClassIN {
@@ -283,7 +284,7 @@ func validateSocketDNSResponseRecord(message []byte, offset *int, policy ExitPol
 			return ErrExitPolicyDenied
 		}
 	case socketDNSTypeSVCB, socketDNSTypeHTTPS:
-		if err := validateSocketDNSServiceBindingHints(message, rdata, policy); err != nil {
+		if err := validateSocketDNSServiceBindingHints(message, rdata, rdataOffset, policy); err != nil {
 			return err
 		}
 	}
@@ -321,12 +322,13 @@ func skipSocketDNSCompressedName(message []byte, offset *int) error {
 	return ErrExitEventInvalid
 }
 
-func validateSocketDNSServiceBindingHints(message, rdata []byte, policy ExitPolicy) error {
+// base is the absolute offset of rdata within message; the target name may use
+// DNS compression pointers that are only meaningful in full-message coordinates.
+func validateSocketDNSServiceBindingHints(message, rdata []byte, base int, policy ExitPolicy) error {
 	if len(rdata) < 3 {
 		return ErrExitEventInvalid
 	}
 	offset := 2
-	base := len(message) - len(rdata)
 	nameOffset := base + offset
 	if err := skipSocketDNSCompressedName(message, &nameOffset); err != nil || nameOffset < base || nameOffset > len(message) {
 		return ErrExitEventInvalid

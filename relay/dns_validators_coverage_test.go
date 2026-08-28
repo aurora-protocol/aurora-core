@@ -387,7 +387,7 @@ func TestValidateSocketDNSServiceBindingHintsDecidesPerParameter(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateSocketDNSServiceBindingHints(tc.rdata, tc.rdata, ExitPolicy{})
+			err := validateSocketDNSServiceBindingHints(tc.rdata, tc.rdata, 0, ExitPolicy{})
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("%s: expected nil, got %v", tc.name, err)

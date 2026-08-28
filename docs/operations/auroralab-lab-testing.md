@@ -70,6 +70,30 @@ egress target. The listen port must match the minted wallet port (the host may
 differ, e.g. `--listen 0.0.0.0:9443`). Non-loopback binding requires
 `--allow-non-loopback` and prints a warning; the default remains loopback.
 
+## Data plane and egress modes
+
+The tunnel personality is `proxy-flow` — the only personality with a relay
+data plane in this repository, and the one the mobile TUN clients actually
+drive (the native session wraps `client.PacketAdapter`, which maps IP packets
+onto proxy-flow frames; `ip-lite`/`full-ip` have no server-side implementation
+here). The minted policy offer therefore offers `proxy-flow` only.
+
+The production first hop fails closed: any egress dial or resolution error
+escapes the frame handler and resets the whole carrier stream (on-device this
+surfaces as `stream error: stream ID 1; INTERNAL_ERROR; received from peer`).
+A lab client whose first flows target hosts the relay cannot reach (the
+common case for a TUN client, whose first packets are real internet traffic)
+would lose its session immediately. `auroralab serve` therefore defaults to
+**lab loopback egress**: every DNS A/AAAA lookup answers `127.0.0.1`/`::1`,
+other DNS queries get a fixture-style echo response, every TCP flow lands on
+the in-process cover origin, and every UDP flow lands on an in-process echo
+endpoint — no lab flow can fail, so the carrier survives. This is what makes
+the Pixel-class TUN data plane stable against the lab relay.
+
+Pass `--dns-upstream IP:port` (a numeric UDP DNS resolver) to switch to real
+internet egress instead. In that mode the relay dials real targets and the
+fail-closed behavior applies, exactly like production.
+
 The presented chain can be verified exactly as a client device would:
 
 ```sh

@@ -34,7 +34,6 @@ const labBanner = "auroralab: LOCAL LAB TESTING ONLY — mints and serves self-s
 const labNonLoopbackWarning = "auroralab: WARNING: binding a non-loopback address exposes this lab deployment to the local network; proceed only on trusted lab networks"
 
 const (
-	labDefaultDNSUpstream = "127.0.0.1:53"
 	labIssuerReadTimeout  = 15 * time.Second
 	labIssuerWriteTimeout = 15 * time.Second
 	labIssuerIdleTimeout  = time.Minute
@@ -149,7 +148,7 @@ func parseServeConfig(args []string, stderr io.Writer) (serveConfig, error) {
 	flags.StringVar(&config.dir, "dir", "", "minted lab deployment directory")
 	flags.StringVar(&config.listen, "listen", "", "relay listen address IP:port (loopback unless --allow-non-loopback)")
 	flags.StringVar(&config.issuerListen, "issuer-listen", "", "issuer listen address IP:port (default: minted issuer endpoint)")
-	flags.StringVar(&config.dnsUpstream, "dns-upstream", labDefaultDNSUpstream, "numeric UDP DNS resolver for DNS egress flows")
+	flags.StringVar(&config.dnsUpstream, "dns-upstream", "", "numeric UDP DNS resolver for real internet egress (default: lab loopback egress — every flow lands on the in-process cover origin/echo endpoint)")
 	flags.BoolVar(&config.allowNonLoopback, "allow-non-loopback", false, "allow binding non-loopback addresses (prints a warning)")
 	if err := flags.Parse(args); err != nil {
 		return serveConfig{}, err
@@ -279,8 +278,12 @@ func serveLab(config serveConfig, stdout, stderr io.Writer) error {
 		MaxHeaderBytes:    labIssuerMaxHeader,
 	}
 
-	fmt.Fprintf(stdout, "auroralab serving relay=%s listen=%s issuer=%s issuer_listen=%s cover=http://%s\n",
-		manifest.Relay.URL, relayListener.Addr(), manifest.Issuer.URL, issuerListener.Addr(), labServer.CoverAddress())
+	egressMode := "lab-loopback"
+	if config.dnsUpstream != "" {
+		egressMode = "internet dns=" + config.dnsUpstream
+	}
+	fmt.Fprintf(stdout, "auroralab serving relay=%s listen=%s issuer=%s issuer_listen=%s cover=http://%s egress=%s\n",
+		manifest.Relay.URL, relayListener.Addr(), manifest.Issuer.URL, issuerListener.Addr(), labServer.CoverAddress(), egressMode)
 	fmt.Fprintln(stdout, "auroralab reminder: LOCAL LAB TESTING ONLY — this deployment must never be exposed beyond a trusted lab network")
 
 	ctx, stop := labSignalContext()

@@ -8,10 +8,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/admission"
@@ -49,7 +51,13 @@ type ServerOptions struct {
 	// ServeFirstHop and may be loopback in the lab. Typically
 	// "0.0.0.0:<minted relay port>".
 	PublicAddress string
-	// DNSUpstream is the numeric UDP DNS resolver used for DNS egress flows.
+	// DNSUpstream selects the egress mode. Empty (the default) wires lab
+	// loopback egress: every DNS answer is 127.0.0.1/::1, every TCP flow lands
+	// on the in-process cover origin, and every UDP flow lands on an
+	// in-process echo endpoint, so no lab flow can fail and the production
+	// fail-closed carrier is never reset by unreachable targets. When set to a
+	// numeric UDP resolver address, the relay performs real internet egress
+	// with that DNS upstream.
 	DNSUpstream string
 	// MaxSessions bounds concurrent authenticated sessions.
 	MaxSessions int
@@ -76,8 +84,10 @@ func (options ServerOptions) normalized() (ServerOptions, error) {
 	if options.MaxSessions <= 0 || options.MaxSessions > 4096 {
 		return ServerOptions{}, fmt.Errorf("labfixture: session limit is invalid")
 	}
-	if _, err := relay.NewUDPDNSMessageResolver(options.DNSUpstream); err != nil {
-		return ServerOptions{}, fmt.Errorf("labfixture: DNS upstream: %w", err)
+	if options.DNSUpstream != "" {
+		if _, err := relay.NewUDPDNSMessageResolver(options.DNSUpstream); err != nil {
+			return ServerOptions{}, fmt.Errorf("labfixture: DNS upstream: %w", err)
+		}
 	}
 	return options, nil
 }
@@ -92,6 +102,8 @@ type Server struct {
 	coverServer *http.Server
 	coverListen net.Listener
 	coverAddr   string
+	udpEcho     *net.UDPConn
+	labEgress   bool
 	caches      []io.Closer
 }
 
@@ -108,10 +120,6 @@ func NewServer(loaded *Loaded, options ServerOptions) (serverOut *Server, err er
 	nowUnix := options.NowUnix()
 	if nowUnix == 0 {
 		return nil, fmt.Errorf("labfixture: server clock is invalid")
-	}
-	dnsResolver, err := relay.NewUDPDNSMessageResolver(options.DNSUpstream)
-	if err != nil {
-		return nil, err
 	}
 	hintResolver, err := handshake.NewStaticAccessHintResolver(loaded.AccessHints)
 	if err != nil {
@@ -217,6 +225,39 @@ func NewServer(loaded *Loaded, options ServerOptions) (serverOut *Server, err er
 		return nil, err
 	}
 
+	// Egress wiring. The production first hop fails closed: any dial or
+	// resolution error escapes the frame handler and resets the carrier
+	// stream (observed on-device as stream 1 RST_STREAM INTERNAL_ERROR). Lab
+	// loopback egress therefore makes every flow succeed against in-process
+	// endpoints; --dns-upstream opts into real internet egress instead.
+	var udpEcho *net.UDPConn
+	var dialer relay.ContextDialer
+	var resolver relay.IPResolver
+	var dnsResolver relay.DNSMessageResolver
+	if options.DNSUpstream == "" {
+		udpEcho, err = startLabUDPEcho()
+		if err != nil {
+			_ = coverListener.Close()
+			return nil, err
+		}
+		dialer = labEgressDialer{tcpTarget: coverListener.Addr().String(), udpTarget: udpEcho.LocalAddr().String()}
+		resolver = labEgressResolver{}
+		dnsResolver = labDNSResolver{}
+	} else {
+		dnsResolver, err = relay.NewUDPDNSMessageResolver(options.DNSUpstream)
+		if err != nil {
+			_ = coverListener.Close()
+			return nil, err
+		}
+		dialer = &net.Dialer{}
+		resolver = net.DefaultResolver
+	}
+	defer func() {
+		if err != nil && udpEcho != nil {
+			_ = udpEcho.Close()
+		}
+	}()
+
 	firstHop, err := server.NewProductionFirstHopServer(server.ProductionFirstHopOptions{
 		Deployment:    loaded.Deployment,
 		Driver:        driver,
@@ -233,8 +274,8 @@ func NewServer(loaded *Loaded, options ServerOptions) (serverOut *Server, err er
 			ExitPolicy:    relay.ExitPolicy{AllowPrivate: true},
 			RateLimit:     relay.DefaultExitRateLimit(),
 			UDPConfirmTTL: 300,
-			Dialer:        &net.Dialer{},
-			Resolver:      net.DefaultResolver,
+			Dialer:        dialer,
+			Resolver:      resolver,
 			DNSResolver:   dnsResolver,
 			Limits:        labEgressLimits(),
 		},
@@ -272,6 +313,8 @@ func NewServer(loaded *Loaded, options ServerOptions) (serverOut *Server, err er
 		coverServer: coverServer,
 		coverListen: coverListener,
 		coverAddr:   coverListener.Addr().String(),
+		udpEcho:     udpEcho,
+		labEgress:   options.DNSUpstream == "",
 		caches:      caches,
 	}
 	return result, nil
@@ -333,6 +376,9 @@ func (s *Server) Close() error {
 		ctx, cancel := context.WithTimeout(context.Background(), labShutdownTimeout)
 		errs = append(errs, s.coverServer.Shutdown(ctx))
 		cancel()
+	}
+	if s.udpEcho != nil {
+		errs = append(errs, s.udpEcho.Close())
 	}
 	for index := len(s.caches) - 1; index >= 0; index-- {
 		errs = append(errs, s.caches[index].Close())
@@ -434,4 +480,100 @@ func labEgressLimits() relay.SocketEgressLimits {
 		QueueRetryInterval:  time.Millisecond,
 		ResolvedTTLSeconds:  60,
 	}
+}
+
+// LabEgress reports whether the server wires lab loopback egress (true) or
+// real internet egress with a configured DNS upstream (false).
+func (s *Server) LabEgress() bool {
+	if s == nil {
+		return false
+	}
+	return s.labEgress
+}
+
+// labEgressDialer maps every lab flow onto the in-process loopback endpoints
+// so a lab flow can never fail to connect: TCP flows land on the cover origin
+// and UDP flows land on the echo endpoint. LOCAL LAB TESTING ONLY.
+type labEgressDialer struct {
+	tcpTarget string
+	udpTarget string
+}
+
+func (d labEgressDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("labfixture: lab egress dial context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+		network, address = "tcp4", d.tcpTarget
+	case "udp", "udp4", "udp6":
+		network, address = "udp4", d.udpTarget
+	default:
+		return nil, fmt.Errorf("labfixture: lab egress network %q is unsupported", network)
+	}
+	dialer := &net.Dialer{}
+	return dialer.DialContext(ctx, network, address)
+}
+
+// labEgressResolver answers every lab hostname lookup with loopback so
+// DNS_MESSAGE flows always resolve. LOCAL LAB TESTING ONLY.
+type labEgressResolver struct{}
+
+func (labEgressResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("labfixture: lab egress resolver context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(host) == "" {
+		return nil, fmt.Errorf("labfixture: lab egress lookup host is required")
+	}
+	switch network {
+	case "ip4":
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	case "ip6":
+		return []netip.Addr{netip.MustParseAddr("::1")}, nil
+	case "ip":
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("::1")}, nil
+	default:
+		return nil, fmt.Errorf("labfixture: lab egress lookup network %q is unsupported", network)
+	}
+}
+
+// labDNSResolver answers non-address lab DNS messages by echoing the query
+// with the response flag set, mirroring the first-hop fixture. LOCAL LAB
+// TESTING ONLY.
+type labDNSResolver struct{}
+
+func (labDNSResolver) ExchangeDNS(_ context.Context, query []byte) ([]byte, error) {
+	if len(query) < 12 {
+		return nil, fmt.Errorf("labfixture: lab DNS query is invalid")
+	}
+	response := append([]byte(nil), query...)
+	response[2] |= 0x80
+	return response, nil
+}
+
+// startLabUDPEcho starts the in-process loopback UDP echo endpoint used as
+// the lab egress target for UDP flows.
+func startLabUDPEcho() (*net.UDPConn, error) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		return nil, fmt.Errorf("labfixture: listen UDP echo endpoint: %w", err)
+	}
+	go func() {
+		buffer := make([]byte, 65535)
+		for {
+			count, address, err := conn.ReadFromUDP(buffer)
+			if err != nil {
+				return
+			}
+			_, _ = conn.WriteToUDP(buffer[:count], address)
+		}
+	}()
+	return conn, nil
 }

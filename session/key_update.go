@@ -248,6 +248,10 @@ func (a *Application) handleKeyControlsLocked(ctx context.Context, now time.Time
 			return nil, err
 		}
 		if !a.reserveLocked(reservation, true) {
+			// Unreachable from wire behaviour: QueueFrames rejects control frame
+			// types and pendingWriteUpdate caps queued updates at one, so the
+			// ControlReservedPackets/Bytes reserve always covers one pending
+			// update plus this acknowledgement, however full the data queue is.
 			return nil, retryableControlError{err: fmt.Errorf("session: reserve key update acknowledgement: %w", ErrBackpressure)}
 		}
 		reservationHeld = true

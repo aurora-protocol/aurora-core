@@ -795,6 +795,63 @@ func TestApplicationKeyUpdateACKBackpressureLeavesReplayRetryable(t *testing.T) 
 	}
 }
 
+func TestApplicationKeyUpdateACKFitsControlReserveOnFullDataQueue(t *testing.T) {
+	// Worst-case control-queue occupancy on the receive path: the data section
+	// of the queue is full AND a local write key update is pending when a relay
+	// KEY_UPDATE arrives. The acknowledgement must still enqueue — the control
+	// reserve (ControlReservedPackets 2) is sized for exactly one update plus one
+	// ACK, and QueueFrames rejects control frame types, so no wire input can
+	// stack more control packets than that.
+	client, relay := newKeyUpdateApplicationPair(t)
+	defer client.Close()
+	defer relay.Close()
+
+	// Fill the data section: MaxQueuedPackets 8 - ControlReservedPackets 2 = 6.
+	for i := 0; i < 6; i++ {
+		if err := client.QueueFrames(context.Background(), paddingBlock()); err != nil {
+			t.Fatalf("fill data queue %d: %v", i, err)
+		}
+	}
+	if err := client.QueueFrames(context.Background(), paddingBlock()); !errors.Is(err, ErrBackpressure) {
+		t.Fatalf("seventh data block = %v, want ErrBackpressure (data section full)", err)
+	}
+	// A pending local write update occupies the first control slot.
+	if err := client.InitiateKeyUpdate(context.Background(), 1); err != nil {
+		t.Fatalf("initiate local update on a full data queue: %v", err)
+	}
+	// The relay's KEY_UPDATE arrives: its ACK must fit the second control slot
+	// even though the data section is full.
+	if err := relay.InitiateKeyUpdate(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	updatePacket := nextApplicationPacket(t, relay)
+	if _, err := client.HandlePacket(context.Background(), time.Now(), updatePacket); err != nil {
+		t.Fatalf("relay KEY_UPDATE on a full data queue = %v, want nil (ACK fits the control reserve)", err)
+	}
+	if client.terminal != nil {
+		t.Fatalf("session terminated: %v", client.terminal)
+	}
+	if len(client.queue) != 8 {
+		t.Fatalf("queue depth = %d, want 8 (6 data + update + ACK)", len(client.queue))
+	}
+	if client.readState.KeyPhase != 1 {
+		t.Fatalf("read phase = %d, want 1 (update committed)", client.readState.KeyPhase)
+	}
+	// Data (numbers 0-5) drains first; the ACK (number 7, sealed after the
+	// update at 6) then drains ahead of the pending update.
+	for i := 0; i < 6; i++ {
+		if header := decodeApplicationPacket(t, nextApplicationPacket(t, client)); header.PacketNumber != uint64(i) {
+			t.Fatalf("drained data packet number = %d, want %d", header.PacketNumber, i)
+		}
+	}
+	if header := decodeApplicationPacket(t, nextApplicationPacket(t, client)); header.PacketNumber != 7 {
+		t.Fatalf("first control packet drained = %d, want 7 (the prioritized ACK)", header.PacketNumber)
+	}
+	if header := decodeApplicationPacket(t, nextApplicationPacket(t, client)); header.PacketNumber != 6 {
+		t.Fatalf("second control packet drained = %d, want 6 (the pending update)", header.PacketNumber)
+	}
+}
+
 func TestApplicationAcceptsCanonicalShortKeyUpdateACKNonce(t *testing.T) {
 	client, relay := newKeyUpdateApplicationPair(t)
 	defer client.Close()

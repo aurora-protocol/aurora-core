@@ -26,11 +26,11 @@ const (
 	// whose first response bears exec, dynamic linking, and Go runtime startup;
 	// under `go test -race ./...` load that cold start can legitimately take
 	// several seconds, so the bounds carry generous headroom.
-	nativeIntegrationCallTimeout  = 30 * time.Second
-	nativeIntegrationCloseTimeout = 10 * time.Second
-	nativeIntegrationOversizedCall   = 1<<31 - 1
-	nativeIntegrationOversizedFree   = nativeIntegrationOversizedCall - 1
-	nativeIntegrationDuplicateFree   = nativeIntegrationOversizedFree - 1
+	nativeIntegrationCallTimeout   = 30 * time.Second
+	nativeIntegrationCloseTimeout  = 10 * time.Second
+	nativeIntegrationOversizedCall = 1<<31 - 1
+	nativeIntegrationOversizedFree = nativeIntegrationOversizedCall - 1
+	nativeIntegrationDuplicateFree = nativeIntegrationOversizedFree - 1
 )
 
 type nativeIntegrationCaller interface {

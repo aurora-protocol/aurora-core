@@ -186,6 +186,24 @@ func (value NativeProvisioningTrust) validate() error {
 	return nil
 }
 
+// SignedSeedTrustRoots returns defensively copied canonical signed-seed
+// bootstrap roots for inspection by provisioning tooling.
+func (value NativeProvisioningTrust) SignedSeedTrustRoots() ([]protocol.AuthorityKeyRecord, error) {
+	if err := value.validate(); err != nil {
+		return nil, err
+	}
+	return cloneNativeProvisioningAuthorityKeys(value.roots), nil
+}
+
+// DeploymentTrusts returns defensively copied canonical relay deployment
+// trust tuples for inspection by provisioning tooling.
+func (value NativeProvisioningTrust) DeploymentTrusts() ([]NativeProvisioningDeploymentTrust, error) {
+	if err := value.validate(); err != nil {
+		return nil, err
+	}
+	return cloneNativeProvisioningDeploymentTrusts(value.deployments), nil
+}
+
 func (value NativeProvisioningTrust) newStore() (*trust.SignedSeedTrustStore, error) {
 	if err := value.validate(); err != nil {
 		return nil, err

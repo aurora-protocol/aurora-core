@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,7 +41,7 @@ func TestCheckNativeProvisioningTrustAcceptsCanonicalRoots(t *testing.T) {
 	if err := checkNativeProvisioningTrust(path, &out); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := out.String(), "native_provisioning_trust_check passed=true\n"; got != want {
+	if got, want := out.String(), "native_provisioning_trust_check passed=true roots=1 deployments=0\n"; got != want {
 		t.Fatalf("native provisioning trust output = %q, want %q", got, want)
 	}
 }
@@ -122,6 +123,276 @@ func nativeProvisioningTrustEncodingForTest(t testing.TB) []byte {
 		t.Fatal(err)
 	}
 	return encoded
+}
+
+func TestBuildNativeProvisioningTrustWritesCanonicalBlob(t *testing.T) {
+	spec := nativeProvisioningTrustSpecForTest(t)
+	specPath := writeNativeProvisioningTrustSpecForTest(t, spec)
+	outPath := filepath.Join(t.TempDir(), "AuroraSignedSeedTrust.bin")
+
+	var out bytes.Buffer
+	if err := buildNativeProvisioningTrust([]string{"--spec", specPath, "--out", outPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("output permissions = %o, want 600", info.Mode().Perm())
+	}
+	encoded, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(encoded)
+	if got, want := out.String(), fmt.Sprintf("native_provisioning_trust_build passed=true roots=1 deployments=1 bytes=%d\n", len(encoded)); got != want {
+		t.Fatalf("build output = %q, want %q", got, want)
+	}
+
+	roots, deployments, err := parseNativeProvisioningTrustSpec(specPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zeroNativeProvisioningSpecRecords(roots, deployments)
+	parsed, err := auroraclient.ParseNativeProvisioningTrust(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedRoots, err := parsed.SignedSeedTrustRoots()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedDeployments, err := parsed.DeploymentTrusts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(parsedRoots, roots) {
+		t.Fatalf("parsed roots = %+v, want %+v", parsedRoots, roots)
+	}
+	if !reflect.DeepEqual(parsedDeployments, deployments) {
+		t.Fatalf("parsed deployments = %+v, want %+v", parsedDeployments, deployments)
+	}
+}
+
+func TestBuildNativeProvisioningTrustOutputPassesCheck(t *testing.T) {
+	specPath := writeNativeProvisioningTrustSpecForTest(t, nativeProvisioningTrustSpecForTest(t))
+	outPath := filepath.Join(t.TempDir(), "AuroraSignedSeedTrust.bin")
+
+	var buildOut bytes.Buffer
+	if err := buildNativeProvisioningTrust([]string{"--spec", specPath, "--out", outPath}, &buildOut); err != nil {
+		t.Fatal(err)
+	}
+	var checkOut bytes.Buffer
+	if err := checkNativeProvisioningTrust(outPath, &checkOut); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := checkOut.String(), "native_provisioning_trust_check passed=true roots=1 deployments=1\n"; got != want {
+		t.Fatalf("check output = %q, want %q", got, want)
+	}
+}
+
+func TestBuildNativeProvisioningTrustRejectsInvalidSpecs(t *testing.T) {
+	valid := nativeProvisioningTrustSpecForTest(t)
+	emptyRoots := valid
+	emptyRoots.Roots = nil
+	invalidHexAuthorityID := valid
+	invalidHexAuthorityID.Roots[0].AuthorityID = "zz"
+	shortAuthorityID := valid
+	shortAuthorityID.Roots[0].AuthorityID = "9191"
+	emptyValidityInterval := valid
+	emptyValidityInterval.Roots[0].ValidUntilUnix = valid.Roots[0].ValidFromUnix
+	shortPublicKey := valid
+	shortPublicKey.Roots[0].PublicKey = "04"
+	duplicateRoots := valid
+	duplicateRoots.Roots = append(duplicateRoots.Roots, valid.Roots[0])
+	shortDescriptorHash := valid
+	shortDescriptorHash.Deployments[0].DescriptorHash = strings.Repeat("42", 10)
+	zeroDescriptorHash := valid
+	zeroDescriptorHash.Deployments[0].DescriptorHash = strings.Repeat("00", 48)
+	duplicateDeployments := valid
+	duplicateDeployments.Deployments = append(duplicateDeployments.Deployments, valid.Deployments[0])
+	reservedKeyStatus := valid
+	reservedKeyStatus.Roots[0].KeyStatus = 0xff
+
+	specs := map[string]nativeProvisioningTrustSpec{
+		"empty roots":             emptyRoots,
+		"invalid hex":             invalidHexAuthorityID,
+		"short authority id":      shortAuthorityID,
+		"empty validity interval": emptyValidityInterval,
+		"short public key":        shortPublicKey,
+		"duplicate roots":         duplicateRoots,
+		"short descriptor hash":   shortDescriptorHash,
+		"zero descriptor hash":    zeroDescriptorHash,
+		"duplicate deployments":   duplicateDeployments,
+		"reserved key status":     reservedKeyStatus,
+	}
+	for name, spec := range specs {
+		t.Run(name, func(t *testing.T) {
+			specPath := writeNativeProvisioningTrustSpecForTest(t, spec)
+			outPath := filepath.Join(t.TempDir(), "AuroraSignedSeedTrust.bin")
+			var out bytes.Buffer
+			err := buildNativeProvisioningTrust([]string{"--spec", specPath, "--out", outPath}, &out)
+			if err == nil || !strings.Contains(err.Error(), "build native provisioning trust") {
+				t.Fatalf("error = %v, want spec rejection", err)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("build wrote output for invalid spec: %q", out.String())
+			}
+			if _, statErr := os.Stat(outPath); !os.IsNotExist(statErr) {
+				t.Fatalf("build created output for invalid spec: %v", statErr)
+			}
+		})
+	}
+
+	validJSON, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawSpecs := map[string][]byte{
+		"malformed JSON": []byte("{"),
+		"trailing data":  append(append([]byte(nil), validJSON...), '\n', '{', '}'),
+		"unknown field":  []byte(strings.Replace(string(validJSON), `"usage_flags"`, `"usage_flagz"`, 1)),
+	}
+	for name, data := range rawSpecs {
+		t.Run(name, func(t *testing.T) {
+			specPath := filepath.Join(t.TempDir(), "trust-spec.json")
+			if err := os.WriteFile(specPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			outPath := filepath.Join(t.TempDir(), "AuroraSignedSeedTrust.bin")
+			var out bytes.Buffer
+			err := buildNativeProvisioningTrust([]string{"--spec", specPath, "--out", outPath}, &out)
+			if err == nil || !strings.Contains(err.Error(), "build native provisioning trust") {
+				t.Fatalf("error = %v, want spec rejection", err)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("build wrote output for invalid spec: %q", out.String())
+			}
+			if _, statErr := os.Stat(outPath); !os.IsNotExist(statErr) {
+				t.Fatalf("build created output for invalid spec: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestBuildNativeProvisioningTrustRefusesOverwriteWithoutForce(t *testing.T) {
+	specPath := writeNativeProvisioningTrustSpecForTest(t, nativeProvisioningTrustSpecForTest(t))
+	outPath := filepath.Join(t.TempDir(), "AuroraSignedSeedTrust.bin")
+
+	var out bytes.Buffer
+	if err := buildNativeProvisioningTrust([]string{"--spec", specPath, "--out", outPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(original)
+	if err := os.WriteFile(outPath, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var again bytes.Buffer
+	err = buildNativeProvisioningTrust([]string{"--spec", specPath, "--out", outPath}, &again)
+	if err == nil || !strings.Contains(err.Error(), "output exists") {
+		t.Fatalf("error = %v, want overwrite refusal", err)
+	}
+	if again.Len() != 0 {
+		t.Fatalf("build wrote output on overwrite refusal: %q", again.String())
+	}
+	after, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != "sentinel" {
+		t.Fatalf("build without --force modified existing output: %q", after)
+	}
+
+	var forced bytes.Buffer
+	if err := buildNativeProvisioningTrust([]string{"--spec", specPath, "--out", outPath, "--force"}, &forced); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(restored)
+	if !bytes.Equal(restored, original) {
+		t.Fatalf("build with --force did not restore canonical output")
+	}
+	info, err := os.Stat(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("overwritten output permissions = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestBuildNativeProvisioningTrustRequiresSpecAndOut(t *testing.T) {
+	var out bytes.Buffer
+	for _, args := range [][]string{
+		nil,
+		{"--spec", "trust-spec.json"},
+		{"--out", "AuroraSignedSeedTrust.bin"},
+		{"--spec", "trust-spec.json", "--out", "AuroraSignedSeedTrust.bin", "extra"},
+	} {
+		out.Reset()
+		if err := buildNativeProvisioningTrust(args, &out); err == nil {
+			t.Fatalf("build-native-provisioning-trust accepted arguments %v", args)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("build-native-provisioning-trust wrote output for arguments %v: %q", args, out.String())
+		}
+	}
+}
+
+func nativeProvisioningTrustSpecForTest(t testing.TB) nativeProvisioningTrustSpec {
+	t.Helper()
+	curve := elliptic.P256()
+	privateKey := &ecdsa.PrivateKey{
+		PublicKey: ecdsa.PublicKey{Curve: curve, X: curve.Params().Gx, Y: curve.Params().Gy},
+		D:         big.NewInt(1),
+	}
+	publicKey, err := privateKey.PublicKey.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKeyHex := hex.EncodeToString(publicKey)
+	return nativeProvisioningTrustSpec{
+		Roots: []nativeProvisioningTrustRootSpec{{
+			AuthorityID:     hex.EncodeToString(bytes.Repeat([]byte{0x91}, 16)),
+			AuthorityRole:   1,
+			SignatureScheme: registry.SigECDSAP256SHA384DER,
+			KeyEncoding:     registry.KeyP256SEC1Uncompressed,
+			PublicKey:       publicKeyHex,
+			ValidFromUnix:   1,
+			ValidUntilUnix:  4_102_444_800,
+			KeyStatus:       registry.AuthorityActive,
+			UsageFlags:      registry.UsageMaySignSignedSeedRecord,
+		}},
+		Deployments: []nativeProvisioningDeploymentTrustSpec{{
+			DescriptorHash:    hex.EncodeToString(bytes.Repeat([]byte{0x42}, 48)),
+			CoverTemplateHash: hex.EncodeToString(bytes.Repeat([]byte{0x24}, 48)),
+			SignatureScheme:   registry.SigECDSAP256SHA384DER,
+			KeyEncoding:       registry.KeyP256SEC1Uncompressed,
+			PublicKey:         publicKeyHex,
+		}},
+	}
+}
+
+func writeNativeProvisioningTrustSpecForTest(t testing.TB, spec nativeProvisioningTrustSpec) string {
+	t.Helper()
+	data, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "trust-spec.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestLoadCheckCommandEmitsPassingJSON(t *testing.T) {

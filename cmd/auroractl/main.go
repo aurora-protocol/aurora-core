@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -33,6 +35,7 @@ import (
 	auroraroute "github.com/aurora-protocol/aurora-core/route"
 	auroraserver "github.com/aurora-protocol/aurora-core/server"
 	"github.com/aurora-protocol/aurora-core/transport"
+	"github.com/aurora-protocol/aurora-core/trust"
 	corevectors "github.com/aurora-protocol/aurora-core/vectors"
 	"github.com/aurora-protocol/aurora-core/wire"
 )
@@ -108,6 +111,8 @@ func main() {
 			break
 		}
 		err = checkNativeProvisioningTrust(os.Args[2], os.Stdout)
+	case "build-native-provisioning-trust":
+		err = buildNativeProvisioningTrust(os.Args[2:], os.Stdout)
 	case "check-config":
 		if len(os.Args) != 3 {
 			err = fmt.Errorf("check-config requires a path")
@@ -124,7 +129,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|server-check|client-check|p0-p8-check|p0-p11-check|cover-check|crypto-check|wire-check|transport-check|flow-check|route-check|perf-check|load-check --url URL [--requests N --concurrency N --packet-bytes N --request-limit D]|coverage-check --profile PATH [--minimum PERCENT]|release-gate-check|host-build-check [--portable|--apple-simulator|--all]|check-native-provisioning-trust PATH|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|server-check|client-check|p0-p8-check|p0-p11-check|cover-check|crypto-check|wire-check|transport-check|flow-check|route-check|perf-check|load-check --url URL [--requests N --concurrency N --packet-bytes N --request-limit D]|coverage-check --profile PATH [--minimum PERCENT]|release-gate-check|host-build-check [--portable|--apple-simulator|--all]|check-native-provisioning-trust PATH|build-native-provisioning-trust --spec PATH --out PATH [--force]|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -1460,11 +1465,11 @@ func checkNativeProvisioningTrust(path string, w io.Writer) error {
 		return fmt.Errorf("check native provisioning trust: trust input exceeds size limit")
 	}
 	defer clear(encoded)
-	trust, err := auroraclient.ParseNativeProvisioningTrust(encoded)
+	trusted, err := auroraclient.ParseNativeProvisioningTrust(encoded)
 	if err != nil {
 		return fmt.Errorf("check native provisioning trust: %w", err)
 	}
-	canonical, err := auroraclient.EncodeNativeProvisioningTrust(trust)
+	canonical, err := auroraclient.EncodeNativeProvisioningTrust(trusted)
 	if err != nil {
 		return fmt.Errorf("check native provisioning trust: %w", err)
 	}
@@ -1472,7 +1477,241 @@ func checkNativeProvisioningTrust(path string, w io.Writer) error {
 	if !bytes.Equal(encoded, canonical) {
 		return fmt.Errorf("check native provisioning trust: root bundle is not canonical")
 	}
-	fmt.Fprintln(w, "native_provisioning_trust_check passed=true")
+	roots, err := trusted.SignedSeedTrustRoots()
+	if err != nil {
+		return fmt.Errorf("check native provisioning trust: %w", err)
+	}
+	deployments, err := trusted.DeploymentTrusts()
+	if err != nil {
+		return fmt.Errorf("check native provisioning trust: %w", err)
+	}
+	fmt.Fprintf(w, "native_provisioning_trust_check passed=true roots=%d deployments=%d\n", len(roots), len(deployments))
+	return nil
+}
+
+// maximumNativeProvisioningTrustSpecBytes bounds a build-native-provisioning-trust
+// input spec; the largest valid spec encodes far less than this.
+const maximumNativeProvisioningTrustSpecBytes = 4 << 20
+
+// nativeProvisioningTrustSpec is the reviewed JSON input for
+// build-native-provisioning-trust. Byte fields are hex strings; the authority
+// key ID is derived from the public key so the sealed output is canonical by
+// construction. Roots and deployments may be listed in any order; the encoder
+// enforces canonical ordering.
+type nativeProvisioningTrustSpec struct {
+	Roots       []nativeProvisioningTrustRootSpec       `json:"roots"`
+	Deployments []nativeProvisioningDeploymentTrustSpec `json:"deployments"`
+}
+
+type nativeProvisioningTrustRootSpec struct {
+	AuthorityID     string `json:"authority_id"`
+	AuthorityRole   uint64 `json:"authority_role"`
+	SignatureScheme uint64 `json:"signature_scheme"`
+	KeyEncoding     uint64 `json:"key_encoding"`
+	PublicKey       string `json:"public_key"`
+	ValidFromUnix   uint64 `json:"valid_from_unix"`
+	ValidUntilUnix  uint64 `json:"valid_until_unix"`
+	KeyStatus       uint8  `json:"key_status"`
+	UsageFlags      uint32 `json:"usage_flags"`
+}
+
+type nativeProvisioningDeploymentTrustSpec struct {
+	DescriptorHash    string `json:"descriptor_hash"`
+	CoverTemplateHash string `json:"cover_template_hash"`
+	SignatureScheme   uint64 `json:"signature_scheme"`
+	KeyEncoding       uint64 `json:"key_encoding"`
+	PublicKey         string `json:"public_key"`
+}
+
+func buildNativeProvisioningTrust(args []string, w io.Writer) error {
+	flags := flag.NewFlagSet("build-native-provisioning-trust", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	specPath := flags.String("spec", "", "native provisioning trust spec path")
+	outPath := flags.String("out", "", "sealed native provisioning trust output path")
+	force := flags.Bool("force", false, "overwrite an existing output file")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return fmt.Errorf("build-native-provisioning-trust: invalid options")
+	}
+	if *specPath == "" || *outPath == "" {
+		return fmt.Errorf("build-native-provisioning-trust: --spec and --out are required")
+	}
+	roots, deployments, err := parseNativeProvisioningTrustSpec(*specPath)
+	if err != nil {
+		return err
+	}
+	defer zeroNativeProvisioningSpecRecords(roots, deployments)
+	trusted, err := auroraclient.NewNativeProvisioningTrust(roots, deployments...)
+	if err != nil {
+		return fmt.Errorf("build native provisioning trust: %w", err)
+	}
+	encoded, err := auroraclient.EncodeNativeProvisioningTrust(trusted)
+	if err != nil {
+		return fmt.Errorf("build native provisioning trust: %w", err)
+	}
+	defer clear(encoded)
+	if err := writeNativeProvisioningTrustFile(*outPath, encoded, *force); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "native_provisioning_trust_build passed=true roots=%d deployments=%d bytes=%d\n", len(roots), len(deployments), len(encoded))
+	return nil
+}
+
+func parseNativeProvisioningTrustSpec(path string) (roots []protocol.AuthorityKeyRecord, deployments []auroraclient.NativeProvisioningDeploymentTrust, err error) {
+	defer func() {
+		if err != nil {
+			zeroNativeProvisioningSpecRecords(roots, deployments)
+		}
+	}()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build native provisioning trust: read spec: %w", err)
+	}
+	if len(data) == 0 || len(data) > maximumNativeProvisioningTrustSpecBytes {
+		return nil, nil, fmt.Errorf("build native provisioning trust: spec size is invalid")
+	}
+	var spec nativeProvisioningTrustSpec
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&spec); err != nil {
+		return nil, nil, fmt.Errorf("build native provisioning trust: parse spec: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, nil, fmt.Errorf("build native provisioning trust: spec has trailing data")
+	}
+	if len(spec.Roots) == 0 {
+		return nil, nil, fmt.Errorf("build native provisioning trust: spec requires at least one root")
+	}
+	roots = make([]protocol.AuthorityKeyRecord, 0, len(spec.Roots))
+	for index, rootSpec := range spec.Roots {
+		root, rootErr := nativeProvisioningTrustRootFromSpec(rootSpec)
+		if rootErr != nil {
+			return nil, nil, fmt.Errorf("build native provisioning trust: root %d: %w", index, rootErr)
+		}
+		roots = append(roots, root)
+	}
+	deployments = make([]auroraclient.NativeProvisioningDeploymentTrust, 0, len(spec.Deployments))
+	for index, deploymentSpec := range spec.Deployments {
+		deployment, deploymentErr := nativeProvisioningDeploymentTrustFromSpec(deploymentSpec)
+		if deploymentErr != nil {
+			return nil, nil, fmt.Errorf("build native provisioning trust: deployment %d: %w", index, deploymentErr)
+		}
+		deployments = append(deployments, deployment)
+	}
+	return roots, deployments, nil
+}
+
+func nativeProvisioningTrustRootFromSpec(spec nativeProvisioningTrustRootSpec) (protocol.AuthorityKeyRecord, error) {
+	authorityID, err := decodeNativeProvisioningHexField("authority_id", spec.AuthorityID, 16)
+	if err != nil {
+		return protocol.AuthorityKeyRecord{}, err
+	}
+	publicKey, err := nativeProvisioningPublicKeyFromSpec(spec.SignatureScheme, spec.KeyEncoding, spec.PublicKey)
+	if err != nil {
+		clear(authorityID)
+		return protocol.AuthorityKeyRecord{}, err
+	}
+	encodedPublicKey, err := protocol.Encode(publicKey)
+	if err != nil {
+		clear(authorityID)
+		clear(publicKey.PublicKey)
+		return protocol.AuthorityKeyRecord{}, err
+	}
+	keyID := trust.AuthorityKeyID(encodedPublicKey)
+	clear(encodedPublicKey)
+	return protocol.AuthorityKeyRecord{
+		AuthorityID:    authorityID,
+		AuthorityKeyID: keyID,
+		AuthorityRole:  spec.AuthorityRole,
+		PublicKey:      publicKey,
+		ValidFromUnix:  spec.ValidFromUnix,
+		ValidUntilUnix: spec.ValidUntilUnix,
+		KeyStatus:      spec.KeyStatus,
+		UsageFlags:     spec.UsageFlags,
+	}, nil
+}
+
+func nativeProvisioningDeploymentTrustFromSpec(spec nativeProvisioningDeploymentTrustSpec) (auroraclient.NativeProvisioningDeploymentTrust, error) {
+	descriptorHash, err := decodeNativeProvisioningHexField("descriptor_hash", spec.DescriptorHash, 48)
+	if err != nil {
+		return auroraclient.NativeProvisioningDeploymentTrust{}, err
+	}
+	coverTemplateHash, err := decodeNativeProvisioningHexField("cover_template_hash", spec.CoverTemplateHash, 48)
+	if err != nil {
+		clear(descriptorHash)
+		return auroraclient.NativeProvisioningDeploymentTrust{}, err
+	}
+	templateAuthorityKey, err := nativeProvisioningPublicKeyFromSpec(spec.SignatureScheme, spec.KeyEncoding, spec.PublicKey)
+	if err != nil {
+		clear(descriptorHash)
+		clear(coverTemplateHash)
+		return auroraclient.NativeProvisioningDeploymentTrust{}, err
+	}
+	return auroraclient.NativeProvisioningDeploymentTrust{
+		DescriptorHash:       descriptorHash,
+		CoverTemplateHash:    coverTemplateHash,
+		TemplateAuthorityKey: templateAuthorityKey,
+	}, nil
+}
+
+func nativeProvisioningPublicKeyFromSpec(signatureScheme, keyEncoding uint64, publicKeyHex string) (protocol.PublicKeyRecord, error) {
+	publicKey, err := decodeNativeProvisioningHexField("public_key", publicKeyHex, -1)
+	if err != nil {
+		return protocol.PublicKeyRecord{}, err
+	}
+	return protocol.PublicKeyRecord{
+		SignatureScheme: signatureScheme,
+		KeyEncoding:     keyEncoding,
+		PublicKey:       publicKey,
+	}, nil
+}
+
+func decodeNativeProvisioningHexField(name, value string, size int) ([]byte, error) {
+	if value == "" {
+		return nil, fmt.Errorf("%s is required", name)
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("%s is not valid hex", name)
+	}
+	if size >= 0 && len(decoded) != size {
+		clear(decoded)
+		return nil, fmt.Errorf("%s must be %d bytes", name, size)
+	}
+	return decoded, nil
+}
+
+func zeroNativeProvisioningSpecRecords(roots []protocol.AuthorityKeyRecord, deployments []auroraclient.NativeProvisioningDeploymentTrust) {
+	for index := range roots {
+		clear(roots[index].AuthorityID)
+		clear(roots[index].AuthorityKeyID)
+		clear(roots[index].PublicKey.PublicKey)
+	}
+	for index := range deployments {
+		clear(deployments[index].DescriptorHash)
+		clear(deployments[index].CoverTemplateHash)
+		clear(deployments[index].TemplateAuthorityKey.PublicKey)
+	}
+}
+
+func writeNativeProvisioningTrustFile(path string, encoded []byte, force bool) error {
+	openFlags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if force {
+		openFlags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+	file, err := os.OpenFile(path, openFlags, 0o600)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("build native provisioning trust: output exists (use --force to overwrite)")
+		}
+		return fmt.Errorf("build native provisioning trust: open output: %w", err)
+	}
+	defer file.Close()
+	if err := file.Chmod(0o600); err != nil {
+		return fmt.Errorf("build native provisioning trust: restrict output permissions: %w", err)
+	}
+	if _, err := file.Write(encoded); err != nil {
+		return fmt.Errorf("build native provisioning trust: write output: %w", err)
+	}
 	return nil
 }
 

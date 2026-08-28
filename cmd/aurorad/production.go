@@ -456,7 +456,6 @@ func newProductionService(config productionConfig) (*server.ProductionFirstHopSe
 		ClassicalSigner:   classicalSigner,
 		PQSigner:          pqSigner,
 		PolicySelector:    policy,
-		RequirePQ:         true,
 		SessionLimits:     config.sessionLimits,
 	})
 	zeroProductionBytes(tokenVerificationKey)

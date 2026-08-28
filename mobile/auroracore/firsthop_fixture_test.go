@@ -143,7 +143,6 @@ func newNativeSessionFixture(t testing.TB, now time.Time) *Fixture {
 		ClassicalSigner:   classicalSigner,
 		PQSigner:          pqSigner,
 		PolicySelector:    policy,
-		RequirePQ:         true,
 		SessionLimits:     firstHopSessionLimits(),
 	})
 	if err != nil {

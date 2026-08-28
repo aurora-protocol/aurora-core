@@ -380,7 +380,6 @@ func validRelayDriverConfigWithDeployment(t *testing.T, deployment trust.Verifie
 		ClassicalSigner:   testSigner{key: descriptor.EpochAuthClassicalKey},
 		PQSigner:          testSigner{key: descriptor.EpochAuthPQKey},
 		PolicySelector:    testPolicySelector{},
-		RequirePQ:         true,
 		SessionLimits:     testSessionLimits(),
 	}
 }

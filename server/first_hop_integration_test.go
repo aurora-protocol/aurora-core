@@ -3657,7 +3657,6 @@ func (f liveFirstHopFixture) newRelayDriver(t testing.TB, supplied ...liveFirstH
 		ClassicalSigner:   liveFirstHopSigner{publicKey: descriptor.EpochAuthClassicalKey, classical: f.epochClassical},
 		PQSigner:          liveFirstHopSigner{publicKey: descriptor.EpochAuthPQKey, pq: f.epochPQ},
 		PolicySelector:    options.policySelector,
-		RequirePQ:         true,
 		SessionLimits:     liveFirstHopSessionLimits(),
 	})
 	if err != nil {

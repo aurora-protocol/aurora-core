@@ -91,7 +91,6 @@ type RelayDriverConfig struct {
 	ClassicalSigner   TranscriptSigner
 	PQSigner          TranscriptSigner
 	PolicySelector    PolicySelector
-	RequirePQ         bool
 	SessionLimits     session.Limits
 	Rekey             session.RekeyPolicy
 	Entropy           session.EntropySource
@@ -126,7 +125,6 @@ type RelayDriver struct {
 	classicalSigner   TranscriptSigner
 	pqSigner          TranscriptSigner
 	policySelector    PolicySelector
-	requirePQ         bool
 	sessionLimits     session.Limits
 	rekey             session.RekeyPolicy
 	entropy           session.EntropySource
@@ -257,7 +255,6 @@ func newRelayDriver(config RelayDriverConfig, now time.Time, requireDurable bool
 		classicalSigner:   config.ClassicalSigner,
 		pqSigner:          config.PQSigner,
 		policySelector:    config.PolicySelector,
-		requirePQ:         config.RequirePQ,
 		sessionLimits:     config.SessionLimits,
 		rekey:             config.Rekey,
 		entropy:           config.Entropy,

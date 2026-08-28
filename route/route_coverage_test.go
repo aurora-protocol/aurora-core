@@ -10,18 +10,18 @@ package route
 //     binding, p0, p1.Unsigned()) — i.e. p0 plus p1 with its signature fields zeroed —
 //     NOT the relay descriptor. So mutating the descriptor (RoleFlags/RelayID/EpochID/
 //     SupportedSuiteIDs) changes the descriptor hash but not the transcript, and the
-//     descriptor-bound checks (407/413/417) fire before the signature check at 424.
+//     descriptor-bound checks (496/502/506) fire before the signature check at 513.
 //     Likewise, mutating a p0 field that no earlier validator inspects (ClientNonce at
-//     401, RequestedRouteModeID at 421) changes the transcript, but the target branch
-//     fires before 424. Every late branch 401-437 is therefore reachable by perturbing
+//     490, RequestedRouteModeID at 510) changes the transcript, but the target branch
+//     fires before 513. Every late branch 490-526 is therefore reachable by perturbing
 //     exactly one field of the already-signed fixture (signedRoutePreludeVerification
 //     Input) without regenerating any signature. This is the opposite of the
 //     deployment.go situation, where the descriptor hash gates everything.
 //
 //  2. RoutePrelude1.ValidateStructural (bootstrap.go:441) already enforces
 //     MsgType==MsgRoutePrelude1 and validateVersionKnown (which accepts ONLY Version20),
-//     so the re-checks at 371-373 (MsgType) and 374-376 (Version) inside
-//     VerifyRoutePrelude1Signatures are unreachable after 368 passes — DEAD by design.
+//     so the re-checks at 460-462 (MsgType) and 463-465 (Version) inside
+//     VerifyRoutePrelude1Signatures are unreachable after 457 passes — DEAD by design.
 //
 // Coverage is re-measured per target to confirm the intended branch moved (no
 // wrong-branch bugs). Each rejection case asserts exactly one error so the failure is
@@ -30,48 +30,48 @@ package route
 // is a required CI check).
 //
 // Uncovered blocks (measured count 0 before this file):
-//   - PreviousHopFullTranscriptHash (27): WriteVarint(suite) overflow path 33-35.
-//   - RouteHopBinding (39): WriteOpaqueFixed(ClientNonce,32) length path 50-52.
-//   - DecodePrivatePrelude (134): r.Err short-input 159-161, trailing-bytes 162-164.
-//   - SealPrivatePrelude (168): RoutePreludeWrapContext error 170-172, Encode(private)
-//     error 185-187.
-//   - OpenPrivatePrelude (207): OpenRoutePrelude AEAD error 212-214.
-//   - OpenAndVerifyPrivatePrelude (243): OpenPrivatePrelude propagation 245-247.
-//   - OpenAndVerifyPrivatePreludeWithWrapNonceCache (266): propagation 268-270.
-//   - WrapNonceReplayCache.InsertIfAbsent (306): nil receiver 307-309, malformed key
-//     311-313 (also covers routeWrapNonceReplayKey 332-334).
-//   - HopPreludeTranscriptHash (347): Encode(p0) error 349-351, Encode(p1.Unsigned())
-//     error 353-355.
-//   - validateRoutePreludeMetadata (441): response/request mismatch 445-447, server
-//     nonce length 448-450.
-//   - ValidateRoutePreludeHybridShares (454): client/server classical + client/server
-//     ML-KEM malformed 455-466.
-//   - ValidatePrivatePreludeHeader (470): version check 474-476. (The MsgType check
-//     471-473 and the extensions check 477-479 are already covered by
+//   - PreviousHopFullTranscriptHash (28): WriteVarint(suite) overflow path 34-36.
+//   - RouteHopBinding (40): WriteOpaqueFixed(ClientNonce,32) length path 51-53.
+//   - DecodePrivatePrelude (135): r.Err short-input 160-162, trailing-bytes 163-165.
+//   - SealPrivatePrelude (169): RoutePreludeWrapContext error 171-173, Encode(private)
+//     error 186-188.
+//   - OpenPrivatePrelude (208): OpenRoutePrelude AEAD error 213-215.
+//   - OpenAndVerifyPrivatePrelude (244): OpenPrivatePrelude propagation 246-248.
+//   - OpenAndVerifyPrivatePreludeWithWrapNonceCache (267): propagation 268-271.
+//   - WrapNonceReplayCache.InsertIfAbsent (340): nil receiver 341-343, malformed key
+//     344-346 (also covers routeWrapNonceReplayKey 421-423).
+//   - HopPreludeTranscriptHash (436): Encode(p0) error 438-440, Encode(p1.Unsigned())
+//     error 442-444.
+//   - validateRoutePreludeMetadata (530): response/request mismatch 534-536, server
+//     nonce length 537-539.
+//   - ValidateRoutePreludeHybridShares (543): client/server classical + client/server
+//     ML-KEM malformed 544-555.
+//   - ValidatePrivatePreludeHeader (559): version check 563-565. (The MsgType check
+//     560-562 and the extensions check 566-568 are already covered by
 //     TestOpenPrivatePreludeRejectsMalformedPrivateHeader and
 //     TestValidatePrivatePreludeHeaderRejectsUnknownCriticalExtension — not
 //     duplicated.)
-//   - containsUint64 (483): the not-found return 489.
-//   - VerifyRoutePrelude1Signatures (364): the decision cascade 365-437 reachable via
+//   - containsUint64 (572): the not-found return 578.
+//   - VerifyRoutePrelude1Signatures (453): the decision cascade 454-526 reachable via
 //     single-field mutations of the signed fixture (see plan above).
 //
 // Dead-by-design (documented, not covered):
-//   - VerifyRoutePrelude1Signatures 371-373 (MsgType re-check) and 374-376 (Version
-//     re-check). ValidateStructural at 368 already enforces MsgType==MsgRoutePrelude1 and
-//     validateVersionKnown accepts only Version20, so after 368 passes both re-checks
+//   - VerifyRoutePrelude1Signatures 460-462 (MsgType re-check) and 463-465 (Version
+//     re-check). ValidateStructural at 457 already enforces MsgType==MsgRoutePrelude1 and
+//     validateVersionKnown accepts only Version20, so after 457 passes both re-checks
 //     are always false. Reaching them would require a RoutePrelude1 that fails
 //     ValidateStructural yet passes the re-check, which is impossible.
 //
 // Out of scope (require a successful AEAD open / real key derivation, not pure
 // validators):
-//   - SealPrivatePrelude 189-191 (SealRoutePrelude error). SealRoutePrelude only fails
+//   - SealPrivatePrelude 190-192 (SealRoutePrelude error). SealRoutePrelude only fails
 //     through the same RoutePreludeWrapKeyIV path that SealPrivatePrelude already
-//     validated at 169; AES-256-GCM seal with a valid 32-byte key and 12-byte nonce never
+//     validated at 170; AES-256-GCM seal with a valid 32-byte key and 12-byte nonce never
 //     errors. The branch guards a wire-format mismatch no constructible input produces.
-//   - OpenPrivatePrelude 216-239 (post-open header/context/share checks). Reaching
+//   - OpenPrivatePrelude 217-240 (post-open header/context/share checks). Reaching
 //     them requires OpenRoutePrelude to succeed, i.e. a real route-wrap key derivation
 //     and a legitimately sealed prelude.
-//   - OpenAndVerifyPrivatePrelude 257-262 and WithWrapNonceCache 271-293 (binding +
+//   - OpenAndVerifyPrivatePrelude 258-263 and WithWrapNonceCache 296-311 (binding +
 //     access-hint verification): require a successful open.
 //
 // No context.Context, no deprecated APIs.
@@ -85,9 +85,9 @@ import (
 )
 
 // routeCovMaxVarint exceeds wire.MaxVarint (1<<62 - 1), so WriteVarint/VarintLen reject
-// it. Used by the encoder-overflow branches of PreviousHopFullTranscriptHash (33),
-// HopPreludeTranscriptHash (349/353), SealPrivatePrelude (185), and
-// VerifyRoutePrelude1Signatures (414/421) — >=5 references, so not U1000.
+// it. Used by the encoder-overflow branches of PreviousHopFullTranscriptHash (34),
+// HopPreludeTranscriptHash (438/442), SealPrivatePrelude (186), and
+// VerifyRoutePrelude1Signatures (503/510) — >=5 references, so not U1000.
 const routeCovMaxVarint uint64 = ^uint64(0)
 
 // routeCovEncodablePrivatePrelude returns a PrivatePrelude that round-trips cleanly
@@ -140,12 +140,12 @@ func routeCovMatchingEnvelope(env EnvelopeInput) protocol.RoutePreludeEnvelope {
 }
 
 func TestRoutePureEncodersRejectOverflow(t *testing.T) {
-	// PreviousHopFullTranscriptHash 33-35: suite varint out of range.
+	// PreviousHopFullTranscriptHash 34-36: suite varint out of range.
 	if _, err := PreviousHopFullTranscriptHash(routeCovMaxVarint, rb(0, 32)); err == nil {
 		t.Fatalf("PreviousHopFullTranscriptHash(maxVarint): expected error, got nil")
 	}
 
-	// RouteHopBinding 50-52: ClientNonce not 32 bytes (all other fixed fields valid).
+	// RouteHopBinding 51-53: ClientNonce not 32 bytes (all other fixed fields valid).
 	in := HopBindingInput{
 		RouteInstanceID:                1,
 		HopIndex:                       0,
@@ -161,7 +161,7 @@ func TestRoutePureEncodersRejectOverflow(t *testing.T) {
 }
 
 func TestDecodePrivatePreludeRejectsShortAndTrailing(t *testing.T) {
-	// 159-161: empty input leaves the reader in error.
+	// 160-162: empty input leaves the reader in error.
 	if _, err := DecodePrivatePrelude(nil); err == nil {
 		t.Fatalf("DecodePrivatePrelude(nil): expected error, got nil")
 	}
@@ -177,7 +177,7 @@ func TestDecodePrivatePreludeRejectsShortAndTrailing(t *testing.T) {
 		t.Fatalf("DecodePrivatePrelude(valid): unexpected error %v", err)
 	}
 
-	// 162-164: a valid encoding plus a trailing byte is rejected.
+	// 163-165: a valid encoding plus a trailing byte is rejected.
 	trailing := append(append([]byte(nil), valid...), 0xff)
 	_, err = DecodePrivatePrelude(trailing)
 	if err == nil || !strings.Contains(err.Error(), "trailing private prelude bytes") {
@@ -186,14 +186,14 @@ func TestDecodePrivatePreludeRejectsShortAndTrailing(t *testing.T) {
 }
 
 func TestWrapNonceReplayCacheRejectsNilAndMalformed(t *testing.T) {
-	// 307-309: nil receiver.
+	// 341-343: nil receiver.
 	var nilCache *WrapNonceReplayCache
 	if _, err := nilCache.InsertIfAbsent(protocol.RoutePreludeEnvelope{}); err == nil ||
 		!strings.Contains(err.Error(), "missing route wrap nonce replay cache") {
 		t.Fatalf("nilCache.InsertIfAbsent: err = %v, want missing route wrap nonce replay cache", err)
 	}
 
-	// 311-313 + routeWrapNonceReplayKey 332-334: HintIssuerID not 16 bytes makes the
+	// 344-346 + routeWrapNonceReplayKey 421-423: HintIssuerID not 16 bytes makes the
 	// replay-key encoder reject the fixed opaque length.
 	c := NewWrapNonceReplayCache()
 	bad := protocol.RoutePreludeEnvelope{
@@ -209,7 +209,7 @@ func TestWrapNonceReplayCacheRejectsNilAndMalformed(t *testing.T) {
 }
 
 func TestHopPreludeTranscriptHashRejectsOverflow(t *testing.T) {
-	// 350-352: Encode(p0) fails because RequestedRouteModeID overflows the varint range.
+	// 439-441: Encode(p0) fails because RequestedRouteModeID overflows the varint range.
 	// p1 is never encoded (p0 errors first), so a zero value suffices.
 	p0 := routeCovEncodablePrivatePrelude()
 	p0.RequestedRouteModeID = routeCovMaxVarint
@@ -218,7 +218,7 @@ func TestHopPreludeTranscriptHashRejectsOverflow(t *testing.T) {
 		t.Fatalf("HopPreludeTranscriptHash(p0 overflow): err = %v, want varint out of range", err)
 	}
 
-	// 354-356: p0 encodes cleanly, then Encode(p1.Unsigned()) fails because
+	// 443-445: p0 encodes cleanly, then Encode(p1.Unsigned()) fails because
 	// RouteInstanceID overflows. The fixed-length fields before it must be exact.
 	p0 = routeCovEncodablePrivatePrelude()
 	p1 := protocol.RoutePrelude1{
@@ -243,7 +243,7 @@ func TestValidateRoutePreludeMetadataRejectsMismatch(t *testing.T) {
 		NextRelayDescriptorHash:        rb(0, 48),
 	}
 
-	// 446-448: response RouteInstanceID differs from request.
+	// 535-537: response RouteInstanceID differs from request.
 	p1 := protocol.RoutePrelude1{
 		RouteInstanceID:                2,
 		HopIndex:                       0,
@@ -256,7 +256,7 @@ func TestValidateRoutePreludeMetadataRejectsMismatch(t *testing.T) {
 		t.Fatalf("metadata mismatch: err = %v, want does not match request", err)
 	}
 
-	// 449-451: metadata matches but ServerNonce is not 32 bytes.
+	// 538-540: metadata matches but ServerNonce is not 32 bytes.
 	p1 = protocol.RoutePrelude1{
 		RouteInstanceID:                1,
 		HopIndex:                       0,
@@ -288,7 +288,7 @@ func TestValidateRoutePreludeHybridSharesRejectsMalformed(t *testing.T) {
 	base := signedRoutePreludeVerificationInput(t)
 	suite := base.Suite
 
-	// 456-458: client classical share malformed.
+	// 545-547: client classical share malformed.
 	p0 := base.Prelude0
 	p0.ClientClassicalEphPub = []byte{0x01}
 	if err := ValidateRoutePreludeHybridShares(suite, p0, base.Prelude1); err == nil ||
@@ -296,7 +296,7 @@ func TestValidateRoutePreludeHybridSharesRejectsMalformed(t *testing.T) {
 		t.Fatalf("client classical: err = %v, want malformed client classical share", err)
 	}
 
-	// 459-461: server classical share malformed (client classical still valid).
+	// 548-550: server classical share malformed (client classical still valid).
 	p1 := base.Prelude1
 	p1.ServerClassicalEphPub = []byte{0x01}
 	if err := ValidateRoutePreludeHybridShares(suite, base.Prelude0, p1); err == nil ||
@@ -304,7 +304,7 @@ func TestValidateRoutePreludeHybridSharesRejectsMalformed(t *testing.T) {
 		t.Fatalf("server classical: err = %v, want malformed server classical share", err)
 	}
 
-	// 462-464: client ML-KEM encapsulation key malformed (both classical valid).
+	// 551-553: client ML-KEM encapsulation key malformed (both classical valid).
 	p0 = base.Prelude0
 	p0.ClientMLKEMEncapsulationKey = []byte{0x01}
 	if err := ValidateRoutePreludeHybridShares(suite, p0, base.Prelude1); err == nil ||
@@ -312,7 +312,7 @@ func TestValidateRoutePreludeHybridSharesRejectsMalformed(t *testing.T) {
 		t.Fatalf("client ML-KEM: err = %v, want malformed client ML-KEM share", err)
 	}
 
-	// 465-467: server ML-KEM ciphertext malformed (all prior shares valid).
+	// 554-556: server ML-KEM ciphertext malformed (all prior shares valid).
 	p1 = base.Prelude1
 	p1.ServerMLKEMCiphertextToClient = []byte{0x01}
 	if err := ValidateRoutePreludeHybridShares(suite, base.Prelude0, p1); err == nil ||
@@ -332,10 +332,10 @@ func TestValidatePrivatePreludeHeaderDecidesPerCondition(t *testing.T) {
 		private PrivatePrelude
 		wantSub string
 	}{
-		// 472-474: wrong message type (also covered indirectly via OpenPrivatePrelude;
+		// 561-563: wrong message type (also covered indirectly via OpenPrivatePrelude;
 		// included here to document the decision table).
 		{"wrong message type", PrivatePrelude{MsgType: 0xBAD, Version: registry.Version20}, "private prelude message type"},
-		// 475-477: wrong version (the previously-uncovered gap).
+		// 564-566: wrong version (the previously-uncovered gap).
 		{"wrong version", PrivatePrelude{MsgType: registry.MsgRoutePrelude0, Version: 0xBAD}, "private prelude version"},
 		// Valid header accepted.
 		{"valid header", PrivatePrelude{MsgType: registry.MsgRoutePrelude0, Version: registry.Version20}, ""},
@@ -369,14 +369,14 @@ func TestContainsUint64(t *testing.T) {
 func TestSealAndOpenPrivatePreludeErrorPaths(t *testing.T) {
 	env := routeTestEnvelope()
 
-	// SealPrivatePrelude 170-172: RoutePreludeWrapContext rejects a non-route wrap suite.
+	// SealPrivatePrelude 171-173: RoutePreludeWrapContext rejects a non-route wrap suite.
 	badSuiteEnv := env
 	badSuiteEnv.WrapSuiteID = 0xBAD
 	if _, err := SealPrivatePrelude(badSuiteEnv, routeTestPrivatePrelude(t, env)); err == nil {
 		t.Fatalf("SealPrivatePrelude(bad wrap suite): expected error, got nil")
 	}
 
-	// SealPrivatePrelude 185-187: wrap context ok, but Encode(private) fails because an
+	// SealPrivatePrelude 186-188: wrap context ok, but Encode(private) fails because an
 	// un-overwritten field (OfferedSuites) overflows the varint range.
 	overflowPrivate := routeTestPrivatePrelude(t, env)
 	overflowPrivate.OfferedSuites = []uint64{routeCovMaxVarint}
@@ -385,13 +385,13 @@ func TestSealAndOpenPrivatePreludeErrorPaths(t *testing.T) {
 		t.Fatalf("SealPrivatePrelude(overflow offered suites): err = %v, want varint out of range", err)
 	}
 
-	// OpenPrivatePrelude 212-214: envelope matches env (validateEnvelopeInput passes),
+	// OpenPrivatePrelude 213-215: envelope matches env (validateEnvelopeInput passes),
 	// but the sealed prelude is garbage so the AEAD open fails.
 	if _, err := OpenPrivatePrelude(env, routeCovMatchingEnvelope(env)); err == nil {
 		t.Fatalf("OpenPrivatePrelude(garbage sealed): expected error, got nil")
 	}
 
-	// OpenAndVerifyPrivatePrelude 245-247: a mismatched envelope fails
+	// OpenAndVerifyPrivatePrelude 246-248: a mismatched envelope fails
 	// validateEnvelopeInput inside OpenPrivatePrelude, which propagates.
 	mismatched := routeCovMatchingEnvelope(env)
 	mismatched.RouteInstanceID = env.RouteInstanceID + 1
@@ -400,7 +400,7 @@ func TestSealAndOpenPrivatePreludeErrorPaths(t *testing.T) {
 		t.Fatalf("OpenAndVerifyPrivatePrelude(mismatched envelope): expected error, got nil")
 	}
 
-	// OpenAndVerifyPrivatePreludeWithWrapNonceCache 268-270: same propagation path.
+	// OpenAndVerifyPrivatePreludeWithWrapNonceCache 268-271: same propagation path.
 	if _, _, err := OpenAndVerifyPrivatePreludeWithWrapNonceCache(nil, NewWrapNonceReplayCache(), env, mismatched, cred, 0, 0); err == nil {
 		t.Fatalf("OpenAndVerifyPrivatePreludeWithWrapNonceCache(mismatched envelope): expected error, got nil")
 	}
@@ -414,60 +414,60 @@ func TestVerifyRoutePrelude1SignaturesDecidesPerCondition(t *testing.T) {
 		wantAnyErr bool   // true => assert err != nil without a substring (crypto/wire msg)
 	}{
 		{"valid signatures accepted", nil, "", false},
-		// 365-367: private header invalid (version 0 fails the header check before any
+		// 454-456: private header invalid (version 0 fails the header check before any
 		// p1/descriptor check).
 		{"private header invalid", func(in *RoutePreludeVerificationInput) { in.Prelude0.Version = 0 }, "private prelude version", false},
-		// 368-370: Prelude1 fails ValidateStructural (message type).
+		// 457-459: Prelude1 fails ValidateStructural (message type).
 		{"prelude1 structural invalid", func(in *RoutePreludeVerificationInput) { in.Prelude1.MsgType = 0xBAD }, "message type", false},
-		// 377-379: SelectedSuite != Suite.
+		// 466-468: SelectedSuite != Suite.
 		{"selected suite mismatch", func(in *RoutePreludeVerificationInput) { in.Suite = registry.SuiteHybrid1024AESGCM }, "selected suite mismatch", false},
-		// 380-382: suite matches but was not offered by the client.
+		// 469-471: suite matches but was not offered by the client.
 		{"selected suite not offered", func(in *RoutePreludeVerificationInput) {
 			in.Suite = registry.SuiteHybrid1024AESGCM
 			in.Prelude1.SelectedSuite = registry.SuiteHybrid1024AESGCM
 		}, "selected suite was not offered", false},
-		// 383-385: suite offered but not in the descriptor's supported list.
+		// 472-474: suite offered but not in the descriptor's supported list.
 		{"selected suite not supported by descriptor", func(in *RoutePreludeVerificationInput) {
 			in.Descriptor.SupportedSuiteIDs = []uint64{registry.SuiteHybrid1024AESGCM}
 		}, "selected suite is not supported by descriptor", false},
-		// 386-388: metadata mismatch (RouteInstanceID differs).
+		// 475-477: metadata mismatch (RouteInstanceID differs).
 		{"metadata mismatch", func(in *RoutePreludeVerificationInput) {
 			in.Prelude1.RouteInstanceID = in.Prelude0.RouteInstanceID + 1
 		}, "does not match request", false},
-		// 389-391: malformed client classical share.
+		// 478-480: malformed client classical share.
 		{"malformed hybrid shares", func(in *RoutePreludeVerificationInput) {
 			in.Prelude0.ClientClassicalEphPub = []byte{0x01}
 		}, "malformed client classical share", false},
-		// 401-403: RouteHopBinding fails (ClientNonce wrong length).
+		// 490-492: RouteHopBinding fails (ClientNonce wrong length).
 		{"route hop binding error", func(in *RoutePreludeVerificationInput) {
 			in.Prelude0.ClientNonceForThisHop = rb(0x45, 31)
 		}, "fixed opaque length", false},
-		// 407-409: NextRelayEpochID != descriptor EpochID (NowUnix stays 0 so the
+		// 496-498: NextRelayEpochID != descriptor EpochID (NowUnix stays 0 so the
 		// validity-window check at 410 is skipped).
 		{"next relay epoch mismatch", func(in *RoutePreludeVerificationInput) {
 			in.Descriptor.EpochID = 99
 		}, "next relay epoch mismatch", false},
-		// 414-416: RelayDescriptorHash fails to encode (SupportedSuiteIDs overflow;
+		// 503-505: RelayDescriptorHash fails to encode (SupportedSuiteIDs overflow;
 		// 768 still present so 383 passes).
 		{"descriptor hash computation error", func(in *RoutePreludeVerificationInput) {
 			in.Descriptor.SupportedSuiteIDs = append(in.Descriptor.SupportedSuiteIDs, routeCovMaxVarint)
 		}, "varint out of range", false},
-		// 417-419: descriptor hash recomputes to a different value (RelayID changed);
+		// 506-508: descriptor hash recomputes to a different value (RelayID changed);
 		// p0/p1 still carry the original hash.
 		{"descriptor hash mismatch", func(in *RoutePreludeVerificationInput) {
 			in.Descriptor.RelayID = append([]byte(nil), in.Descriptor.RelayID...)
 			in.Descriptor.RelayID[0] ^= 0xff
 		}, "next relay descriptor hash mismatch", false},
-		// 421-423: HopPreludeTranscriptHash fails (RequestedRouteModeID overflow; not
+		// 510-512: HopPreludeTranscriptHash fails (RequestedRouteModeID overflow; not
 		// part of RouteHopBinding or the descriptor hash, so all prior checks pass).
 		{"transcript hash error", func(in *RoutePreludeVerificationInput) {
 			in.Prelude0.RequestedRouteModeID = routeCovMaxVarint
 		}, "varint out of range", false},
-		// 424-426: classical signature absent.
+		// 513-515: classical signature absent.
 		{"missing classical signature", func(in *RoutePreludeVerificationInput) {
 			in.Prelude1.ServerPreludeSignatureClassical = nil
 		}, "missing classical route prelude signature", false},
-		// 427-429: classical signature present but invalid (corrupted).
+		// 516-518: classical signature present but invalid (corrupted).
 		{"classical signature invalid", func(in *RoutePreludeVerificationInput) {
 			sig := append([]byte(nil), in.Prelude1.ServerPreludeSignatureClassical...)
 			if len(sig) > 0 {
@@ -475,11 +475,11 @@ func TestVerifyRoutePrelude1SignaturesDecidesPerCondition(t *testing.T) {
 			}
 			in.Prelude1.ServerPreludeSignatureClassical = sig
 		}, "", true},
-		// 432-434: PQ signature absent (always required per spec section 17.9).
+		// 521-523: PQ signature absent (always required per spec section 17.9).
 		{"missing PQ signature", func(in *RoutePreludeVerificationInput) {
 			in.Prelude1.ServerPreludeSignaturePQ = nil
 		}, "missing PQ route prelude signature", false},
-		// 435-437: PQ signature present but invalid (garbage verified against the
+		// 524-526: PQ signature present but invalid (garbage verified against the
 		// ECDSA epoch-auth key).
 		{"PQ signature invalid", func(in *RoutePreludeVerificationInput) {
 			in.Prelude1.ServerPreludeSignaturePQ = rb(0xff, 64)

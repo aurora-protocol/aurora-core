@@ -3,6 +3,7 @@ package route
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"sync"
 
 	"github.com/aurora-protocol/aurora-core/admission"
@@ -271,9 +272,25 @@ func OpenAndVerifyPrivatePreludeWithWrapNonceCache(accessHintCache admission.Rep
 	if wrapNonceCache == nil {
 		return PrivatePrelude{}, nil, fmt.Errorf("route: missing route wrap nonce replay cache")
 	}
-	if ok, err := wrapNonceCache.InsertIfAbsent(envelope); err != nil {
+	// The wrap nonce only needs to be retained while the credential it guards
+	// could still verify: VerifyAndSpendAccessHintAt rejects expired hints and
+	// relay epochs regardless of wrap-nonce state, so the record carries the
+	// same retention deadline as the spent-hint record. Without a time source
+	// the insert is permanent, matching the access-hint cache's fallback.
+	var inserted bool
+	if nowUnix == 0 {
+		inserted, err = wrapNonceCache.InsertIfAbsent(envelope)
+	} else {
+		var deadline uint64
+		deadline, err = admission.MaximumRetentionDeadline(cred.ExpiryUnix, relayEpochValidUntilUnix)
+		if err == nil {
+			inserted, err = wrapNonceCache.InsertIfAbsentUntil(envelope, deadline, nowUnix)
+		}
+	}
+	if err != nil {
 		return PrivatePrelude{}, nil, err
-	} else if !ok {
+	}
+	if !inserted {
 		return PrivatePrelude{}, nil, fmt.Errorf("route: duplicate route wrap nonce")
 	}
 	binding, err := RouteHopBinding(HopBindingInput{
@@ -294,15 +311,32 @@ func OpenAndVerifyPrivatePreludeWithWrapNonceCache(accessHintCache admission.Rep
 	return private, binding, nil
 }
 
+// WrapNonceReplayCache retains the (hint_issuer_id, relay_bucket_id,
+// hint_epoch_id, hint_selector, wrap_nonce) tuples of accepted route prelude
+// envelopes so a relay rejects the duplicate wrap nonces that spec section
+// 17.6 prohibits before AccessHint spending. Records inserted with
+// InsertIfAbsentUntil are swept once their retention deadline passes: a
+// replayed envelope past that horizon can no longer verify, because
+// admission.VerifyAndSpendAccessHintAt rejects expired hints and relay epochs
+// regardless of wrap-nonce state. Records inserted with InsertIfAbsent are
+// permanent, matching the no-time-source fallback of the access-hint cache.
+// An invalid retention window is a fail-closed error: the envelope is
+// rejected and nothing is recorded.
 type WrapNonceReplayCache struct {
 	mu   sync.Mutex
-	seen map[string]struct{}
+	seen map[string]uint64
+	// minDeadline is the earliest retention deadline held, so expired records
+	// can be dropped without scanning until one of them has actually expired.
+	// Records inserted without retention are permanent and never contribute.
+	minDeadline uint64
 }
 
 func NewWrapNonceReplayCache() *WrapNonceReplayCache {
-	return &WrapNonceReplayCache{seen: make(map[string]struct{})}
+	return &WrapNonceReplayCache{seen: make(map[string]uint64), minDeadline: math.MaxUint64}
 }
 
+// InsertIfAbsent records the envelope's wrap nonce permanently and reports
+// whether it was absent.
 func (c *WrapNonceReplayCache) InsertIfAbsent(envelope protocol.RoutePreludeEnvelope) (bool, error) {
 	if c == nil {
 		return false, fmt.Errorf("route: missing route wrap nonce replay cache")
@@ -313,11 +347,66 @@ func (c *WrapNonceReplayCache) InsertIfAbsent(envelope protocol.RoutePreludeEnve
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ok := c.seen[string(key)]; ok {
+	k := string(key)
+	if _, ok := c.seen[k]; ok {
 		return false, nil
 	}
-	c.seen[string(key)] = struct{}{}
+	c.seen[k] = 0
 	return true, nil
+}
+
+// InsertIfAbsentUntil records the envelope's wrap nonce until
+// retainUntilUnix and reports whether it was absent. The retention window is
+// validated fail-closed: an invalid window rejects the envelope with an error
+// and records nothing.
+func (c *WrapNonceReplayCache) InsertIfAbsentUntil(envelope protocol.RoutePreludeEnvelope, retainUntilUnix, nowUnix uint64) (bool, error) {
+	if c == nil {
+		return false, fmt.Errorf("route: missing route wrap nonce replay cache")
+	}
+	if retainUntilUnix == 0 || nowUnix == 0 || retainUntilUnix <= nowUnix {
+		return false, fmt.Errorf("route: route wrap nonce replay retention window is invalid")
+	}
+	key, err := routeWrapNonceReplayKey(envelope)
+	if err != nil {
+		return false, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// One-time credentials are rarely presented twice, so a record that is only
+	// dropped when its own key returns would be retained for the process
+	// lifetime. Reclaim every expired record once the earliest one has passed.
+	if c.minDeadline <= nowUnix {
+		c.expireLocked(nowUnix)
+	}
+	k := string(key)
+	if previous, ok := c.seen[k]; ok {
+		if previous == 0 || previous > nowUnix {
+			return false, nil
+		}
+		delete(c.seen, k)
+	}
+	c.seen[k] = retainUntilUnix
+	if retainUntilUnix < c.minDeadline {
+		c.minDeadline = retainUntilUnix
+	}
+	return true, nil
+}
+
+func (c *WrapNonceReplayCache) expireLocked(nowUnix uint64) {
+	earliest := uint64(math.MaxUint64)
+	for key, deadline := range c.seen {
+		if deadline == 0 {
+			continue
+		}
+		if deadline <= nowUnix {
+			delete(c.seen, key)
+			continue
+		}
+		if deadline < earliest {
+			earliest = deadline
+		}
+	}
+	c.minDeadline = earliest
 }
 
 func routeWrapNonceReplayKey(envelope protocol.RoutePreludeEnvelope) ([]byte, error) {

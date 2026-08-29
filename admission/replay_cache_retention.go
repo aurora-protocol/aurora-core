@@ -234,6 +234,13 @@ func (c *RetentionFileReplayCache) consume(file *os.File, offset int64) (int64, 
 			if record := strings.TrimSuffix(line, "\n"); record != "" {
 				key, deadline, err := c.parseRecord(record)
 				if err != nil {
+					if !terminated && errors.Is(readErr, io.EOF) {
+						// The append was torn inside a field. It was never
+						// acknowledged (append syncs before reporting success), so
+						// nothing admitted is lost by repairing it; a corrupt
+						// terminated record still fails closed.
+						return offset, true, nil
+					}
 					return 0, false, err
 				}
 				c.seen[key] = deadline

@@ -149,6 +149,17 @@ func Load(dir string, now time.Time) (*Loaded, error) {
 	}
 	zeroLabBytes(authorityEncoded)
 	loaded.IssuerAuthority = authority
+	// Re-verify the issuer side the same way the relay deployment is
+	// re-verified above: the metadata must carry a valid signature from the
+	// minted issuer authority and the single scope/policy the lab issuer
+	// service binds to. A tampered file fails closed here instead of
+	// crashing NewServer.
+	if err := trust.VerifyIssuerMetadataSignature(metadata, []protocol.AuthorityKeyRecord{authority}, uint64(now.Unix())); err != nil {
+		return nil, fmt.Errorf("labfixture: verify minted issuer metadata: %w", err)
+	}
+	if len(metadata.RelayBucketScopes) == 0 || len(metadata.OriginInfoPolicies) == 0 {
+		return nil, fmt.Errorf("labfixture: minted issuer metadata must carry a relay bucket scope and an origin info policy")
+	}
 
 	blindRSAKey, err := loadLabBlindRSAKey(filepath.Join(dir, FileIssuerBlindRSAKey))
 	if err != nil {

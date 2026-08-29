@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,9 +99,15 @@ func readImportCodeWallet(path string) ([]byte, error) {
 }
 
 // writeImportCodeFile writes the provisioning code owner-only with a trailing
-// newline, replacing any previously generated code for the same wallet.
+// newline, replacing any previously generated code for the same wallet. The
+// previous output (including a planted symlink) is removed first so the
+// exclusive create below can never truncate an unrelated file or inherit a
+// stale, wider permission mode for the live lab credential.
 func writeImportCodeFile(path, code string) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("auroralab import-code: remove previous %s: %w", importCodeFileName, err)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("auroralab import-code: create %s: %w", importCodeFileName, err)
 	}

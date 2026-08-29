@@ -3,12 +3,21 @@ package evaluation
 import (
 	"fmt"
 	"math"
+
+	"github.com/aurora-protocol/aurora-core/failure"
 )
 
 // maxClassifierAllowedAdvantage is the deployment threshold for DPI classifier
 // advantage. It matches the 0.02 bar auroractl classifier-check enforces via
 // cover.EvaluateProductionCandidate.
 const maxClassifierAllowedAdvantage = 0.02
+
+// minActiveProbeCases is the number of probe cases an active-probe report must
+// cover: the full matrix failure.ActiveProbeCases() requires, so the evidence
+// bar cannot drift below the harness when new probes are added.
+func minActiveProbeCases() int {
+	return len(failure.ActiveProbeCases())
+}
 
 type EvidenceBundle struct {
 	BundleID                     string
@@ -145,7 +154,7 @@ func ExternalEvaluationHarnessBundle() EvidenceBundle {
 		ActiveProbeReports: []ActiveProbeReport{{
 			ReportID:                  "active-probe-report",
 			IndependentLab:            true,
-			ProbeCases:                14,
+			ProbeCases:                minActiveProbeCases(),
 			OrdinaryOriginControl:     true,
 			DistinguishableFailures:   0,
 			ForbiddenPublicMarkers:    0,
@@ -277,7 +286,7 @@ func verifyActiveProbeEvidence(reports []ActiveProbeReport, out *EvidenceReport)
 			out.addFinding("active-probe report is not independent")
 			passed = false
 		}
-		if report.ProbeCases < 14 {
+		if report.ProbeCases < minActiveProbeCases() {
 			out.addFinding("active-probe report has incomplete probe coverage")
 			passed = false
 		}

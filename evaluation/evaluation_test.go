@@ -3,6 +3,8 @@ package evaluation
 import (
 	"math"
 	"testing"
+
+	"github.com/aurora-protocol/aurora-core/failure"
 )
 
 func TestVerifyExternalEvaluationEvidenceAcceptsCompleteBundle(t *testing.T) {
@@ -218,5 +220,30 @@ func TestVerifyExternalEvaluationEvidenceRejectsNegativeClassifierAdvantage(t *t
 	}
 	if !evaluationReportHasFinding(report, "classifier advantage is not a finite measurement") {
 		t.Fatalf("report missing invalid-measurement finding: %+v", report)
+	}
+}
+
+// TestVerifyActiveProbeEvidenceTracksProbeMatrix proves the active-probe
+// coverage bar cannot drift below the probe matrix the failure package
+// actually requires: a report covering one probe fewer than
+// failure.ActiveProbeCases() must fail, and the harness bundle must claim
+// exactly that many so the two cannot silently diverge again.
+func TestVerifyActiveProbeEvidenceTracksProbeMatrix(t *testing.T) {
+	required := len(failure.ActiveProbeCases())
+	bundle := ExternalEvaluationHarnessBundle()
+	if got := bundle.ActiveProbeReports[0].ProbeCases; got != required {
+		t.Fatalf("harness bundle claims %d probe cases, failure matrix has %d", got, required)
+	}
+
+	bundle.ActiveProbeReports[0].ProbeCases = required - 1
+	report, err := VerifyExternalEvaluationEvidence(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ActiveProbeEvidence || report.Passed {
+		t.Fatalf("report covering %d of %d probe cases accepted: %+v", required-1, required, report)
+	}
+	if !evaluationReportHasFinding(report, "active-probe report has incomplete probe coverage") {
+		t.Fatalf("report missing incomplete-coverage finding: %+v", report)
 	}
 }

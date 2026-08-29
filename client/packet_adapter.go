@@ -22,14 +22,18 @@ import (
 )
 
 const (
-	defaultPacketAdapterFlows                = 256
-	maximumPacketAdapterFlows                = 4096
-	defaultPacketAdapterPacketBytes          = 65535
-	minimumPacketAdapterPacketBytes          = 128
-	maximumPacketAdapterPacketBytes          = 65535
-	defaultPacketAdapterLocalPackets         = 256
-	maximumPacketAdapterLocalPackets         = 4096
-	defaultPacketAdapterDNSLifetime          = 15 * time.Second
+	defaultPacketAdapterFlows        = 256
+	maximumPacketAdapterFlows        = 4096
+	defaultPacketAdapterPacketBytes  = 65535
+	minimumPacketAdapterPacketBytes  = 128
+	maximumPacketAdapterPacketBytes  = 65535
+	defaultPacketAdapterLocalPackets = 256
+	maximumPacketAdapterLocalPackets = 4096
+	defaultPacketAdapterDNSLifetime  = 15 * time.Second
+	// Matches the relay's UDP target-confirm TTL: an association idle for
+	// longer than that is already unusable, so the adapter must not keep
+	// mirroring it against the flow limit.
+	defaultPacketAdapterUDPIdleLifetime      = 300 * time.Second
 	maximumPacketAdapterDNSMessageBytes      = 4096
 	defaultPacketAdapterIPv4FragmentLifetime = 15 * time.Second
 	maximumPacketAdapterIPv4FragmentSets     = 32
@@ -119,6 +123,7 @@ type packetAdapterFlow struct {
 	relayNextSequence  uint32
 	localClosed        bool
 	peerClosed         bool
+	lastActivity       time.Time
 }
 
 type packetAdapterDNSRequest struct {
@@ -311,6 +316,7 @@ func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Ti
 	}
 	a.expireIPv4FragmentsLocked(now)
 	a.expireIPv6FragmentsLocked(now)
+	a.expireUDPFlowsLocked(now)
 	hasDNSAnswers := a.dnsAnswers != nil
 	a.mu.Unlock()
 	if fragment, fragmented, err := parsePacketAdapterIPv4Fragment(encoded, a.maximumPacket); err != nil {
@@ -645,6 +651,7 @@ func (a *PacketAdapter) ingressUDPLocked(ctx context.Context, packet packetAdapt
 	frames := make([]protocol.AuroraFrame, 0, 2)
 	var data protocol.AuroraFrame
 	if mapping != nil {
+		mapping.lastActivity = now
 		data, err := a.proxy.SendUDPWithOptions(mapping.flowID, packet.udp.payload, UDPSendOptions{NowUnix: uint64(now.Unix()), UDPMode: a.udpMode})
 		if err != nil {
 			if a.proxy.HasFlow(mapping.flowID) {
@@ -673,7 +680,7 @@ func (a *PacketAdapter) ingressUDPLocked(ctx context.Context, packet packetAdapt
 		if err != nil {
 			return err
 		}
-		mapping = &packetAdapterFlow{flowID: flowID, tuple: tuple, kind: flow.FlowKindUDPAssociation}
+		mapping = &packetAdapterFlow{flowID: flowID, tuple: tuple, kind: flow.FlowKindUDPAssociation, lastActivity: now}
 		frames = append(frames, open)
 		data, err = a.proxy.SendUDPWithOptions(mapping.flowID, packet.udp.payload, UDPSendOptions{NowUnix: uint64(now.Unix()), UDPMode: a.udpMode})
 		if err != nil {
@@ -796,7 +803,7 @@ func (a *PacketAdapter) handleRelayFrameLocked(frame protocol.AuroraFrame, now t
 	case registry.FrameFlowClose:
 		return a.handleRelayCloseLocked(frame, now)
 	case registry.FrameStreamData, registry.FrameDatagramData:
-		return a.handleRelayDataLocked(frame)
+		return a.handleRelayDataLocked(frame, now)
 	default:
 		return nil, fmt.Errorf("client: packet adapter received unsupported relay frame 0x%x", frame.FrameType)
 	}
@@ -826,7 +833,7 @@ func (a *PacketAdapter) handleRelayDNSLocked(frame protocol.AuroraFrame, now tim
 	return [][]byte{packet}, nil
 }
 
-func (a *PacketAdapter) handleRelayDataLocked(frame protocol.AuroraFrame) ([][]byte, error) {
+func (a *PacketAdapter) handleRelayDataLocked(frame protocol.AuroraFrame, now time.Time) ([][]byte, error) {
 	mapping := a.flowsByID[frame.FlowID]
 	if mapping == nil {
 		// The flow was retired locally (a local reset or a completed close) while
@@ -852,6 +859,9 @@ func (a *PacketAdapter) handleRelayDataLocked(frame protocol.AuroraFrame) ([][]b
 		if frame.FrameType != registry.FrameDatagramData && (frame.FrameType != registry.FrameStreamData || a.udpMode != transport.UDPOverStreamFallback) {
 			return nil, fmt.Errorf("client: packet adapter received invalid UDP data frame")
 		}
+		// Relayed datagrams keep the association alive: a long inbound-only
+		// transfer must not be swept out from under the client.
+		mapping.lastActivity = now
 		packet, err := buildPacketAdapterUDPPacket(mapping.tuple.version, mapping.tuple.target, mapping.tuple.client, mapping.tuple.targetPort, mapping.tuple.clientPort, frame.Payload, a.nextPacketID)
 		if err != nil {
 			return nil, err
@@ -1000,6 +1010,21 @@ func (a *PacketAdapter) removeFlowLocked(mapping *packetAdapterFlow) {
 	delete(a.flowsByTuple, mapping.tuple)
 	delete(a.flowsByID, mapping.flowID)
 	_ = a.proxy.Close(mapping.flowID)
+}
+
+// expireUDPFlowsLocked retires UDP associations the client stopped using. TCP
+// mappings are reclaimed by their own close handshake, but a UDP conversation
+// has no close, so without this sweep idle associations accumulate until the
+// adapter refuses every new flow.
+func (a *PacketAdapter) expireUDPFlowsLocked(now time.Time) {
+	for _, mapping := range a.flowsByID {
+		if mapping.kind != flow.FlowKindUDPAssociation || mapping.lastActivity.IsZero() {
+			continue
+		}
+		if now.Sub(mapping.lastActivity) >= defaultPacketAdapterUDPIdleLifetime {
+			a.removeFlowLocked(mapping)
+		}
+	}
 }
 
 func (a *PacketAdapter) expireDNSRequestsLocked(now time.Time) {

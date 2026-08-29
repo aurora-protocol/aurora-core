@@ -14,7 +14,7 @@ package client
 // reachable), so the unknown-flow nil clause stayed count-0 even though it is
 // plainly reachable with an empty adapter.
 //
-// Proof: (&PacketAdapter{}).handleRelayDataLocked(protocol.AuroraFrame{FlowID: 1})
+// Proof: (&PacketAdapter{}).handleRelayDataLocked(protocol.AuroraFrame{FlowID: 1}, time.Unix(1_700_000_000, 0))
 // — the nil flowsByID map returns nil at :799, so the retired-flow branch drops
 // the frame without touching mapping.peerClosed (which would panic on nil). The
 // peerClosed clause is proved separately with an installed flow.
@@ -35,6 +35,7 @@ package client
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aurora-protocol/aurora-core/flow"
 	"github.com/aurora-protocol/aurora-core/protocol"
@@ -44,7 +45,7 @@ func TestPacketAdapterHandleRelayDataLockedUnknownFlowGuard(t *testing.T) {
 	// 800: an empty flowsByID map returns nil for an unknown FlowID; mapping == nil
 	// takes the retired-flow branch and drops the frame without dereferencing
 	// mapping.peerClosed (which would panic on nil).
-	packets, err := (&PacketAdapter{}).handleRelayDataLocked(protocol.AuroraFrame{FlowID: 1})
+	packets, err := (&PacketAdapter{}).handleRelayDataLocked(protocol.AuroraFrame{FlowID: 1}, time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatalf("handleRelayDataLocked(unknown flow) err = %v, want nil (retired-flow drop)", err)
 	}
@@ -59,7 +60,7 @@ func TestPacketAdapterHandleRelayDataLockedPeerClosedGuard(t *testing.T) {
 	a := &PacketAdapter{flowsByID: map[uint64]*packetAdapterFlow{
 		1: {flowID: 1, kind: flow.FlowKindTCPStream, peerClosed: true},
 	}}
-	_, err := a.handleRelayDataLocked(protocol.AuroraFrame{FlowID: 1})
+	_, err := a.handleRelayDataLocked(protocol.AuroraFrame{FlowID: 1}, time.Unix(1_700_000_000, 0))
 	if err == nil {
 		t.Fatal("handleRelayDataLocked(peer-closed flow) err = nil, want non-nil")
 	}

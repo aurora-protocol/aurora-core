@@ -211,9 +211,16 @@ func (a *Application) handleKeyControlsLocked(ctx context.Context, now time.Time
 	if controls.ack != nil && !a.acceptsControlKeyPhaseLocked(packetKeyPhase, now) {
 		return nil, fmt.Errorf("session: key update acknowledgement is not under an active read phase")
 	}
+	applyACK := false
 	if controls.ack != nil {
 		a.pinWriteDrainLocked(now)
 		defer a.unpinWriteDrainLocked()
+		// A congested carrier can deliver the acknowledgement after the bounded
+		// write drain has already completed the update it acknowledges. The
+		// acknowledgement is then redundant rather than a protocol violation,
+		// so it is dropped and the rest of the packet is still delivered. An
+		// acknowledgement that matches no completed update stays terminal.
+		applyACK = !a.writeState.AcknowledgesCompletedKeyUpdate(*controls.ack)
 	}
 	if controls.update != nil {
 		a.pinReadDrainLocked(now)
@@ -273,7 +280,7 @@ func (a *Application) handleKeyControlsLocked(ctx context.Context, now time.Time
 
 	var writeCandidate packet.DirectionState
 	haveWriteCandidate := false
-	if controls.ack != nil {
+	if applyACK {
 		writeCandidate = a.writeState.Clone()
 		haveWriteCandidate = true
 		defer func() {

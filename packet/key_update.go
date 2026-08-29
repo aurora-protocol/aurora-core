@@ -318,6 +318,21 @@ func (s *DirectionState) PendingKeyUpdateRetransmission(now time.Time) (protocol
 	return cloneKeyUpdate(s.pendingSentUpdate), cloneKeyMaterial(s.previousMaterial), true
 }
 
+// AcknowledgesCompletedKeyUpdate reports whether ack matches an update this
+// direction has already completed and is no longer waiting on. A delayed
+// acknowledgement can still arrive after the bounded drain window closed the
+// update on its own, which leaves it redundant rather than unsolicited.
+func (s *DirectionState) AcknowledgesCompletedKeyUpdate(ack protocol.KeyUpdateACK) bool {
+	if s.pendingSentUpdateActive || s.KeyPhase == 0 {
+		return false
+	}
+	return ack.RouteInstanceID == s.RouteInstanceID &&
+		ack.HopLayer == s.HopLayer &&
+		ack.AckedDirection == s.Direction &&
+		ack.AckedKeyPhase == s.KeyPhase &&
+		len(ack.AckNonce) <= maxOpaque16Bytes
+}
+
 func (s *DirectionState) ApplyKeyUpdateACK(ack protocol.KeyUpdateACK, now time.Time) error {
 	s.expireDrain(now)
 	if !s.pendingSentUpdateActive {

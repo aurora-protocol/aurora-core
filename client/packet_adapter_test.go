@@ -398,11 +398,11 @@ func TestPacketAdapterReopensExpiredUDPAssociation(t *testing.T) {
 	}
 }
 
-func TestPacketAdapterOpensIPv6TCPFlow(t *testing.T) {
+func TestPacketAdapterOpensAndSegmentsIPv6TCPFlow(t *testing.T) {
 	clientApplication, relayApplication := packetAdapterApplications(t)
 	defer clientApplication.Close()
 	defer relayApplication.Close()
-	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, Random: bytes.NewReader(make([]byte, 32))})
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 128, Random: bytes.NewReader(make([]byte, 32))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +420,7 @@ func TestPacketAdapterOpensIPv6TCPFlow(t *testing.T) {
 	if len(localPackets) != 1 {
 		t.Fatalf("IPv6 TCP SYN returned %d local packets", len(localPackets))
 	}
-	local, err := parsePacketAdapterIPPacket(localPackets[0], 1500)
+	local, err := parsePacketAdapterIPPacket(localPackets[0], 128)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,6 +441,34 @@ func TestPacketAdapterOpensIPv6TCPFlow(t *testing.T) {
 	open := protocol.DecodeFlowOpen(packetAdapterReader(blocks[0].Frames[0].Payload))
 	if open.FlowKind != flow.FlowKindTCPStream || open.LocalBindingMode != flow.LocalBindingTUNPacketFlow || !bytes.Equal(open.TargetHost, target.AsSlice()) {
 		t.Fatalf("unexpected IPv6 transparent TCP FLOW_OPEN: %+v", open)
+	}
+	payload := bytes.Repeat([]byte{0x66}, 90)
+	frame, err := protocol.NewStreamDataFrame(blocks[0].Frames[0].FlowID, payload, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packets, err := adapter.HandleFrameBlocks(context.Background(), []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{frame}}}, now)
+	if err != nil {
+		t.Fatalf("large IPv6 relay stream frame ended the session: %v", err)
+	}
+	if len(packets) != 2 {
+		t.Fatalf("large IPv6 relay stream frame returned %d packets, want two", len(packets))
+	}
+	var reassembled []byte
+	wantSequence := local.tcp.sequence + 1
+	for index, encoded := range packets {
+		segment, err := parsePacketAdapterIPPacket(encoded, 128)
+		if err != nil {
+			t.Fatalf("parse IPv6 relay segment %d: %v", index, err)
+		}
+		if segment.version != 6 || segment.source != target || segment.target != source || segment.tcp.sequence != wantSequence || segment.tcp.acknowledgment != 101 || segment.tcp.flags != tcpFlagACK|tcpFlagPSH {
+			t.Fatalf("unexpected IPv6 relay segment %d: %+v", index, segment)
+		}
+		reassembled = append(reassembled, segment.tcp.payload...)
+		wantSequence += uint32(len(segment.tcp.payload))
+	}
+	if !bytes.Equal(reassembled, payload) {
+		t.Fatalf("reassembled IPv6 relay payload length = %d, want %d", len(reassembled), len(payload))
 	}
 }
 
@@ -1446,7 +1474,7 @@ func TestPacketAdapterRejectsMalformedPacketsWithoutFlowAllocation(t *testing.T)
 	}
 }
 
-func TestPacketAdapterRejectsRelayPacketExceedingConfiguredLimit(t *testing.T) {
+func TestPacketAdapterSegmentsRelayStreamDataToConfiguredPacketLimit(t *testing.T) {
 	clientApplication, relayApplication := packetAdapterApplications(t)
 	defer clientApplication.Close()
 	defer relayApplication.Close()
@@ -1463,7 +1491,11 @@ func TestPacketAdapterRejectsRelayPacketExceedingConfiguredLimit(t *testing.T) {
 	if err := adapter.Ingress(context.Background(), syn, now); err != nil {
 		t.Fatal(err)
 	}
-	adapter.DrainLocalPackets()
+	synthetic := adapter.DrainLocalPackets()
+	if len(synthetic) != 1 {
+		t.Fatalf("TCP SYN returned %d local packets, want one", len(synthetic))
+	}
+	synACK := packetAdapterParseTCPv4(t, synthetic[0])
 	if _, err := adapter.NextEncryptedPacket(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -1478,8 +1510,77 @@ func TestPacketAdapterRejectsRelayPacketExceedingConfiguredLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if packets, err := adapter.HandleEncryptedPacket(context.Background(), encrypted, now); err == nil || len(packets) != 0 {
-		t.Fatalf("oversized relay data was delivered to local tunnel: packets=%d err=%v", len(packets), err)
+	packets, err := adapter.HandleEncryptedPacket(context.Background(), encrypted, now)
+	if err != nil {
+		t.Fatalf("large relay stream frame ended the session: %v", err)
+	}
+	if len(packets) != 2 {
+		t.Fatalf("large relay stream frame returned %d packets, want two MTU-sized segments", len(packets))
+	}
+	var reassembled []byte
+	wantSequence := synACK.sequence + 1
+	for index, encoded := range packets {
+		if len(encoded) > 128 {
+			t.Fatalf("segment %d length = %d, want at most 128", index, len(encoded))
+		}
+		segment := packetAdapterParseTCPv4(t, encoded)
+		if segment.sequence != wantSequence || segment.acknowledgment != 101 || segment.flags != tcpFlagACK|tcpFlagPSH {
+			t.Fatalf("segment %d TCP state = %+v, want sequence %d ACK|PSH", index, segment, wantSequence)
+		}
+		reassembled = append(reassembled, segment.payload...)
+		wantSequence += uint32(len(segment.payload))
+	}
+	if !bytes.Equal(reassembled, frame.Payload) {
+		t.Fatalf("reassembled relay payload length = %d, want %d", len(reassembled), len(frame.Payload))
+	}
+	if adapter.FlowCount() != 1 {
+		t.Fatalf("segmented relay data retired the live flow: %d", adapter.FlowCount())
+	}
+}
+
+func TestPacketAdapterBoundsRelayTCPPacketFanout(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{
+		MaxFlows:        8,
+		MaxPacketBytes:  128,
+		MaxLocalPackets: 2,
+		Random:          bytes.NewReader(make([]byte, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	syn := packetAdapterTCPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, 100, 0, tcpFlagSYN, nil)
+	if err := adapter.Ingress(context.Background(), syn, now); err != nil {
+		t.Fatal(err)
+	}
+	adapter.DrainLocalPackets()
+	if _, err := adapter.NextEncryptedPacket(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	beforeSequence := adapter.flowsByID[1].relayNextSequence
+	beforePacketID := adapter.nextPacketID
+	// An IPv4 packet at this MTU can carry 88 TCP payload bytes, so this
+	// frame would require three local packets and must be rejected before any
+	// packet or sequence state is committed.
+	frame, err := protocol.NewStreamDataFrame(1, bytes.Repeat([]byte{0x88}, 177), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packets, err := adapter.HandleFrameBlocks(context.Background(), []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{frame}}}, now)
+	if err == nil {
+		t.Fatal("relay TCP frame exceeding the packet fanout bound was accepted")
+	}
+	if len(packets) != 0 {
+		t.Fatalf("bounded relay TCP frame returned %d packets, want none", len(packets))
+	}
+	if mapping := adapter.flowsByID[1]; mapping == nil || mapping.relayNextSequence != beforeSequence {
+		t.Fatalf("bounded relay TCP frame changed flow sequence state: %+v", mapping)
+	}
+	if adapter.nextPacketID != beforePacketID {
+		t.Fatalf("bounded relay TCP frame consumed packet ID %d, want %d", adapter.nextPacketID, beforePacketID)
 	}
 }
 

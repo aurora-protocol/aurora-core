@@ -47,16 +47,31 @@ func TestPacketTUNRuntimeWritesSyntheticAndRelayPackets(t *testing.T) {
 	}
 
 	flowID := blocks[0].Frames[0].FlowID
-	frame, err := protocol.NewStreamDataFrame(flowID, []byte("response"), 0)
+	relayPayload := bytes.Repeat([]byte{0x72}, 2000)
+	frame, err := protocol.NewStreamDataFrame(flowID, relayPayload, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := runtime.HandleFrameBlock(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}); err != nil {
 		t.Fatal(err)
 	}
-	response := packetAdapterParseTCPv4(t, device.NextWrite(t))
-	if response.flags != tcpFlagACK|tcpFlagPSH || !bytes.Equal(response.payload, []byte("response")) {
-		t.Fatalf("relay local packet = %+v", response)
+	var reassembled []byte
+	for segmentIndex := 0; segmentIndex < 2; segmentIndex++ {
+		encoded := device.NextWrite(t)
+		if len(encoded) > 1500 {
+			t.Fatalf("relay segment %d length = %d, want at most 1500", segmentIndex, len(encoded))
+		}
+		response := packetAdapterParseTCPv4(t, encoded)
+		if response.flags != tcpFlagACK|tcpFlagPSH {
+			t.Fatalf("relay segment %d TCP state = %+v", segmentIndex, response)
+		}
+		reassembled = append(reassembled, response.payload...)
+	}
+	if !bytes.Equal(reassembled, relayPayload) {
+		t.Fatalf("reassembled relay payload length = %d, want %d", len(reassembled), len(relayPayload))
+	}
+	if extra := device.TryWrite(); extra != nil {
+		t.Fatalf("unexpected extra relay segment: %x", extra)
 	}
 
 	if err := runtime.Close(); err != nil {

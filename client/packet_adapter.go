@@ -503,6 +503,11 @@ func (a *PacketAdapter) HandleFrameBlocks(ctx context.Context, blocks []protocol
 				zeroPacketAdapterPacketList(local)
 				return nil, err
 			}
+			if len(packets) > a.maximumLocal-len(local) {
+				zeroPacketAdapterPacketList(packets)
+				zeroPacketAdapterPacketList(local)
+				return nil, fmt.Errorf("client: relay frame block exceeds local packet limit")
+			}
 			local = append(local, packets...)
 		}
 	}
@@ -890,12 +895,7 @@ func (a *PacketAdapter) handleRelayDataLocked(frame protocol.AuroraFrame, now ti
 		if frame.FrameType != registry.FrameStreamData {
 			return nil, fmt.Errorf("client: packet adapter received non-stream TCP data")
 		}
-		packet, err := a.makeTCPPacketLocked(mapping, mapping.relayNextSequence, mapping.clientNextSequence, tcpFlagACK|tcpFlagPSH, frame.Payload)
-		if err != nil {
-			return nil, err
-		}
-		mapping.relayNextSequence += uint32(len(frame.Payload))
-		return [][]byte{packet}, nil
+		return a.makeRelayTCPPacketsLocked(mapping, frame.Payload)
 	case flow.FlowKindUDPAssociation:
 		if frame.FrameType != registry.FrameDatagramData && (frame.FrameType != registry.FrameStreamData || a.udpMode != transport.UDPOverStreamFallback) {
 			return nil, fmt.Errorf("client: packet adapter received invalid UDP data frame")
@@ -915,6 +915,44 @@ func (a *PacketAdapter) handleRelayDataLocked(frame protocol.AuroraFrame, now ti
 	default:
 		return nil, fmt.Errorf("client: packet adapter flow has unsupported kind")
 	}
+}
+
+// makeRelayTCPPacketsLocked segments one relay stream frame into packets that
+// fit the configured TUN MTU. The relay carries a byte stream and cannot know
+// the client's platform MTU, so rejecting a valid large read here would turn
+// ordinary destination traffic into a session-wide failure.
+func (a *PacketAdapter) makeRelayTCPPacketsLocked(mapping *packetAdapterFlow, payload []byte) ([][]byte, error) {
+	headerBytes := 40
+	if mapping.tuple.version == 6 {
+		headerBytes = 60
+	} else if mapping.tuple.version != 4 {
+		return nil, fmt.Errorf("client: packet adapter TCP flow has invalid IP version")
+	}
+	maximumPayload := a.maximumPacket - headerBytes
+	if maximumPayload <= 0 {
+		return nil, fmt.Errorf("client: packet adapter packet limit cannot hold TCP headers")
+	}
+	segmentCount := (len(payload)-1)/maximumPayload + 1
+	if segmentCount > a.maximumLocal {
+		return nil, fmt.Errorf("client: relay TCP data exceeds local packet limit")
+	}
+	packets := make([][]byte, 0, segmentCount)
+	sequence := mapping.relayNextSequence
+	for offset := 0; offset < len(payload); offset += maximumPayload {
+		end := offset + maximumPayload
+		if end > len(payload) {
+			end = len(payload)
+		}
+		packet, err := a.makeTCPPacketLocked(mapping, sequence, mapping.clientNextSequence, tcpFlagACK|tcpFlagPSH, payload[offset:end])
+		if err != nil {
+			zeroPacketAdapterPacketList(packets)
+			return nil, err
+		}
+		packets = append(packets, packet)
+		sequence += uint32(end - offset)
+	}
+	mapping.relayNextSequence = sequence
+	return packets, nil
 }
 
 func (a *PacketAdapter) handleRelayCloseLocked(frame protocol.AuroraFrame, now time.Time) ([][]byte, error) {

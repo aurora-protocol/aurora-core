@@ -200,3 +200,23 @@ func evaluationReportHasFinding(report EvidenceReport, want string) bool {
 	}
 	return false
 }
+
+// TestVerifyExternalEvaluationEvidenceRejectsNegativeClassifierAdvantage proves
+// a report cannot pass by carrying an out-of-domain measurement: classifier
+// advantage is the fraction of separable comparisons, so a negative value is
+// not a measurement at all and must not clear the deployment threshold.
+func TestVerifyExternalEvaluationEvidenceRejectsNegativeClassifierAdvantage(t *testing.T) {
+	bundle := ExternalEvaluationHarnessBundle()
+	bundle.ClassifierReports[0].ClassifierAdvantage = -0.5
+
+	report, err := VerifyExternalEvaluationEvidence(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ClassifierEvidence || report.Passed {
+		t.Fatalf("negative classifier advantage accepted: %+v", report)
+	}
+	if !evaluationReportHasFinding(report, "classifier advantage is not a finite measurement") {
+		t.Fatalf("report missing invalid-measurement finding: %+v", report)
+	}
+}

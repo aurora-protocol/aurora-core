@@ -245,7 +245,9 @@ func verifyClassifierEvidence(reports []ClassifierReport, out *EvidenceReport) b
 		if allowed <= 0 || allowed > maxClassifierAllowedAdvantage || math.IsNaN(allowed) || math.IsInf(allowed, 0) {
 			allowed = maxClassifierAllowedAdvantage
 		}
-		if math.IsNaN(report.ClassifierAdvantage) || math.IsInf(report.ClassifierAdvantage, 0) {
+		// Advantage is the fraction of separable comparisons, so only finite
+		// values in [0, 1] are measurements; anything else is malformed input.
+		if math.IsNaN(report.ClassifierAdvantage) || math.IsInf(report.ClassifierAdvantage, 0) || report.ClassifierAdvantage < 0 {
 			out.addFinding("classifier advantage is not a finite measurement")
 			passed = false
 		} else if report.ClassifierAdvantage > allowed {

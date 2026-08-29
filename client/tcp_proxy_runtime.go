@@ -701,7 +701,7 @@ func (r *TCPProxyRuntime) serveSOCKS5UDPAssociation(ctx context.Context, reader 
 		_ = association.close()
 		return err
 	}
-	defer r.removeUDPAssociation(association)
+	defer r.removeUDPAssociationWithContext(ctx, association)
 	defer association.close()
 
 	address := udpConnection.LocalAddr().(*net.UDPAddr)
@@ -1157,6 +1157,10 @@ func (r *TCPProxyRuntime) addUDPAssociation(association *udpProxyAssociation) er
 }
 
 func (r *TCPProxyRuntime) removeUDPAssociation(association *udpProxyAssociation) {
+	r.removeUDPAssociationWithContext(context.Background(), association)
+}
+
+func (r *TCPProxyRuntime) removeUDPAssociationWithContext(ctx context.Context, association *udpProxyAssociation) {
 	if association == nil {
 		return
 	}
@@ -1178,7 +1182,7 @@ func (r *TCPProxyRuntime) removeUDPAssociation(association *udpProxyAssociation)
 			continue
 		}
 		if notifyPeer {
-			_ = r.application.QueueFrames(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}})
+			_ = r.queueLocalFlowClose(ctx, frame)
 		}
 		zeroTCPProxyBytes(frame.Payload)
 	}

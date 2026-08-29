@@ -151,6 +151,89 @@ func TestTCPProxyRuntimeLocalFlowCloseRetryStopsOnTeardown(t *testing.T) {
 	}
 }
 
+func TestTCPProxyRuntimeRetriesUDPAssociationCloseAfterQueueBackpressure(t *testing.T) {
+	clientApplication, relayApplication := tcpProxyRuntimeApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	runtime, err := NewTCPProxyRuntime(clientApplication, TCPProxyRuntimeOptions{
+		MaxFlows:             1,
+		ReadBufferBytes:      1024,
+		MaxPendingWriteBytes: 1024,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	const flowID = 93
+	open, err := runtime.proxy.OpenUDPExplicitFrame(flowID, "203.0.113.8", 443, uint64(time.Now().Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeroTCPProxyBytes(open.Payload)
+	association := &udpProxyAssociation{}
+	runtime.mu.Lock()
+	runtime.udpFlows[flowID] = &udpProxyFlow{id: flowID, association: association}
+	runtime.mu.Unlock()
+	fillTCPProxyApplicationDataQueue(t, clientApplication)
+
+	closeResult := make(chan struct{})
+	go func() {
+		runtime.removeUDPAssociationWithContext(context.Background(), association)
+		close(closeResult)
+	}()
+	select {
+	case <-closeResult:
+		t.Fatal("UDP association close returned while the application queue was saturated")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	first, err := clientApplication.TryNextPacket()
+	if err != nil {
+		t.Fatal(err)
+	}
+	packets := [][]byte{first}
+	select {
+	case <-closeResult:
+	case <-time.After(time.Second):
+		t.Fatal("UDP association close was not retried after capacity became available")
+	}
+	for {
+		packet, err := clientApplication.TryNextPacket()
+		if errors.Is(err, session.ErrNoPacket) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		packets = append(packets, packet)
+	}
+
+	foundClose := false
+	for _, packet := range packets {
+		blocks, err := relayApplication.HandlePacket(context.Background(), time.Now(), packet)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, block := range blocks {
+			for _, frame := range block.Frames {
+				if frame.FrameType == registry.FrameFlowClose && frame.FlowID == flowID {
+					foundClose = true
+				}
+			}
+		}
+	}
+	if !foundClose {
+		t.Fatal("retried UDP association FLOW_CLOSE did not reach the peer application")
+	}
+	if runtime.udpFlow(flowID) != nil {
+		t.Fatal("UDP association flow remained registered after close")
+	}
+	if runtime.proxy.HasFlow(flowID) {
+		t.Fatal("UDP association proxy state remained registered after close")
+	}
+}
+
 func fillTCPProxyApplicationDataQueue(t testing.TB, application *session.Application) {
 	t.Helper()
 	for index := 0; index < 6; index++ {

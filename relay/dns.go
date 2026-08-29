@@ -330,7 +330,11 @@ func validateSocketDNSServiceBindingHints(message, rdata []byte, base int, polic
 	}
 	offset := 2
 	nameOffset := base + offset
-	if err := skipSocketDNSCompressedName(message, &nameOffset); err != nil || nameOffset < base || nameOffset > len(message) {
+	// The target name must end inside this record. A name that runs past its
+	// own rdata (into the next record) would leave offset beyond len(rdata),
+	// silently skipping the SvcParam loop and with it every ipv4hint and
+	// ipv6hint policy check.
+	if err := skipSocketDNSCompressedName(message, &nameOffset); err != nil || nameOffset < base || nameOffset > base+len(rdata) {
 		return ErrExitEventInvalid
 	}
 	offset = nameOffset - base

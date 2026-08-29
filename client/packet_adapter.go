@@ -1159,17 +1159,17 @@ func (a *PacketAdapter) handleRelayCloseLocked(frame protocol.AuroraFrame, now t
 		// drop them rather than fail the tunnel.
 		return nil, nil
 	}
+	if mapping.peerClosed {
+		// A normal relay close leaves the mapping half-open until the local TCP
+		// stack answers with its FIN. Treat repeated closes like closes for a
+		// retired mapping before inspecting their payload; the aggregate preflight
+		// shadows the same lifecycle transition and must make the same decision.
+		return nil, nil
+	}
 	r := wire.NewReader(frame.Payload)
 	close := protocol.DecodeFlowClose(r)
 	if r.Err() != nil || !r.EOF() || close.FlowID != frame.FlowID {
 		return nil, fmt.Errorf("client: packet adapter received malformed flow close")
-	}
-	if mapping.peerClosed {
-		// A normal relay close leaves the mapping half-open until the local TCP
-		// stack answers with its FIN. Repeated closes during that window are
-		// idempotent; synthesizing another FIN would consume a second sequence
-		// number and desynchronize the local connection.
-		return nil, nil
 	}
 	if err := a.proxy.ReceiveFlowCloseFrame(frame, uint64(now.Unix()), 0); err != nil && !mapping.localClosed {
 		return nil, err

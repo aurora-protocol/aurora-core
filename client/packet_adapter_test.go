@@ -1857,12 +1857,28 @@ func TestPacketAdapterIgnoresDuplicateNormalRelayClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	beforeSequence := adapter.flowsByID[1].relayNextSequence
-	packets, err := adapter.HandleFrameBlocks(context.Background(), []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{closeFrame, closeFrame}}}, now)
-	if err != nil {
-		t.Fatalf("duplicate close in one block: %v", err)
+	malformedDuplicate := closeFrame
+	malformedDuplicate.Payload = nil
+	blocks := []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{closeFrame, malformedDuplicate}}}
+	adapter.mu.Lock()
+	preflightErr := adapter.validateRelayLocalPacketLimitLocked(blocks, now)
+	packets, firstErr := adapter.handleRelayCloseLocked(closeFrame, now)
+	duplicatePackets, duplicateErr := adapter.handleRelayCloseLocked(malformedDuplicate, now)
+	adapter.mu.Unlock()
+	if preflightErr != nil {
+		t.Fatalf("preflight rejected stale malformed duplicate: %v", preflightErr)
+	}
+	if firstErr != nil {
+		t.Fatalf("first close after successful preflight: %v", firstErr)
+	}
+	if duplicateErr != nil {
+		t.Fatalf("handler rejected stale malformed duplicate after preflight accepted it: %v", duplicateErr)
 	}
 	if len(packets) != 1 {
 		t.Fatalf("duplicate close returned %d local packets, want one FIN", len(packets))
+	}
+	if len(duplicatePackets) != 0 {
+		t.Fatalf("stale malformed duplicate returned %d local packets, want none", len(duplicatePackets))
 	}
 	fin := packetAdapterParseTCPv4(t, packets[0])
 	if fin.flags != tcpFlagACK|tcpFlagFIN || fin.sequence != beforeSequence {

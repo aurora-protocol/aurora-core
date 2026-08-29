@@ -456,12 +456,12 @@ func (h *FirstHopHandler) ServeHTTP(w http.ResponseWriter, request *http.Request
 		serveCoverRequest(w, request, h.origin, h.coverOrigin)
 		return
 	}
-	if h.sessionAdmission != nil {
-		release, err := h.sessionAdmission(sessionContext)
-		if err != nil || release == nil {
-			h.servePreHeaderFailure(w, request)
-			return
-		}
+	release, admitted := h.acquireSessionAdmission(sessionContext)
+	if !admitted {
+		h.servePreHeaderFailure(w, request)
+		return
+	}
+	if release != nil {
 		defer release()
 	}
 	sessionID, registered := h.registerSession(cancelSession)
@@ -823,6 +823,24 @@ func beginFirstHopPostHeader(ctx context.Context, controller *http.ResponseContr
 		return fail(err)
 	}
 	return postHeaderContext, stopPostHeader, nil
+}
+
+// acquireSessionAdmission takes a session permit when one is required. A
+// rejected admission can still hand back a permit alongside its error
+// (transport.ReadWithReservation reports exactly that way); dropping it would
+// leak a session slot for the life of the process, so it is released here.
+func (h *FirstHopHandler) acquireSessionAdmission(ctx context.Context) (func(), bool) {
+	if h.sessionAdmission == nil {
+		return nil, true
+	}
+	release, err := h.sessionAdmission(ctx)
+	if err != nil || release == nil {
+		if release != nil {
+			release()
+		}
+		return nil, false
+	}
+	return release, true
 }
 
 func (h *FirstHopHandler) isCandidate(request *http.Request) bool {

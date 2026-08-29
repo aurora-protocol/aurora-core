@@ -831,6 +831,23 @@ func TestWriteFullPacketRejectsInvalidWriteLength(t *testing.T) {
 	}
 }
 
+func TestWriteFullPacketDoesNotSplitPartialDeviceWrite(t *testing.T) {
+	calls := 0
+	err := writeFullPacket(packetWriteFunc(func(packet []byte) (int, error) {
+		calls++
+		if calls == 1 {
+			return len(packet) / 2, nil
+		}
+		return len(packet), nil
+	}), []byte{0x45, 0x11, 0x22, 0x33})
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("writeFullPacket partial-write error = %v, want %v", err, io.ErrShortWrite)
+	}
+	if calls != 1 {
+		t.Fatalf("writeFullPacket split one packet across %d device writes", calls)
+	}
+}
+
 func TestDevicePacketExchangerCloseUnblocksWrite(t *testing.T) {
 	device := newBlockingPacketDevice()
 	exchanger, err := NewDevicePacketExchanger(device, DevicePacketExchangerOptions{

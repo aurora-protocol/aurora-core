@@ -235,20 +235,17 @@ func zeroDevicePacketBytes(value []byte) {
 }
 
 func writeFullPacket(w io.Writer, packet []byte) error {
-	for len(packet) > 0 {
-		n, err := w.Write(packet)
-		if n < 0 || n > len(packet) {
-			return fmt.Errorf("server: packet device returned invalid write length %d", n)
-		}
-		if n > 0 {
-			packet = packet[n:]
-		}
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
+	n, err := w.Write(packet)
+	if n < 0 || n > len(packet) {
+		return fmt.Errorf("server: packet device returned invalid write length %d", n)
+	}
+	if err != nil {
+		return err
+	}
+	if n != len(packet) {
+		// Packet devices preserve write boundaries. Retrying the remainder would
+		// inject it as a second malformed packet rather than completing the first.
+		return io.ErrShortWrite
 	}
 	return nil
 }

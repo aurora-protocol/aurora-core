@@ -727,8 +727,11 @@ func runTUNComponents(ctx context.Context, established *handshake.EstablishedSes
 	if ctx == nil || established == nil || established.Application == nil || established.ReadCarrier == nil || established.WriteCarrier == nil || runtime == nil {
 		return fmt.Errorf("client: tunnel components are incomplete")
 	}
-	if err := ctx.Err(); err != nil {
-		return err
+	if ctx.Err() != nil {
+		// Shutdown already requested: the routes and device configured by the
+		// caller are still owned here, so release them exactly as a
+		// cancellation during operation would instead of leaking them.
+		return closeTUNComponents(established, runtime, beforeDeviceClose)
 	}
 	componentContext, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -752,13 +755,7 @@ func runTUNComponents(ctx context.Context, established *handshake.EstablishedSes
 		terminal = proxyComponentResult{err: ctx.Err()}
 	}
 
-	// Keep the device alive while owned routes are removed, so cleanup never
-	// depends on a tunnel interface that has already disappeared.
-	closeErr := established.Close()
-	if beforeDeviceClose != nil {
-		closeErr = errors.Join(closeErr, beforeDeviceClose())
-	}
-	closeErr = errors.Join(closeErr, runtime.Close())
+	closeErr := closeTUNComponents(established, runtime, beforeDeviceClose)
 	cancel()
 	for collected < 2 {
 		<-results
@@ -768,6 +765,18 @@ func runTUNComponents(ctx context.Context, established *handshake.EstablishedSes
 		return closeErr
 	}
 	return errors.Join(newComponentFailure(terminal), closeErr)
+}
+
+// closeTUNComponents releases the tunnel session, owned host routes, and
+// device in dependency order. The device stays alive while owned routes are
+// removed, so cleanup never depends on a tunnel interface that has already
+// disappeared.
+func closeTUNComponents(established *handshake.EstablishedSession, runtime *client.PacketTUNRuntime, beforeDeviceClose func() error) error {
+	closeErr := established.Close()
+	if beforeDeviceClose != nil {
+		closeErr = errors.Join(closeErr, beforeDeviceClose())
+	}
+	return errors.Join(closeErr, runtime.Close())
 }
 
 func closeProxyListener(listener net.Listener) error {

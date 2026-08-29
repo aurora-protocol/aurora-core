@@ -260,3 +260,29 @@ func findingsContain(findings []string, substr string) bool {
 	}
 	return false
 }
+
+// TestVerifyIncidentResponsePlanCapsLooserExerciseAge proves a bundle cannot
+// raise its own staleness bar: a self-reported MaxExerciseAgeSeconds above the
+// 180-day default must be capped, while a stricter bar is still honored.
+func TestVerifyIncidentResponsePlanCapsLooserExerciseAge(t *testing.T) {
+	const day = uint64(24 * 60 * 60)
+	const nowUnix = 400 * day
+	plan := validIncidentResponsePlanForCoverage()
+	plan.LastExerciseUnix = nowUnix - 365*day
+	plan.MaxExerciseAgeSeconds = ^uint64(0)
+	var report ReadinessReport
+	if passed := verifyIncidentResponsePlan(plan, nowUnix, &report); passed {
+		t.Fatalf("self-reported max exercise age let a 365-day-old exercise through: %v", report.Findings)
+	}
+	if !findingsContain(report.Findings, "exercise is stale") {
+		t.Fatalf("findings=%v, want stale-exercise finding", report.Findings)
+	}
+
+	plan = validIncidentResponsePlanForCoverage()
+	plan.LastExerciseUnix = nowUnix - 100*day
+	plan.MaxExerciseAgeSeconds = 90 * day
+	report = ReadinessReport{}
+	if passed := verifyIncidentResponsePlan(plan, nowUnix, &report); passed {
+		t.Fatalf("stricter 90-day bar let a 100-day-old exercise through: %v", report.Findings)
+	}
+}

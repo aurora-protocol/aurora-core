@@ -23,6 +23,11 @@ const (
 	RoleTargets   = "targets"
 	RoleSnapshot  = "snapshot"
 	RoleTimestamp = "timestamp"
+
+	// maxIncidentExerciseAgeSeconds is the deployment bar for incident-response
+	// drill freshness (180 days). A plan may report a stricter bar but never a
+	// looser one.
+	maxIncidentExerciseAgeSeconds = 180 * 24 * 60 * 60
 )
 
 type Bundle struct {
@@ -248,7 +253,7 @@ func ReleaseReadinessHarnessBundle(nowUnix uint64) (Bundle, error) {
 			UpdateRollbackRunbookID:  "update-rollback-runbook",
 			AbuseEscalationRunbookID: "abuse-escalation-runbook",
 			LastExerciseUnix:         nowUnix - 50,
-			MaxExerciseAgeSeconds:    180 * 24 * 60 * 60,
+			MaxExerciseAgeSeconds:    maxIncidentExerciseAgeSeconds,
 			CompromisedKeyTested:     true,
 			UpdateRollbackTested:     true,
 			DisclosureWorkflowTested: true,
@@ -508,9 +513,10 @@ func verifyIncidentResponsePlan(plan IncidentResponsePlan, nowUnix uint64, repor
 		report.addFinding("incident-response plan exercise timestamp is invalid")
 		passed = false
 	} else {
+		// Unset or inflated self-reported ages fall back to the deployment bar.
 		maxAge := plan.MaxExerciseAgeSeconds
-		if maxAge == 0 {
-			maxAge = 180 * 24 * 60 * 60
+		if maxAge == 0 || maxAge > maxIncidentExerciseAgeSeconds {
+			maxAge = maxIncidentExerciseAgeSeconds
 		}
 		if nowUnix-plan.LastExerciseUnix > maxAge {
 			report.addFinding("incident-response plan exercise is stale")

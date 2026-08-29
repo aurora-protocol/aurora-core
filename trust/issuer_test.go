@@ -443,3 +443,13 @@ func TestValidateIssuerVerifierResponseFreshnessRejectsUnusableService(t *testin
 		})
 	}
 }
+
+func TestValidateIssuerVerifierResponseFreshnessExpiresAtValidUntil(t *testing.T) {
+	service, req, resp := issuerVerifierRequestFixture(t)
+	if err := ValidateIssuerVerifierResponseFreshness(req, service, resp, resp.ValidUntilUnix-1, 300); err != nil {
+		t.Fatalf("response rejected one second before expiry: %v", err)
+	}
+	if err := ValidateIssuerVerifierResponseFreshness(req, service, resp, resp.ValidUntilUnix, 300); err == nil {
+		t.Fatalf("response accepted at its half-open expiry boundary")
+	}
+}

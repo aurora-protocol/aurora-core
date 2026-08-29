@@ -156,7 +156,9 @@ func ValidateIssuerVerifierResponseFreshness(req protocol.IssuerVerifierRequest,
 	if service.ServiceStatus != registry.IssuerStatusActive && service.ServiceStatus != registry.IssuerStatusRetiring {
 		return fmt.Errorf("trust: issuer verifier service status not usable")
 	}
-	if now > resp.ValidUntilUnix {
+	// Validity intervals are half-open everywhere else in the trust layer, so
+	// a response is already expired at exactly ValidUntilUnix.
+	if now >= resp.ValidUntilUnix {
 		return fmt.Errorf("trust: issuer verifier response expired")
 	}
 	latest := req.ReplayEpochValidUntilUnix

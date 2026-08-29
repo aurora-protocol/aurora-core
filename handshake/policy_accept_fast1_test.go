@@ -84,3 +84,18 @@ func TestNewFixedProxyPolicySelectorRejectsFast1UnderFast1ForbiddenPolicies(t *t
 		t.Fatalf("strict split-2 selection failed: %v", err)
 	}
 }
+
+func TestValidateClientPolicyRejectsRequestedPolicyBelowMinimum(t *testing.T) {
+	offer := fast1ProxyOffer(registry.PolicyBalancedWeb)
+	offer.RequestedRouteModeID = registry.RouteSplit2
+	offer.MinimumPolicyID = registry.PolicyAdversarialDPI
+	offer.RequestedPolicyID = registry.PolicyBalancedWeb
+	err := validateClientPolicy(offer, protocol.ClientTransportHints{}, registry.SuiteHybrid768AESGCM)
+	if err == nil || !strings.Contains(err.Error(), "weaker than its own minimum") {
+		t.Fatalf("self-contradictory policy offer accepted: %v", err)
+	}
+	offer.RequestedPolicyID = registry.PolicyAdversarialDPI
+	if err := validateClientPolicy(offer, protocol.ClientTransportHints{}, registry.SuiteHybrid768AESGCM); err != nil {
+		t.Fatalf("consistent policy offer rejected: %v", err)
+	}
+}

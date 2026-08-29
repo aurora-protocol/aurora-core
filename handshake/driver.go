@@ -355,6 +355,9 @@ func validateClientPolicy(offer protocol.PolicyOffer, hints protocol.ClientTrans
 	if offer.MinimumPolicyID == registry.PolicyLab || offer.RequestedPolicyID == registry.PolicyLab {
 		return fmt.Errorf("handshake: lab policy is forbidden in production")
 	}
+	if offer.RequestedPolicyID < offer.MinimumPolicyID {
+		return fmt.Errorf("handshake: policy offer requests a policy weaker than its own minimum")
+	}
 	if offer.RequestedRouteModeID == registry.RouteFast1 && (policy.ForbidsFast1Route(offer.MinimumPolicyID) || policy.ForbidsFast1Route(offer.RequestedPolicyID)) {
 		return fmt.Errorf("handshake: policy offer requests the fast-1 route under a policy that forbids it")
 	}

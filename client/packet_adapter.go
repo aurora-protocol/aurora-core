@@ -104,6 +104,10 @@ type PacketAdapter struct {
 	ipv4Fragments map[packetAdapterIPv4FragmentKey]*packetAdapterIPv4FragmentSet
 	ipv6Fragments map[packetAdapterIPv6FragmentKey]*packetAdapterIPv6FragmentSet
 	localPackets  [][]byte
+	// pendingFlowCloses retains idle UDP cleanup until the bounded application
+	// queue accepts it. While it is non-empty, Ingress drops new packets under
+	// the normal backpressure contract, so the slice remains bounded by MaxFlows.
+	pendingFlowCloses []protocol.AuroraFrame
 }
 
 type packetAdapterTuple struct {
@@ -282,6 +286,8 @@ func (a *PacketAdapter) Close() {
 	for flowID := range a.flowsByID {
 		_ = a.proxy.Close(flowID)
 	}
+	zeroPacketAdapterBlocks([]protocol.FrameBlock{{Frames: a.pendingFlowCloses}})
+	a.pendingFlowCloses = nil
 	a.flowsByTuple = nil
 	a.flowsByID = nil
 	a.dnsRequests = nil
@@ -316,8 +322,25 @@ func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Ti
 	}
 	a.expireIPv4FragmentsLocked(now)
 	a.expireIPv6FragmentsLocked(now)
-	a.expireUDPFlowsLocked(now)
+	expiredUDPFrames, err := a.expireUDPFlowsLocked(now)
 	hasDNSAnswers := a.dnsAnswers != nil
+	if err != nil {
+		a.mu.Unlock()
+		return err
+	}
+	a.pendingFlowCloses = append(a.pendingFlowCloses, expiredUDPFrames...)
+	if len(a.pendingFlowCloses) != 0 {
+		block := protocol.FrameBlock{Frames: a.pendingFlowCloses}
+		if err := a.application.QueueFrames(ctx, block); err != nil {
+			a.mu.Unlock()
+			// Expiration is already committed locally. Retain the close block and
+			// drop this ingress packet until queue capacity is available, so relay
+			// sockets are eventually reclaimed without growing cleanup state.
+			return dropPacketAdapterBackpressure(err)
+		}
+		zeroPacketAdapterBlocks([]protocol.FrameBlock{block})
+		a.pendingFlowCloses = nil
+	}
 	a.mu.Unlock()
 	if fragment, fragmented, err := parsePacketAdapterIPv4Fragment(encoded, a.maximumPacket); err != nil {
 		return err
@@ -1025,19 +1048,37 @@ func (a *PacketAdapter) removeFlowLocked(mapping *packetAdapterFlow) {
 	_ = a.proxy.Close(mapping.flowID)
 }
 
-// expireUDPFlowsLocked retires UDP associations the client stopped using. TCP
+// expireUDPFlowsLocked retires UDP associations the client stopped using and
+// returns the FLOW_CLOSE frames that release their relay-side sockets. TCP
 // mappings are reclaimed by their own close handshake, but a UDP conversation
 // has no close, so without this sweep idle associations accumulate until the
-// adapter refuses every new flow.
-func (a *PacketAdapter) expireUDPFlowsLocked(now time.Time) {
+// adapter refuses every new flow. a.mu must be held.
+func (a *PacketAdapter) expireUDPFlowsLocked(now time.Time) ([]protocol.AuroraFrame, error) {
+	var expired []*packetAdapterFlow
 	for _, mapping := range a.flowsByID {
 		if mapping.kind != flow.FlowKindUDPAssociation || mapping.lastActivity.IsZero() {
 			continue
 		}
 		if now.Sub(mapping.lastActivity) >= defaultPacketAdapterUDPIdleLifetime {
-			a.removeFlowLocked(mapping)
+			expired = append(expired, mapping)
 		}
 	}
+	frames := make([]protocol.AuroraFrame, 0, len(expired))
+	for _, mapping := range expired {
+		frame, err := protocol.NewFlowCloseFrame(protocol.FlowClose{
+			FlowID:    mapping.flowID,
+			CloseCode: protocol.CloseIdleTimeout,
+		})
+		if err != nil {
+			zeroPacketAdapterBlocks([]protocol.FrameBlock{{Frames: frames}})
+			return nil, fmt.Errorf("client: close expired UDP association: %w", err)
+		}
+		frames = append(frames, frame)
+	}
+	for _, mapping := range expired {
+		a.removeFlowLocked(mapping)
+	}
+	return frames, nil
 }
 
 func (a *PacketAdapter) expireDNSRequestsLocked(now time.Time) {

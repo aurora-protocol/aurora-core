@@ -498,6 +498,9 @@ func (a *PacketAdapter) HandleFrameBlocks(ctx context.Context, blocks []protocol
 		return nil, ErrPacketAdapterClosed
 	}
 	a.expireDNSRequestsLocked(now)
+	if err := a.validateRelayLocalPacketLimitLocked(blocks, now); err != nil {
+		return nil, err
+	}
 	var local [][]byte
 	for _, block := range blocks {
 		for _, frame := range block.Frames {
@@ -515,6 +518,143 @@ func (a *PacketAdapter) HandleFrameBlocks(ctx context.Context, blocks []protocol
 		}
 	}
 	return local, nil
+}
+
+// validateRelayLocalPacketLimitLocked rejects aggregate fanout before frame
+// handling mutates TCP sequences, flow lifecycle, DNS state, or packet IDs.
+// It shadows only lifecycle changes that affect later frames in the same
+// authenticated batch. a.mu must be held.
+func (a *PacketAdapter) validateRelayLocalPacketLimitLocked(blocks []protocol.FrameBlock, now time.Time) error {
+	var retiredFlows map[uint64]struct{}
+	var peerClosedFlows map[uint64]struct{}
+	var completedDNS map[uint64]struct{}
+	packetCount := 0
+	addPackets := func(count int) error {
+		if count > a.maximumLocal-packetCount {
+			return fmt.Errorf("client: relay frame block exceeds local packet limit")
+		}
+		packetCount += count
+		return nil
+	}
+	for _, block := range blocks {
+		for _, frame := range block.Frames {
+			switch frame.FrameType {
+			case registry.FramePadding:
+				continue
+			case registry.FrameDNSMessage:
+				if _, completed := completedDNS[frame.FlowID]; completed {
+					continue
+				}
+				request, ok := a.dnsRequests[frame.FlowID]
+				if !ok || !now.Before(request.expiresAt) {
+					continue
+				}
+				if err := packetAdapterDNSResponseMatches(frame.Payload, request.transactionID); err != nil {
+					return err
+				}
+				maximumPayload, err := a.maximumRelayUDPPayloadLocked(request.version)
+				if err != nil {
+					return err
+				}
+				if completedDNS == nil {
+					completedDNS = make(map[uint64]struct{})
+				}
+				completedDNS[frame.FlowID] = struct{}{}
+				if len(frame.Payload) <= maximumPayload {
+					if err := addPackets(1); err != nil {
+						return err
+					}
+				}
+			case registry.FrameUDPTargetConfirm:
+				if _, retired := retiredFlows[frame.FlowID]; retired {
+					continue
+				}
+				mapping := a.flowsByID[frame.FlowID]
+				if mapping != nil && mapping.kind != flow.FlowKindUDPAssociation {
+					return fmt.Errorf("client: packet adapter received UDP target confirmation for a non-UDP flow")
+				}
+			case registry.FrameFlowClose:
+				if _, retired := retiredFlows[frame.FlowID]; retired {
+					continue
+				}
+				mapping := a.flowsByID[frame.FlowID]
+				if mapping == nil {
+					continue
+				}
+				r := wire.NewReader(frame.Payload)
+				close := protocol.DecodeFlowClose(r)
+				if r.Err() != nil || !r.EOF() || close.FlowID != frame.FlowID {
+					return fmt.Errorf("client: packet adapter received malformed flow close")
+				}
+				if mapping.kind == flow.FlowKindUDPAssociation {
+					if retiredFlows == nil {
+						retiredFlows = make(map[uint64]struct{})
+					}
+					retiredFlows[frame.FlowID] = struct{}{}
+					continue
+				}
+				if err := addPackets(1); err != nil {
+					return err
+				}
+				if close.CloseCode != protocol.CloseNormal || mapping.localClosed {
+					if retiredFlows == nil {
+						retiredFlows = make(map[uint64]struct{})
+					}
+					retiredFlows[frame.FlowID] = struct{}{}
+				} else {
+					if peerClosedFlows == nil {
+						peerClosedFlows = make(map[uint64]struct{})
+					}
+					peerClosedFlows[frame.FlowID] = struct{}{}
+				}
+			case registry.FrameStreamData, registry.FrameDatagramData:
+				if _, retired := retiredFlows[frame.FlowID]; retired {
+					continue
+				}
+				mapping := a.flowsByID[frame.FlowID]
+				if mapping == nil {
+					continue
+				}
+				if mapping.peerClosed {
+					return fmt.Errorf("client: packet adapter received data after the relay closed the flow")
+				}
+				if _, peerClosed := peerClosedFlows[frame.FlowID]; peerClosed {
+					return fmt.Errorf("client: packet adapter received data after the relay closed the flow")
+				}
+				switch mapping.kind {
+				case flow.FlowKindTCPStream:
+					if frame.FrameType != registry.FrameStreamData {
+						return fmt.Errorf("client: packet adapter received non-stream TCP data")
+					}
+					_, segmentCount, err := a.relayTCPPacketLayoutLocked(mapping, len(frame.Payload))
+					if err != nil {
+						return err
+					}
+					if err := addPackets(segmentCount); err != nil {
+						return err
+					}
+				case flow.FlowKindUDPAssociation:
+					if frame.FrameType != registry.FrameDatagramData && (frame.FrameType != registry.FrameStreamData || a.udpMode != transport.UDPOverStreamFallback) {
+						return fmt.Errorf("client: packet adapter received invalid UDP data frame")
+					}
+					maximumPayload, err := a.maximumRelayUDPPayloadLocked(mapping.tuple.version)
+					if err != nil {
+						return err
+					}
+					if len(frame.Payload) <= maximumPayload {
+						if err := addPackets(1); err != nil {
+							return err
+						}
+					}
+				default:
+					return fmt.Errorf("client: packet adapter flow has unsupported kind")
+				}
+			default:
+				return fmt.Errorf("client: packet adapter received unsupported relay frame 0x%x", frame.FrameType)
+			}
+		}
+	}
+	return nil
 }
 
 // DrainLocalPackets returns synthetic packets created while accepting local traffic.
@@ -956,24 +1096,35 @@ func (a *PacketAdapter) maximumRelayUDPPayloadLocked(version uint8) (int, error)
 	return a.maximumPacket - headerBytes, nil
 }
 
+func (a *PacketAdapter) relayTCPPacketLayoutLocked(mapping *packetAdapterFlow, payloadBytes int) (int, int, error) {
+	if payloadBytes <= 0 {
+		return 0, 0, fmt.Errorf("client: packet adapter TCP relay payload is empty")
+	}
+	headerBytes := 40
+	if mapping.tuple.version == 6 {
+		headerBytes = 60
+	} else if mapping.tuple.version != 4 {
+		return 0, 0, fmt.Errorf("client: packet adapter TCP flow has invalid IP version")
+	}
+	maximumPayload := a.maximumPacket - headerBytes
+	if maximumPayload <= 0 {
+		return 0, 0, fmt.Errorf("client: packet adapter packet limit cannot hold TCP headers")
+	}
+	segmentCount := (payloadBytes-1)/maximumPayload + 1
+	if segmentCount > a.maximumLocal {
+		return 0, 0, fmt.Errorf("client: relay TCP data exceeds local packet limit")
+	}
+	return maximumPayload, segmentCount, nil
+}
+
 // makeRelayTCPPacketsLocked segments one relay stream frame into packets that
 // fit the configured TUN MTU. The relay carries a byte stream and cannot know
 // the client's platform MTU, so rejecting a valid large read here would turn
 // ordinary destination traffic into a session-wide failure.
 func (a *PacketAdapter) makeRelayTCPPacketsLocked(mapping *packetAdapterFlow, payload []byte) ([][]byte, error) {
-	headerBytes := 40
-	if mapping.tuple.version == 6 {
-		headerBytes = 60
-	} else if mapping.tuple.version != 4 {
-		return nil, fmt.Errorf("client: packet adapter TCP flow has invalid IP version")
-	}
-	maximumPayload := a.maximumPacket - headerBytes
-	if maximumPayload <= 0 {
-		return nil, fmt.Errorf("client: packet adapter packet limit cannot hold TCP headers")
-	}
-	segmentCount := (len(payload)-1)/maximumPayload + 1
-	if segmentCount > a.maximumLocal {
-		return nil, fmt.Errorf("client: relay TCP data exceeds local packet limit")
+	maximumPayload, segmentCount, err := a.relayTCPPacketLayoutLocked(mapping, len(payload))
+	if err != nil {
+		return nil, err
 	}
 	packets := make([][]byte, 0, segmentCount)
 	sequence := mapping.relayNextSequence

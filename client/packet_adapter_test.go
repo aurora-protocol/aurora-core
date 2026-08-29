@@ -1721,6 +1721,67 @@ func TestPacketAdapterBoundsRelayTCPPacketFanout(t *testing.T) {
 	}
 }
 
+func TestPacketAdapterPreflightsAggregateRelayTCPPacketFanout(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{
+		MaxFlows:        8,
+		MaxPacketBytes:  128,
+		MaxLocalPackets: 3,
+		Random:          bytes.NewReader(make([]byte, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	syn := packetAdapterTCPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, 100, 0, tcpFlagSYN, nil)
+	if err := adapter.Ingress(context.Background(), syn, now); err != nil {
+		t.Fatal(err)
+	}
+	adapter.DrainLocalPackets()
+	if _, err := adapter.NextEncryptedPacket(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	beforeSequence := adapter.flowsByID[1].relayNextSequence
+	beforePacketID := adapter.nextPacketID
+	first, err := protocol.NewStreamDataFrame(1, bytes.Repeat([]byte{0x91}, 90), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := protocol.NewStreamDataFrame(1, bytes.Repeat([]byte{0x92}, 90), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each frame needs two local packets and fits MaxLocalPackets by itself;
+	// the aggregate needs four and must be rejected before the first frame is
+	// committed.
+	packets, err := adapter.HandleFrameBlocks(context.Background(), []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{first, second}}}, now)
+	if err == nil {
+		t.Fatal("aggregate relay TCP fanout exceeding the packet bound was accepted")
+	}
+	if len(packets) != 0 {
+		t.Fatalf("aggregate fanout rejection returned %d packets, want none", len(packets))
+	}
+	if mapping := adapter.flowsByID[1]; mapping == nil || mapping.relayNextSequence != beforeSequence {
+		t.Fatalf("aggregate fanout rejection changed flow sequence state: %+v", mapping)
+	}
+	if adapter.nextPacketID != beforePacketID {
+		t.Fatalf("aggregate fanout rejection consumed packet ID %d, want %d", adapter.nextPacketID, beforePacketID)
+	}
+
+	packets, err = adapter.HandleFrameBlocks(context.Background(), []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{first}}}, now)
+	if err != nil {
+		t.Fatalf("single relay frame after aggregate rejection: %v", err)
+	}
+	if len(packets) != 2 {
+		t.Fatalf("single relay frame returned %d packets, want two", len(packets))
+	}
+	if segment := packetAdapterParseTCPv4(t, packets[0]); segment.sequence != beforeSequence {
+		t.Fatalf("first segment sequence = %d, want preserved %d", segment.sequence, beforeSequence)
+	}
+}
+
 func TestPacketAdapterMapsAbnormalRelayCloseToTCPReset(t *testing.T) {
 	clientApplication, relayApplication := packetAdapterApplications(t)
 	defer clientApplication.Close()

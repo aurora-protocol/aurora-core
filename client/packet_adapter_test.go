@@ -162,7 +162,32 @@ func TestPacketAdapterOpensUDPAndForwardsDatagrams(t *testing.T) {
 	if open.FlowKind != flow.FlowKindUDPAssociation || open.LocalBindingMode != flow.LocalBindingTUNPacketFlow {
 		t.Fatalf("unexpected transparent UDP FLOW_OPEN: %+v", open)
 	}
-	frame, err := protocol.NewStreamDataFrame(open.FlowID, []byte("pong"), 0)
+	oversized, err := protocol.NewStreamDataFrame(open.FlowID, bytes.Repeat([]byte{0x6f}, 1500-28+1), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := relayApplication.QueueFrames(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{oversized}}); err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err = relayApplication.NextPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	localPackets, err := adapter.HandleEncryptedPacket(context.Background(), encrypted, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("oversized relay UDP datagram ended the session: %v", err)
+	}
+	if len(localPackets) != 0 {
+		t.Fatalf("oversized relay UDP datagram returned %d local packets, want none", len(localPackets))
+	}
+	adapter.mu.Lock()
+	lastActivity := adapter.flowsByID[open.FlowID].lastActivity
+	adapter.mu.Unlock()
+	if !lastActivity.Equal(now) {
+		t.Fatalf("dropped relay UDP datagram refreshed idle time to %v, want %v", lastActivity, now)
+	}
+	responsePayload := bytes.Repeat([]byte{0x70}, 1500-28)
+	frame, err := protocol.NewStreamDataFrame(open.FlowID, responsePayload, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,15 +198,18 @@ func TestPacketAdapterOpensUDPAndForwardsDatagrams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	localPackets, err := adapter.HandleEncryptedPacket(context.Background(), encrypted, now)
+	localPackets, err = adapter.HandleEncryptedPacket(context.Background(), encrypted, now.Add(2*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(localPackets) != 1 {
 		t.Fatalf("relay UDP data returned %d local packets", len(localPackets))
 	}
+	if len(localPackets[0]) != 1500 {
+		t.Fatalf("boundary relay UDP packet length = %d, want 1500", len(localPackets[0]))
+	}
 	localUDP := packetAdapterParseUDPv4(t, localPackets[0])
-	if localUDP.sourcePort != 443 || localUDP.destinationPort != 40000 || !bytes.Equal(localUDP.payload, []byte("pong")) {
+	if localUDP.sourcePort != 443 || localUDP.destinationPort != 40000 || !bytes.Equal(localUDP.payload, responsePayload) {
 		t.Fatalf("unexpected relay UDP packet: %+v", localUDP)
 	}
 }
@@ -962,7 +990,7 @@ func TestPacketAdapterOpensIPv6UDPFlowWithDestinationOptions(t *testing.T) {
 	clientApplication, relayApplication := packetAdapterApplications(t)
 	defer clientApplication.Close()
 	defer relayApplication.Close()
-	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 1500, UDPMode: transport.UDPNativeDatagram, Random: bytes.NewReader(make([]byte, 32))})
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{MaxFlows: 8, MaxPacketBytes: 128, UDPMode: transport.UDPNativeDatagram, Random: bytes.NewReader(make([]byte, 32))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -991,6 +1019,36 @@ func TestPacketAdapterOpensIPv6UDPFlowWithDestinationOptions(t *testing.T) {
 	open := protocol.DecodeFlowOpen(packetAdapterReader(blocks[0].Frames[0].Payload))
 	if open.FlowKind != flow.FlowKindUDPAssociation || open.LocalBindingMode != flow.LocalBindingTUNPacketFlow || !bytes.Equal(open.TargetHost, target.AsSlice()) {
 		t.Fatalf("unexpected IPv6 options UDP FLOW_OPEN: %+v", open)
+	}
+	oversized, err := protocol.NewDatagramDataFrame(blocks[0].Frames[0].FlowID, bytes.Repeat([]byte{0x6f}, 128-48+1), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packets, err := adapter.HandleFrameBlocks(context.Background(), []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{oversized}}}, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("oversized IPv6 relay datagram ended the session: %v", err)
+	}
+	if len(packets) != 0 {
+		t.Fatalf("oversized IPv6 relay datagram returned %d packets, want none", len(packets))
+	}
+	boundaryPayload := bytes.Repeat([]byte{0x70}, 128-48)
+	small, err := protocol.NewDatagramDataFrame(blocks[0].Frames[0].FlowID, boundaryPayload, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packets, err = adapter.HandleFrameBlocks(context.Background(), []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{small}}}, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("small IPv6 relay datagram after oversized drop: %v", err)
+	}
+	if len(packets) != 1 {
+		t.Fatalf("small IPv6 relay datagram returned %d packets, want one", len(packets))
+	}
+	local, err := parsePacketAdapterIPPacket(packets[0], 128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packets[0]) != 128 || local.version != 6 || !bytes.Equal(local.udp.payload, boundaryPayload) {
+		t.Fatalf("unexpected small IPv6 relay datagram: %+v", local)
 	}
 }
 
@@ -1364,6 +1422,56 @@ func TestPacketAdapterDropsExpiredDNSResponse(t *testing.T) {
 	}
 	if adapter.FlowCount() != 0 {
 		t.Fatalf("expired DNS request remained allocated: %d", adapter.FlowCount())
+	}
+}
+
+func TestPacketAdapterDropsDNSResponseExceedingConfiguredPacketLimit(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{
+		MaxFlows:       8,
+		MaxPacketBytes: 128,
+		Random:         bytes.NewReader(bytes.Repeat([]byte{0x68}, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	query := packetAdapterDNSQuery(t, "example.com")
+	request := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{100, 64, 0, 1}, 53000, 53, query)
+	if err := adapter.Ingress(context.Background(), request, now); err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := adapter.NextEncryptedPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := relayApplication.HandlePacket(context.Background(), now, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := packetAdapterDNSResponse(t, query)
+	response = append(response, make([]byte, 101-len(response))...)
+	frame, err := protocol.NewDNSMessageFrame(blocks[0].Frames[0].FlowID, response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packets, err := adapter.HandleFrameBlocks(context.Background(), []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{frame}}}, now)
+	if err != nil {
+		t.Fatalf("oversized DNS response ended the session: %v", err)
+	}
+	if len(packets) != 0 {
+		t.Fatalf("oversized DNS response returned %d local packets, want none", len(packets))
+	}
+	if adapter.FlowCount() != 0 {
+		t.Fatalf("oversized DNS response retained %d completed requests, want zero", adapter.FlowCount())
+	}
+	if err := adapter.Ingress(context.Background(), request, now.Add(time.Second)); err != nil {
+		t.Fatalf("DNS retry after oversized response: %v", err)
+	}
+	if adapter.FlowCount() != 1 {
+		t.Fatalf("DNS retry flow count = %d, want one", adapter.FlowCount())
 	}
 }
 

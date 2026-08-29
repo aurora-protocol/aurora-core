@@ -875,6 +875,17 @@ func (a *PacketAdapter) handleRelayDNSLocked(frame protocol.AuroraFrame, now tim
 	if err := packetAdapterDNSResponseMatches(frame.Payload, request.transactionID); err != nil {
 		return nil, err
 	}
+	maximumPayload, err := a.maximumRelayUDPPayloadLocked(request.version)
+	if err != nil {
+		return nil, err
+	}
+	if len(frame.Payload) > maximumPayload {
+		// UDP loss is recoverable; an answer that would require IP
+		// fragmentation must not terminate every flow on the tunnel. Retire the
+		// completed request so repeated oversized answers cannot retain state.
+		delete(a.dnsRequests, frame.FlowID)
+		return nil, nil
+	}
 	packet, err := buildPacketAdapterUDPPacket(request.version, request.target, request.client, request.targetPort, request.clientPort, frame.Payload, a.nextPacketID)
 	if err != nil {
 		return nil, err
@@ -908,6 +919,16 @@ func (a *PacketAdapter) handleRelayDataLocked(frame protocol.AuroraFrame, now ti
 		if frame.FrameType != registry.FrameDatagramData && (frame.FrameType != registry.FrameStreamData || a.udpMode != transport.UDPOverStreamFallback) {
 			return nil, fmt.Errorf("client: packet adapter received invalid UDP data frame")
 		}
+		maximumPayload, err := a.maximumRelayUDPPayloadLocked(mapping.tuple.version)
+		if err != nil {
+			return nil, err
+		}
+		if len(frame.Payload) > maximumPayload {
+			// A remote UDP sender can legally emit a datagram larger than this
+			// TUN's MTU. Until the adapter synthesizes IP fragments, treat it as
+			// bounded UDP loss rather than a session-fatal packet-size error.
+			return nil, nil
+		}
 		// Relayed datagrams keep the association alive: a long inbound-only
 		// transfer must not be swept out from under the client.
 		mapping.lastActivity = now
@@ -923,6 +944,16 @@ func (a *PacketAdapter) handleRelayDataLocked(frame protocol.AuroraFrame, now ti
 	default:
 		return nil, fmt.Errorf("client: packet adapter flow has unsupported kind")
 	}
+}
+
+func (a *PacketAdapter) maximumRelayUDPPayloadLocked(version uint8) (int, error) {
+	headerBytes := 28
+	if version == 6 {
+		headerBytes = 48
+	} else if version != 4 {
+		return 0, fmt.Errorf("client: packet adapter UDP flow has invalid IP version")
+	}
+	return a.maximumPacket - headerBytes, nil
 }
 
 // makeRelayTCPPacketsLocked segments one relay stream frame into packets that

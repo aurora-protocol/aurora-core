@@ -119,6 +119,9 @@ func VerifyRelayDeployment(in RelayDeploymentVerification) (VerifiedRelayDeploym
 	if err := authorityKey.ValidateCompatibility(); err != nil {
 		return VerifiedRelayDeployment{}, fmt.Errorf("trust: invalid template authority key: %w", err)
 	}
+	if isLabSignatureScheme(authorityKey.SignatureScheme) {
+		return VerifiedRelayDeployment{}, fmt.Errorf("trust: template authority key uses a lab signature scheme")
+	}
 	templateFamilyInput, err := CoverTemplateFamilySignatureInput(template)
 	if err != nil {
 		return VerifiedRelayDeployment{}, err
@@ -245,6 +248,9 @@ func validateDeploymentDescriptor(d protocol.RelayDescriptor, now uint64) error 
 	} {
 		if err := key.ValidateCompatibility(); err != nil {
 			return fmt.Errorf("trust: invalid relay %s key: %w", label, err)
+		}
+		if isLabSignatureScheme(key.SignatureScheme) {
+			return fmt.Errorf("trust: relay %s key uses a lab signature scheme", label)
 		}
 	}
 	if isPQSignatureScheme(d.RelayLongtermClassicalKey.SignatureScheme) || isPQSignatureScheme(d.EpochAuthClassicalKey.SignatureScheme) {
@@ -465,4 +471,10 @@ func hasDuplicateDeploymentIDs(values []uint64) bool {
 
 func isPQSignatureScheme(scheme uint64) bool {
 	return scheme == registry.SigMLDSA65 || scheme == registry.SigMLDSA87
+}
+
+// isLabSignatureScheme reports whether the scheme is lab-only and therefore
+// never acceptable on the production relay-deployment verification path.
+func isLabSignatureScheme(scheme uint64) bool {
+	return scheme == registry.SigEd25519Lab
 }

@@ -34,6 +34,7 @@ const (
 	tcpProxyWriteQueueLength              = 16
 	maximumSOCKS5UDPDatagramBytes         = 65535
 	tcpProxyHandshakeTimeout              = 10 * time.Second
+	tcpProxyCloseRetryInterval            = 5 * time.Millisecond
 )
 
 var (
@@ -948,10 +949,53 @@ func (r *TCPProxyRuntime) sendLocalFlowClose(ctx context.Context, flow *tcpProxy
 
 	frame, err := r.proxy.GracefulCloseFrame(flow.id, 0, nil, uint64(time.Now().Unix()), 0)
 	if err == nil {
-		err = r.application.QueueFrames(ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}})
+		err = r.queueLocalFlowClose(ctx, frame)
 	}
 	zeroTCPProxyBytes(frame.Payload)
 	return err
+}
+
+// queueLocalFlowClose retries the already-committed close until the bounded
+// application queue accepts it. Dropping it on transient backpressure would
+// retire the local flow while leaving its relay socket alive until timeout.
+func (r *TCPProxyRuntime) queueLocalFlowClose(ctx context.Context, frame protocol.AuroraFrame) error {
+	if ctx == nil {
+		return fmt.Errorf("client: nil TCP proxy close context")
+	}
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		select {
+		case <-r.done:
+			return ErrTCPProxyClosed
+		default:
+		}
+		err := r.application.QueueFrames(ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}})
+		if !errors.Is(err, session.ErrBackpressure) {
+			return err
+		}
+		if timer == nil {
+			timer = time.NewTimer(tcpProxyCloseRetryInterval)
+		} else {
+			timer.Reset(tcpProxyCloseRetryInterval)
+		}
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-r.done:
+			timer.Stop()
+			return ErrTCPProxyClosed
+		case <-timer.C:
+		}
+	}
 }
 
 func (r *TCPProxyRuntime) enqueueLocalWrite(flowID uint64, payload []byte) error {

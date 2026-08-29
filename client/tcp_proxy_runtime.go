@@ -264,11 +264,35 @@ func (r *TCPProxyRuntime) HandleFrameBlock(ctx context.Context, block protocol.F
 		default:
 			return fmt.Errorf("client: TCP proxy runtime received unsupported relay frame 0x%x", frame.FrameType)
 		}
-		if err != nil && !errors.Is(err, errTCPProxyUnknownFlow) {
-			return err
+		if err == nil || errors.Is(err, errTCPProxyUnknownFlow) {
+			continue
 		}
+		if errors.Is(err, ErrTCPProxyBackpressure) {
+			// One local socket is not draining. Relay TCP data cannot be
+			// replayed, so the flow has to end -- but ending the carrier
+			// duplex would take every other flow down with it. Close just
+			// this flow and tell the relay about it.
+			if closeErr := r.refuseFlow(ctx, frame.FlowID); closeErr != nil {
+				return closeErr
+			}
+			continue
+		}
+		return err
 	}
 	return nil
+}
+
+// refuseFlow ends a single proxy flow the runtime can no longer serve and
+// notifies the relay, leaving every other flow on the carrier untouched.
+func (r *TCPProxyRuntime) refuseFlow(ctx context.Context, flowID uint64) error {
+	flow := r.flow(flowID)
+	if flow == nil {
+		r.removeUDPFlow(flowID)
+		return nil
+	}
+	err := r.sendLocalFlowClose(ctx, flow)
+	r.abortFlow(flowID)
+	return err
 }
 
 // Close closes listeners, pending handshakes, mapped local sockets, and the portable proxy flow state.

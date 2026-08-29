@@ -208,8 +208,8 @@ func (a *Application) handleKeyControlsLocked(ctx context.Context, now time.Time
 	if controls.update != nil && controls.update.OldKeyPhase != packetKeyPhase {
 		return nil, fmt.Errorf("session: key update old phase does not match packet phase")
 	}
-	if controls.ack != nil && packetKeyPhase != a.readState.KeyPhase {
-		return nil, fmt.Errorf("session: key update acknowledgement is not under the current read phase")
+	if controls.ack != nil && !a.acceptsControlKeyPhaseLocked(packetKeyPhase, now) {
+		return nil, fmt.Errorf("session: key update acknowledgement is not under an active read phase")
 	}
 	if controls.ack != nil {
 		a.pinWriteDrainLocked(now)
@@ -381,6 +381,21 @@ func (a *Application) handleKeyControlsLocked(ctx context.Context, now time.Time
 	frames := controls.frames
 	controls.frames = nil
 	return []protocol.FrameBlock{{Frames: frames}}, nil
+}
+
+// acceptsControlKeyPhaseLocked reports whether a key control frame carried
+// under packetKeyPhase is recent enough to act on. A peer that acknowledges an
+// update and then initiates its own sends the acknowledgement first, but the
+// network can deliver its KEY_UPDATE first, leaving the acknowledgement under
+// the superseded read phase. That phase still authenticates while its bounded
+// drain window is open, so the acknowledgement is applied rather than treated
+// as a protocol violation that ends the session.
+func (a *Application) acceptsControlKeyPhaseLocked(packetKeyPhase uint8, now time.Time) bool {
+	if packetKeyPhase == a.readState.KeyPhase {
+		return true
+	}
+	previous, deadline, ok := a.readState.DrainInfo()
+	return ok && packetKeyPhase == previous && !now.After(deadline)
 }
 
 func scanKeyControls(block *protocol.FrameBlock) (keyControls, error) {

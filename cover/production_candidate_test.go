@@ -1,6 +1,9 @@
 package cover
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestEvaluateProductionCandidateClearsThresholdForIndistinguishableBaseline(t *testing.T) {
 	samples, err := DefaultClassifierBaseline()
@@ -40,5 +43,25 @@ func TestEvaluateProductionCandidateRejectsSeparableSurface(t *testing.T) {
 	}
 	if decision.DistinguisherCount == 0 {
 		t.Fatalf("expected at least one distinguisher")
+	}
+}
+
+func TestEvaluateProductionCandidateRejectsOutOfRangeThreshold(t *testing.T) {
+	samples, err := DefaultClassifierBaseline()
+	if err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	report, err := EvaluateClassifierBaseline(samples)
+	if err != nil {
+		t.Fatalf("classifier baseline: %v", err)
+	}
+	if !EvaluateProductionCandidate(report, 0.02).ProductionCandidate {
+		t.Fatalf("indistinguishable baseline did not clear a valid threshold")
+	}
+	for _, threshold := range []float64{1, 1.5, math.Inf(1), math.NaN(), -0.01, math.Inf(-1)} {
+		decision := EvaluateProductionCandidate(report, threshold)
+		if decision.ProductionCandidate {
+			t.Fatalf("threshold %v accepted a production candidate", threshold)
+		}
 	}
 }

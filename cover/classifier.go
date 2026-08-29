@@ -145,12 +145,16 @@ func EvaluateProductionCandidate(report ClassifierReport, threshold float64) Pro
 	if comparisons > 0 {
 		advantage = float64(len(report.Distinguishers)) / float64(comparisons)
 	}
+	// A deployment threshold is a fraction of separable comparisons, so
+	// anything outside [0, 1) (including NaN and +Inf) cannot be cleared: a
+	// threshold at or above 1 would accept a fully distinguishable template.
+	validThreshold := threshold >= 0 && threshold < 1
 	return ProductionCandidateDecision{
 		Threshold:           threshold,
 		ClassifierAdvantage: advantage,
 		DistinguisherCount:  len(report.Distinguishers),
 		ComparisonCount:     comparisons,
-		ProductionCandidate: comparisons > 0 && advantage <= threshold && len(report.ForbiddenMarkers) == 0,
+		ProductionCandidate: validThreshold && comparisons > 0 && advantage <= threshold && len(report.ForbiddenMarkers) == 0,
 	}
 }
 

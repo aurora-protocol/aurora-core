@@ -796,6 +796,16 @@ func (a *PacketAdapter) handleRelayFrameLocked(frame protocol.AuroraFrame, now t
 	case registry.FrameDNSMessage:
 		return a.handleRelayDNSLocked(frame, now)
 	case registry.FrameUDPTargetConfirm:
+		mapping := a.flowsByID[frame.FlowID]
+		if mapping == nil {
+			// The association may have expired locally while its confirmation was
+			// still in flight. Like late data and FLOW_CLOSE frames, a confirmation
+			// for retired state is harmless and must not end the entire tunnel.
+			return nil, nil
+		}
+		if mapping.kind != flow.FlowKindUDPAssociation {
+			return nil, fmt.Errorf("client: packet adapter received UDP target confirmation for a non-UDP flow")
+		}
 		if err := a.proxy.ReceiveUDPTargetConfirmFrameAt(frame, uint64(now.Unix())); err != nil {
 			return nil, err
 		}
@@ -812,11 +822,14 @@ func (a *PacketAdapter) handleRelayFrameLocked(frame protocol.AuroraFrame, now t
 func (a *PacketAdapter) handleRelayDNSLocked(frame protocol.AuroraFrame, now time.Time) ([][]byte, error) {
 	request, ok := a.dnsRequests[frame.FlowID]
 	if !ok {
-		return nil, fmt.Errorf("client: packet adapter received DNS response for unknown request")
+		// Pending DNS requests are deliberately short lived. A response delayed
+		// past that lifetime names state the adapter has already retired, so drop
+		// it instead of turning one stale lookup into a tunnel-wide failure.
+		return nil, nil
 	}
 	if !now.Before(request.expiresAt) {
 		delete(a.dnsRequests, frame.FlowID)
-		return nil, fmt.Errorf("client: packet adapter received expired DNS response")
+		return nil, nil
 	}
 	if err := packetAdapterDNSResponseMatches(frame.Payload, request.transactionID); err != nil {
 		return nil, err

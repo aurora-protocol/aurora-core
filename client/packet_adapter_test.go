@@ -1297,7 +1297,7 @@ func TestPacketAdapterRejectsMismatchedDNSResponseWithoutDroppingRequest(t *test
 	}
 }
 
-func TestPacketAdapterExpiresPendingDNSRequest(t *testing.T) {
+func TestPacketAdapterDropsExpiredDNSResponse(t *testing.T) {
 	clientApplication, relayApplication := packetAdapterApplications(t)
 	defer clientApplication.Close()
 	defer relayApplication.Close()
@@ -1327,8 +1327,12 @@ func TestPacketAdapterExpiresPendingDNSRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := adapter.HandleFrameBlocks(context.Background(), []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{response}}}, now.Add(defaultPacketAdapterDNSLifetime)); err == nil {
-		t.Fatal("expired DNS response was accepted")
+	packets, err := adapter.HandleFrameBlocks(context.Background(), []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{response}}}, now.Add(defaultPacketAdapterDNSLifetime))
+	if err != nil {
+		t.Fatalf("expired DNS response ended the session: %v", err)
+	}
+	if len(packets) != 0 {
+		t.Fatalf("expired DNS response produced %d local packets, want none", len(packets))
 	}
 	if adapter.FlowCount() != 0 {
 		t.Fatalf("expired DNS request remained allocated: %d", adapter.FlowCount())

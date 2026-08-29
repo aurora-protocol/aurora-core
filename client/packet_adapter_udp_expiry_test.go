@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/transport"
 )
 
@@ -96,5 +97,70 @@ func TestPacketAdapterKeepsUDPAssociationsCarryingRelayTraffic(t *testing.T) {
 	}
 	if adapter.FlowCount() != 2 {
 		t.Fatalf("flow count = %d, want the refreshed association retained", adapter.FlowCount())
+	}
+}
+
+// A relay confirmation can be queued behind enough carrier traffic that the
+// local association expires first. The adapter has already forgotten that flow,
+// so the stale confirmation must be dropped rather than fail every live flow on
+// the shared session.
+func TestPacketAdapterDropsUDPTargetConfirmAfterAssociationExpiry(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{
+		MaxFlows:       4,
+		MaxPacketBytes: 1500,
+		UDPMode:        transport.UDPOverStreamFallback,
+		Random:         bytes.NewReader(make([]byte, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Unix(1_700_000_000, 0)
+	first := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, []byte("first"))
+	if err := adapter.Ingress(context.Background(), first, start); err != nil {
+		t.Fatal(err)
+	}
+	adapter.mu.Lock()
+	var expiredFlowID uint64
+	for flowID := range adapter.flowsByID {
+		expiredFlowID = flowID
+	}
+	adapter.mu.Unlock()
+	if expiredFlowID == 0 {
+		t.Fatal("UDP association was not recorded")
+	}
+
+	// Any later ingress runs the idle sweep before adding its own association.
+	later := start.Add(defaultPacketAdapterUDPIdleLifetime)
+	second := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50001, 443, []byte("second"))
+	if err := adapter.Ingress(context.Background(), second, later); err != nil {
+		t.Fatal(err)
+	}
+	adapter.mu.Lock()
+	_, retained := adapter.flowsByID[expiredFlowID]
+	adapter.mu.Unlock()
+	if retained {
+		t.Fatal("idle UDP association was not expired")
+	}
+
+	confirm, err := protocol.NewUDPTargetConfirmFrame(protocol.UDPTargetConfirm{
+		FlowID:           expiredFlowID,
+		TargetKind:       0x01,
+		SelectedIP:       []byte{93, 184, 216, 34},
+		SelectedPort:     443,
+		DNSAnswerSetHash: make([]byte, 48),
+		TTLSeconds:       60,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packets, err := adapter.HandleFrameBlocks(context.Background(), []protocol.FrameBlock{{Frames: []protocol.AuroraFrame{confirm}}}, later)
+	if err != nil {
+		t.Fatalf("late UDP target confirmation ended the session: %v", err)
+	}
+	if len(packets) != 0 {
+		t.Fatalf("late UDP target confirmation produced %d local packets, want none", len(packets))
 	}
 }

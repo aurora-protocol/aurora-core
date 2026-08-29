@@ -240,11 +240,64 @@ func TestPacketAdapterCountsPendingDNSAgainstFlowLimit(t *testing.T) {
 		t.Fatalf("pending DNS flow count = %d, want one", adapter.FlowCount())
 	}
 	syn := packetAdapterTCPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, 100, 0, tcpFlagSYN, nil)
-	if err := adapter.Ingress(context.Background(), syn, now); err == nil {
-		t.Fatal("TCP flow was admitted after pending DNS reached the flow limit")
+	if err := adapter.Ingress(context.Background(), syn, now); err != nil {
+		t.Fatalf("flow limit ended the session instead of refusing the connection: %v", err)
 	}
-	if adapter.FlowCount() != 1 || len(adapter.DrainLocalPackets()) != 0 {
-		t.Fatal("rejected TCP flow changed adapter state")
+	if adapter.FlowCount() != 1 {
+		t.Fatalf("refused TCP flow changed the flow count: %d", adapter.FlowCount())
+	}
+	refusal := adapter.DrainLocalPackets()
+	if len(refusal) != 1 {
+		t.Fatalf("refused connection produced %d local packets, want one RST", len(refusal))
+	}
+	if flags := refusal[0][33]; flags&tcpFlagRST == 0 {
+		t.Fatalf("refusal packet flags = %#x, want RST", flags)
+	}
+}
+
+func TestPacketAdapterRefusesNewFlowsAtTheLimitWithoutEndingTheSession(t *testing.T) {
+	// A tunnel at its flow limit still carries healthy flows: an unservable
+	// new connection must be refused or dropped, never escalated into an
+	// error that ends the whole session.
+	application, _ := packetAdapterApplications(t)
+	defer application.Close()
+	adapter, err := NewPacketAdapter(application, PacketAdapterOptions{
+		MaxFlows:       1,
+		MaxPacketBytes: 1500,
+		UDPMode:        transport.UDPOverStreamFallback,
+		Random:         bytes.NewReader(bytes.Repeat([]byte{0x57}, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	syn := packetAdapterTCPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50000, 443, 100, 0, tcpFlagSYN, nil)
+	if err := adapter.Ingress(context.Background(), syn, now); err != nil {
+		t.Fatalf("first flow rejected: %v", err)
+	}
+	if adapter.FlowCount() != 1 {
+		t.Fatalf("flow count = %d, want one", adapter.FlowCount())
+	}
+	adapter.DrainLocalPackets()
+
+	second := packetAdapterTCPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50001, 443, 200, 0, tcpFlagSYN, nil)
+	if err := adapter.Ingress(context.Background(), second, now); err != nil {
+		t.Fatalf("TCP flow limit ended the session: %v", err)
+	}
+	if packets := adapter.DrainLocalPackets(); len(packets) != 1 || packets[0][33]&tcpFlagRST == 0 {
+		t.Fatalf("TCP flow limit did not refuse the connection with a RST")
+	}
+
+	udp := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{93, 184, 216, 34}, 50002, 443, []byte("payload"))
+	if err := adapter.Ingress(context.Background(), udp, now); err != nil {
+		t.Fatalf("UDP flow limit ended the session: %v", err)
+	}
+	dns := packetAdapterUDPv4(t, [4]byte{10, 0, 0, 2}, [4]byte{100, 64, 0, 1}, 53000, 53, packetAdapterDNSQuery(t, "example.com"))
+	if err := adapter.Ingress(context.Background(), dns, now); err != nil {
+		t.Fatalf("DNS flow limit ended the session: %v", err)
+	}
+	if adapter.FlowCount() != 1 {
+		t.Fatalf("dropped flows changed the flow count: %d", adapter.FlowCount())
 	}
 }
 

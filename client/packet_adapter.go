@@ -522,7 +522,16 @@ func (a *PacketAdapter) ingressTCPLocked(ctx context.Context, packet packetAdapt
 			return a.enqueueLocalPacketLocked(response)
 		}
 		if a.flowCountLocked() >= a.maximumFlows {
-			return fmt.Errorf("client: packet adapter flow limit reached")
+			// The tunnel cannot carry another flow, but the flows it already
+			// carries are healthy: refuse this connection instead of ending
+			// the session. A RST lets the application fail immediately rather
+			// than retransmitting a SYN into a blackhole.
+			refused := &packetAdapterFlow{tuple: tuple}
+			response, err := a.makeTCPPacketLocked(refused, 0, packet.tcp.sequence+1, tcpFlagACK|tcpFlagRST, nil)
+			if err != nil {
+				return nil
+			}
+			return a.enqueueLocalPacketLocked(response)
 		}
 		if len(a.localPackets) >= a.maximumLocal {
 			return session.ErrBackpressure
@@ -649,7 +658,9 @@ func (a *PacketAdapter) ingressUDPLocked(ctx context.Context, packet packetAdapt
 	}
 	if mapping == nil {
 		if a.flowCountLocked() >= a.maximumFlows {
-			return fmt.Errorf("client: packet adapter flow limit reached")
+			// UDP has no refusal signal, so drop the datagram: an unservable
+			// association must not end the flows the tunnel already carries.
+			return nil
 		}
 		flowID, err := a.allocateFlowIDLocked()
 		if err != nil {
@@ -744,7 +755,9 @@ func (a *PacketAdapter) ingressRelayedDNS(ctx context.Context, packet packetAdap
 	}
 	a.expireDNSRequestsLocked(now)
 	if a.flowCountLocked() >= a.maximumFlows {
-		return fmt.Errorf("client: packet adapter flow limit reached")
+		// Drop the query rather than ending every other flow; the resolver
+		// retries, and pending DNS flows expire on their own.
+		return nil
 	}
 	flowID, err := a.allocateFlowIDLocked()
 	if err != nil {

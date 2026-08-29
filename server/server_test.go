@@ -674,6 +674,32 @@ func TestDevicePacketExchangerWritesInboundPacketsToDevice(t *testing.T) {
 	}
 }
 
+func TestDevicePacketExchangerRejectsLateOversizePacketBeforeWriting(t *testing.T) {
+	device := newScriptedPacketDevice()
+	exchanger, err := NewDevicePacketExchanger(device, DevicePacketExchangerOptions{
+		MTU:          8,
+		QueuePackets: 4,
+	})
+	if err != nil {
+		t.Fatalf("NewDevicePacketExchanger failed: %v", err)
+	}
+	defer exchanger.Close()
+
+	_, err = exchanger.ExchangePacketBatch(PacketBatch{
+		Packets: [][]byte{
+			{0x45, 0x00, 0x00, 0x04},
+			{0x45, 0x00, 0x00, 0x09, 0, 0, 0, 0, 0},
+		},
+		ProtocolNumbers: []uint16{2, 2},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds device MTU") {
+		t.Fatalf("ExchangePacketBatch error = %v, want device MTU rejection", err)
+	}
+	if writes := device.Writes(); len(writes) != 0 {
+		t.Fatalf("device received %d packet(s) before late MTU rejection", len(writes))
+	}
+}
+
 func TestDevicePacketExchangerDrainsOutboundDevicePackets(t *testing.T) {
 	device := newScriptedPacketDevice()
 	exchanger, err := NewDevicePacketExchanger(device, DevicePacketExchangerOptions{

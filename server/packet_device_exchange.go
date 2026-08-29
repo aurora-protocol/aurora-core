@@ -87,10 +87,14 @@ func (e *DevicePacketExchanger) ExchangePacketBatch(batch PacketBatch) (PacketBa
 	if err := e.readError(); err != nil {
 		return PacketBatch{}, fmt.Errorf("server: read packet device: %w", err)
 	}
+	// Preflight the whole batch before mutating the packet device. Otherwise a
+	// late oversized packet would leave an injected prefix behind on failure.
 	for _, packet := range batch.Packets {
 		if len(packet) > e.mtu {
 			return PacketBatch{}, fmt.Errorf("server: packet length %d exceeds device MTU %d", len(packet), e.mtu)
 		}
+	}
+	for _, packet := range batch.Packets {
 		if err := writeFullPacket(e.device, packet); err != nil {
 			return PacketBatch{}, fmt.Errorf("server: write packet device: %w", err)
 		}

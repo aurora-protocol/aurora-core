@@ -14,6 +14,17 @@ import (
 	auroratrust "github.com/aurora-protocol/aurora-core/trust"
 )
 
+const (
+	// maxHintEpochSeconds is the deployment bar for hint epoch length (24h).
+	maxHintEpochSeconds = 24 * 60 * 60
+	// maxVerifierServiceRTTMillis is the deployment bar for verifier service
+	// round-trip latency (250ms).
+	maxVerifierServiceRTTMillis = 250
+)
+
+// A profile may report a stricter operational bar than the deployment bar
+// but never a looser one: unset or inflated values fall back to the bar.
+
 type HintEpochProvision struct {
 	IssuerID                     []byte
 	RelayBucketID                []byte
@@ -251,8 +262,8 @@ func issuerOperationsHarnessProfile(nowUnix uint64) (IssuerOperationsProfile, er
 
 func verifyHintProvisioning(profile IssuerOperationsProfile, report *IssuerOperationsReport) bool {
 	maxEpochSeconds := profile.MaxHintEpochSeconds
-	if maxEpochSeconds == 0 {
-		maxEpochSeconds = 24 * 60 * 60
+	if maxEpochSeconds == 0 || maxEpochSeconds > maxHintEpochSeconds {
+		maxEpochSeconds = maxHintEpochSeconds
 	}
 	activeScopes := activeRelayBucketScopes(profile.Metadata, profile.NowUnix)
 	if len(activeScopes) == 0 {
@@ -374,8 +385,8 @@ func verifyVerifierOperations(profile IssuerOperationsProfile, report *IssuerOpe
 		passed = false
 	}
 	maxRTT := profile.MaxVerifierServiceRTTMillis
-	if maxRTT == 0 {
-		maxRTT = 250
+	if maxRTT == 0 || maxRTT > maxVerifierServiceRTTMillis {
+		maxRTT = maxVerifierServiceRTTMillis
 	}
 	if profile.VerifierServiceRTTMillis > maxRTT {
 		report.addFinding("verifier service latency exceeds configured budget")

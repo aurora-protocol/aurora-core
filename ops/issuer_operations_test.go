@@ -259,3 +259,38 @@ func reportHasFinding(report IssuerOperationsReport, want string) bool {
 	}
 	return false
 }
+
+// TestVerifyIssuerOperationsProfileCapsSelfReportedBars proves a profile cannot
+// raise its own operational bars: an inflated MaxHintEpochSeconds must not let
+// a multi-day hint epoch through, and an inflated MaxVerifierServiceRTTMillis
+// must not let a slow verifier through. Stricter self-reported bars still hold.
+func TestVerifyIssuerOperationsProfileCapsSelfReportedBars(t *testing.T) {
+	profile, _ := issuerOperationsProfileFixture(t)
+	profile.HintEpochs[0].ValidFromUnix = 100
+	profile.HintEpochs[0].ValidUntilUnix = 100 + 30*24*60*60
+	profile.MaxHintEpochSeconds = ^uint64(0)
+	profile.VerifierServiceRTTMillis = 5000
+	profile.MaxVerifierServiceRTTMillis = ^uint64(0)
+	report, err := VerifyIssuerOperationsProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.HintProvisioning || !reportHasFinding(report, "hint epoch validity exceeds configured maximum") {
+		t.Fatalf("inflated MaxHintEpochSeconds let a 30-day hint epoch through: %+v", report)
+	}
+	if report.VerifierFailClosed || !reportHasFinding(report, "verifier service latency exceeds configured budget") {
+		t.Fatalf("inflated MaxVerifierServiceRTTMillis let a 5s verifier through: %+v", report)
+	}
+
+	profile, _ = issuerOperationsProfileFixture(t)
+	profile.MaxHintEpochSeconds = 300 // epoch spans 400s
+	profile.VerifierServiceRTTMillis = 150
+	profile.MaxVerifierServiceRTTMillis = 100
+	report, err = VerifyIssuerOperationsProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.HintProvisioning || report.VerifierFailClosed || report.Passed {
+		t.Fatalf("stricter self-reported bars were not honored: %+v", report)
+	}
+}

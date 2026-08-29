@@ -132,6 +132,76 @@ func TestPacketAdapterDropsSYNOnLocalPacketBackpressure(t *testing.T) {
 	}
 }
 
+func TestPacketAdapterDoesNotRefreshUDPIdleTimeOnSessionBackpressure(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{
+		MaxFlows:       2,
+		MaxPacketBytes: 1500,
+		UDPMode:        transport.UDPOverStreamFallback,
+		Random:         bytes.NewReader(make([]byte, 64)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Unix(1_700_000_000, 0)
+	source := [4]byte{10, 0, 0, 2}
+	target := [4]byte{93, 184, 216, 34}
+	udp := packetAdapterUDPv4(t, source, target, 50000, 443, []byte("datagram"))
+	if err := adapter.Ingress(context.Background(), udp, start); err != nil {
+		t.Fatal(err)
+	}
+
+	// The UDP open occupies one of the application's six non-reserved queue
+	// slots. Fill the other five so another datagram is dropped.
+	for index := uint64(0); index < 5; index++ {
+		frame, err := protocol.NewStreamDataFrame(100+index, []byte("fill"), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := clientApplication.QueueFrames(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}); err != nil {
+			t.Fatalf("fill application queue at %d: %v", index, err)
+		}
+	}
+	if got := clientApplication.Stats().QueuedPackets; got != 6 {
+		t.Fatalf("queued packets = %d, want full data capacity 6", got)
+	}
+
+	// Stay inside the proxy flow's shorter idle window so the datagram reaches
+	// QueueFrames and is dropped there, rather than reopening the association.
+	droppedAt := start.Add(29 * time.Second)
+	if err := adapter.Ingress(context.Background(), udp, droppedAt); err != nil {
+		t.Fatalf("backpressured UDP ingress = %v, want nil drop", err)
+	}
+	adapter.mu.Lock()
+	var lastActivity time.Time
+	for _, mapping := range adapter.flowsByID {
+		lastActivity = mapping.lastActivity
+	}
+	adapter.mu.Unlock()
+	if !lastActivity.Equal(start) {
+		t.Fatalf("dropped UDP datagram refreshed idle time to %v, want %v", lastActivity, start)
+	}
+
+	// At the original deadline a different datagram triggers the sweep. Its
+	// pending close cannot enter the still-full queue, but local reclamation is
+	// already committed and must free the flow slot.
+	trigger := packetAdapterUDPv4(t, source, target, 50001, 443, []byte("trigger"))
+	if err := adapter.Ingress(context.Background(), trigger, start.Add(defaultPacketAdapterUDPIdleLifetime)); err != nil {
+		t.Fatalf("expiry trigger under backpressure: %v", err)
+	}
+	if adapter.FlowCount() != 0 {
+		t.Fatalf("dropped UDP traffic retained %d idle flows, want zero", adapter.FlowCount())
+	}
+	adapter.mu.Lock()
+	pendingCloses := len(adapter.pendingFlowCloses)
+	adapter.mu.Unlock()
+	if pendingCloses != 1 {
+		t.Fatalf("pending close count = %d, want one reclaimed association", pendingCloses)
+	}
+}
+
 func TestPacketAdapterRetriesExpiredUDPClosesAfterSessionBackpressure(t *testing.T) {
 	clientApplication, relayApplication := packetAdapterApplications(t)
 	defer clientApplication.Close()

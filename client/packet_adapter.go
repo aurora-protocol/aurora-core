@@ -687,7 +687,6 @@ func (a *PacketAdapter) ingressUDPLocked(ctx context.Context, packet packetAdapt
 	frames := make([]protocol.AuroraFrame, 0, 2)
 	var data protocol.AuroraFrame
 	if mapping != nil {
-		mapping.lastActivity = now
 		data, err := a.proxy.SendUDPWithOptions(mapping.flowID, packet.udp.payload, UDPSendOptions{NowUnix: uint64(now.Unix()), UDPMode: a.udpMode})
 		if err != nil {
 			if a.proxy.HasFlow(mapping.flowID) {
@@ -734,6 +733,12 @@ func (a *PacketAdapter) ingressUDPLocked(ctx context.Context, packet packetAdapt
 	if _, exists := a.flowsByID[mapping.flowID]; !exists {
 		a.flowsByTuple[tuple] = mapping
 		a.flowsByID[mapping.flowID] = mapping
+	} else {
+		// A dropped datagram did not keep the relay association active. Refresh
+		// the idle deadline only after the outbound frame is durably queued, or
+		// sustained backpressure can preserve a dead mapping until MaxFlows is
+		// exhausted.
+		mapping.lastActivity = now
 	}
 	return nil
 }

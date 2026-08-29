@@ -69,6 +69,15 @@ func verifyDirectoryConsensusSignaturesWithUsage(c protocol.DirectoryConsensus, 
 	if minValidDistinctAuthorities <= 0 {
 		minValidDistinctAuthorities = 1
 	}
+	if c.Version != registry.Version20 {
+		return fmt.Errorf("trust: unsupported directory consensus version 0x%x", c.Version)
+	}
+	// A consensus signed by still-valid authority keys must not outlive its
+	// own window: accepting it would allow rollback to a stale relay set,
+	// revocation root, or policy root.
+	if c.ValidUntilUnix <= c.ValidFromUnix || now < c.ValidFromUnix || now >= c.ValidUntilUnix {
+		return fmt.Errorf("trust: directory consensus outside validity interval")
+	}
 	if len(c.AuthoritySignatures) == 0 {
 		return fmt.Errorf("trust: directory consensus has no authority signatures")
 	}

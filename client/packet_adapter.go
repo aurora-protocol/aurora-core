@@ -49,6 +49,12 @@ const (
 	tcpFlagRST                               = 0x04
 	tcpFlagPSH                               = 0x08
 	tcpFlagACK                               = 0x10
+	tcpFlagECE                               = 0x40
+	tcpFlagCWR                               = 0x80
+	// tcpSYNIgnoredFlags are the SYN companion flags the adapter tolerates. A
+	// kernel with ECN enabled sets ECE|CWR on every outgoing SYN; the adapter
+	// answers with a plain SYN|ACK, which is how RFC 3168 declines ECN.
+	tcpSYNIgnoredFlags = tcpFlagECE | tcpFlagCWR
 )
 
 // ErrPacketAdapterClosed reports packet processing attempted after adapter shutdown.
@@ -498,8 +504,12 @@ func (a *PacketAdapter) ingressTCPLocked(ctx context.Context, packet packetAdapt
 	}
 	mapping := a.flowsByTuple[tuple]
 	if packet.tcp.flags&tcpFlagSYN != 0 {
-		if packet.tcp.flags != tcpFlagSYN || len(packet.tcp.payload) != 0 {
-			return fmt.Errorf("client: packet adapter only accepts an initial TCP SYN")
+		if packet.tcp.flags&^(tcpFlagSYN|tcpSYNIgnoredFlags) != 0 || len(packet.tcp.payload) != 0 {
+			// A well-formed SYN the tunnel cannot serve: a TCP Fast Open SYN
+			// carrying data, or an inbound SYN|ACK. Drop it as ingress does for
+			// unsupported protocols — the kernel retries a Fast Open SYN without
+			// its payload, while failing here would end every other flow too.
+			return nil
 		}
 		if mapping != nil {
 			if mapping.clientNextSequence != packet.tcp.sequence+1 {

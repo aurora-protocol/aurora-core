@@ -1499,7 +1499,7 @@ func TestPacketAdapterSegmentsRelayStreamDataToConfiguredPacketLimit(t *testing.
 	if _, err := adapter.NextEncryptedPacket(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	frame, err := protocol.NewStreamDataFrame(1, bytes.Repeat([]byte{0x77}, 90), 0)
+	frame, err := protocol.NewStreamDataFrame(1, bytes.Repeat([]byte{0x77}, 200), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1510,12 +1510,15 @@ func TestPacketAdapterSegmentsRelayStreamDataToConfiguredPacketLimit(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(encrypted) <= 128+64 {
+		t.Fatalf("encrypted relay packet length = %d, want above the old MTU-derived limit", len(encrypted))
+	}
 	packets, err := adapter.HandleEncryptedPacket(context.Background(), encrypted, now)
 	if err != nil {
 		t.Fatalf("large relay stream frame ended the session: %v", err)
 	}
-	if len(packets) != 2 {
-		t.Fatalf("large relay stream frame returned %d packets, want two MTU-sized segments", len(packets))
+	if len(packets) != 3 {
+		t.Fatalf("large relay stream frame returned %d packets, want three MTU-sized segments", len(packets))
 	}
 	var reassembled []byte
 	wantSequence := synACK.sequence + 1
@@ -1535,6 +1538,32 @@ func TestPacketAdapterSegmentsRelayStreamDataToConfiguredPacketLimit(t *testing.
 	}
 	if adapter.FlowCount() != 1 {
 		t.Fatalf("segmented relay data retired the live flow: %d", adapter.FlowCount())
+	}
+}
+
+func TestPacketAdapterHandleEncryptedPacketUsesApplicationInputLimit(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{
+		MaxFlows:       8,
+		MaxPacketBytes: 128,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fixture application has a 64 KiB encrypted-packet input bound. The
+	// adapter must delegate to that independent bound rather than substituting
+	// its much smaller cleartext TUN packet limit.
+	packets, err := adapter.HandleEncryptedPacket(context.Background(), make([]byte, (64<<10)+1), time.Unix(1_700_000_000, 0))
+	if err == nil || err.Error() != "session: packet exceeds configured limit" {
+		t.Fatalf("oversized encrypted packet error = %v, want application input-limit error", err)
+	}
+	if len(packets) != 0 {
+		t.Fatalf("oversized encrypted packet returned %d local packets, want none", len(packets))
+	}
+	if clientApplication.Err() != nil {
+		t.Fatalf("input-limit rejection terminated the application: %v", clientApplication.Err())
 	}
 }
 

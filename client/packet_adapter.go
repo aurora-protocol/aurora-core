@@ -453,14 +453,17 @@ func (a *PacketAdapter) HandleEncryptedPacket(ctx context.Context, encoded []byt
 		return nil, ErrPacketAdapterClosed
 	}
 	application := a.application
-	maximumPacket := a.maximumPacket
 	a.mu.Unlock()
 	if application == nil {
 		return nil, fmt.Errorf("client: packet adapter application is unavailable")
 	}
-	if len(encoded) == 0 || len(encoded) > maximumPacket+64 {
+	if len(encoded) == 0 {
 		return nil, fmt.Errorf("client: encrypted packet size is invalid")
 	}
+	// MaxPacketBytes bounds cleartext IP packets crossing the TUN interface,
+	// not authenticated carrier packets. Relay STREAM_DATA frames routinely
+	// exceed an interface MTU and are segmented after decryption. Application
+	// enforces its independently configured encrypted-packet input limit.
 	blocks, err := application.HandlePacket(ctx, now, encoded)
 	if err != nil {
 		return nil, err

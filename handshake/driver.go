@@ -12,6 +12,7 @@ import (
 
 	"github.com/aurora-protocol/aurora-core/admission"
 	auroracrypto "github.com/aurora-protocol/aurora-core/crypto"
+	"github.com/aurora-protocol/aurora-core/policy"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/session"
@@ -353,6 +354,9 @@ func validateClientPolicy(offer protocol.PolicyOffer, hints protocol.ClientTrans
 	}
 	if offer.MinimumPolicyID == registry.PolicyLab || offer.RequestedPolicyID == registry.PolicyLab {
 		return fmt.Errorf("handshake: lab policy is forbidden in production")
+	}
+	if offer.RequestedRouteModeID == registry.RouteFast1 && (policy.ForbidsFast1Route(offer.MinimumPolicyID) || policy.ForbidsFast1Route(offer.RequestedPolicyID)) {
+		return fmt.Errorf("handshake: policy offer requests the fast-1 route under a policy that forbids it")
 	}
 	if (offer.RequestedPolicyID == registry.PolicyAdversarialStrict || offer.RequestedPolicyID == registry.PolicyEmergencyWeb) && len(hints.NetworkCohortHint) != 0 {
 		return fmt.Errorf("handshake: strict policy forbids a network cohort hint")

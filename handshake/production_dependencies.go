@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/aurora-protocol/aurora-core/admission"
+	auroraPolicy "github.com/aurora-protocol/aurora-core/policy"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
@@ -116,6 +117,9 @@ func NewFixedProxyPolicySelector(suite, policy, route, shape uint64) (*FixedProx
 	}
 	if policy == registry.PolicyLab {
 		return nil, fmt.Errorf("handshake: lab policy is forbidden for a fixed proxy selector")
+	}
+	if route == registry.RouteFast1 && auroraPolicy.ForbidsFast1Route(policy) {
+		return nil, fmt.Errorf("handshake: policy 0x%x forbids the fast-1 route for a fixed proxy selector", policy)
 	}
 	return selector, nil
 }

@@ -140,3 +140,14 @@ func TestRequiresPQPreludeSignatureMatchesSpecAdversarialProfiles(t *testing.T) 
 		}
 	}
 }
+
+func TestForbidsFast1RouteMatchesProfileStealthGate(t *testing.T) {
+	for _, p := range allProfiles {
+		if got := ForbidsFast1Route(p.ID); got != p.Fast1Forbidden {
+			t.Fatalf("ForbidsFast1Route(0x%x) = %v, want %v", p.ID, got, p.Fast1Forbidden)
+		}
+	}
+	if !ForbidsFast1Route(0x7e) {
+		t.Fatal("unknown policy did not fail closed")
+	}
+}

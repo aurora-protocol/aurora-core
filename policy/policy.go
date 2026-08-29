@@ -65,6 +65,17 @@ func RequiresPQPreludeSignature(policyID uint64) bool {
 	}
 }
 
+// ForbidsFast1Route reports whether the policy forbids the fast-1 route mode
+// unconditionally. Spec sections 21.4/21.5 forbid fast-1 under the strict and
+// emergency profiles; an unknown policy fails closed.
+func ForbidsFast1Route(policyID uint64) bool {
+	profile, err := ProfileByID(policyID)
+	if err != nil {
+		return true
+	}
+	return profile.Fast1Forbidden
+}
+
 func SmartProfile(pathClass string) Profile {
 	switch pathClass {
 	case "clean":

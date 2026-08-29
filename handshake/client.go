@@ -612,6 +612,11 @@ func validateClientPolicyAccept(now uint64, deployment interface {
 	if accept.SelectedRouteModeID != offer.RequestedRouteModeID || accept.SelectedShape != offer.RequestedShapeID {
 		return fmt.Errorf("handshake: policy accept changed requested route or shape")
 	}
+	// Spec sections 21.4/21.5 forbid fast-1 under the strict and emergency
+	// profiles unconditionally; the negotiated policy is only known here.
+	if accept.SelectedRouteModeID == registry.RouteFast1 && policy.ForbidsFast1Route(accept.SelectedPolicy) {
+		return fmt.Errorf("handshake: negotiated policy 0x%x forbids the fast-1 route", accept.SelectedPolicy)
+	}
 	if hasDuplicateDriverIDs(accept.FallbackMethods) {
 		return fmt.Errorf("handshake: policy accept contains duplicate fallback methods")
 	}

@@ -3,6 +3,7 @@ package admission
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -262,20 +263,38 @@ func (c *FileReplayCache) load() error {
 		return err
 	}
 	seen := make(map[string]struct{})
-	scanner := bufio.NewScanner(c.file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+	reader := bufio.NewReader(c.file)
+	var consumed int64
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr == nil {
+			consumed += int64(len(line))
+			if record := strings.TrimSpace(line); record != "" {
+				key, err := hex.DecodeString(record)
+				if err != nil {
+					return fmt.Errorf("admission: replay cache %s has malformed key: %w", c.path, err)
+				}
+				seen[string(key)] = struct{}{}
+			}
 			continue
 		}
-		key, err := hex.DecodeString(line)
-		if err != nil {
-			return fmt.Errorf("admission: replay cache %s has malformed key: %w", c.path, err)
+		if !errors.Is(readErr, io.EOF) {
+			return readErr
 		}
-		seen[string(key)] = struct{}{}
-	}
-	if err := scanner.Err(); err != nil {
-		return err
+		if len(line) > 0 {
+			// A crash tore the final append. It was never acknowledged, because
+			// InsertIfAbsent syncs before reporting success, so nothing admitted
+			// is lost by dropping it. Repairing is mandatory: the file is opened
+			// for appending, so the next record would otherwise be concatenated
+			// with the torn bytes and lose its key.
+			if err := c.file.Truncate(consumed); err != nil {
+				return err
+			}
+			if err := c.file.Sync(); err != nil {
+				return err
+			}
+		}
+		break
 	}
 	c.seen = seen
 	_, err := c.file.Seek(0, io.SeekEnd)

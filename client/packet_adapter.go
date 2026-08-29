@@ -330,16 +330,13 @@ func (a *PacketAdapter) Ingress(ctx context.Context, encoded []byte, now time.Ti
 	}
 	a.pendingFlowCloses = append(a.pendingFlowCloses, expiredUDPFrames...)
 	if len(a.pendingFlowCloses) != 0 {
-		block := protocol.FrameBlock{Frames: a.pendingFlowCloses}
-		if err := a.application.QueueFrames(ctx, block); err != nil {
+		if err := a.queuePendingFlowClosesLocked(ctx); err != nil {
 			a.mu.Unlock()
-			// Expiration is already committed locally. Retain the close block and
+			// Expiration is already committed locally. Retain the unqueued closes and
 			// drop this ingress packet until queue capacity is available, so relay
 			// sockets are eventually reclaimed without growing cleanup state.
 			return dropPacketAdapterBackpressure(err)
 		}
-		zeroPacketAdapterBlocks([]protocol.FrameBlock{block})
-		a.pendingFlowCloses = nil
 	}
 	a.mu.Unlock()
 	if fragment, fragmented, err := parsePacketAdapterIPv4Fragment(encoded, a.maximumPacket); err != nil {
@@ -1079,6 +1076,36 @@ func (a *PacketAdapter) expireUDPFlowsLocked(now time.Time) ([]protocol.AuroraFr
 		a.removeFlowLocked(mapping)
 	}
 	return frames, nil
+}
+
+// queuePendingFlowClosesLocked queues prefixes the application can currently
+// accept, splitting an oversized aggregate block until it makes progress.
+// Successfully encoded payloads are zeroed before ownership is released; an
+// unqueued suffix remains owned by the adapter for the next ingress attempt.
+// a.mu must be held.
+func (a *PacketAdapter) queuePendingFlowClosesLocked(ctx context.Context) error {
+	batchSize := len(a.pendingFlowCloses)
+	for len(a.pendingFlowCloses) != 0 {
+		if batchSize > len(a.pendingFlowCloses) {
+			batchSize = len(a.pendingFlowCloses)
+		}
+		block := protocol.FrameBlock{Frames: a.pendingFlowCloses[:batchSize]}
+		if err := a.application.QueueFrames(ctx, block); err != nil {
+			if batchSize == 1 {
+				return err
+			}
+			batchSize /= 2
+			continue
+		}
+		for index := range batchSize {
+			zeroPacketAdapterBytes(a.pendingFlowCloses[index].Payload)
+			a.pendingFlowCloses[index] = protocol.AuroraFrame{}
+		}
+		a.pendingFlowCloses = a.pendingFlowCloses[batchSize:]
+		batchSize = len(a.pendingFlowCloses)
+	}
+	a.pendingFlowCloses = nil
+	return nil
 }
 
 func (a *PacketAdapter) expireDNSRequestsLocked(now time.Time) {

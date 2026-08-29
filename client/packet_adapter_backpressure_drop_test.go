@@ -18,9 +18,11 @@ package client
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/session"
 	"github.com/aurora-protocol/aurora-core/transport"
@@ -215,4 +217,77 @@ func TestPacketAdapterRetriesExpiredUDPClosesAfterSessionBackpressure(t *testing
 	if _, err := clientApplication.TryNextPacket(); err != session.ErrNoPacket {
 		t.Fatalf("packet after UDP close retry = %v, want no packet", err)
 	}
+}
+
+func TestPacketAdapterSplitsOversizedPendingUDPCloses(t *testing.T) {
+	clientApplication, err := session.NewApplication(session.Config{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 1,
+		HopLayer:        0,
+		Write:           session.DirectionConfig{Direction: 0, Secret: bytes.Repeat([]byte{0x11}, 48), Key: bytes.Repeat([]byte{0x12}, 32), IV: bytes.Repeat([]byte{0x13}, 12)},
+		Read:            session.DirectionConfig{Direction: 1, Secret: bytes.Repeat([]byte{0x21}, 48), Key: bytes.Repeat([]byte{0x22}, 32), IV: bytes.Repeat([]byte{0x23}, 12)},
+		Limits:          session.Limits{MaxQueuedPackets: 8, MaxQueuedBytes: 24 << 10, ControlReservedPackets: 2, ControlReservedBytes: 8 << 10, ReplayWindow: 64},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{
+		MaxFlows:       maximumPacketAdapterFlows,
+		MaxPacketBytes: 1500,
+		UDPMode:        transport.UDPOverStreamFallback,
+		Random:         bytes.NewReader(make([]byte, 8)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	frames := make([]protocol.AuroraFrame, 0, maximumPacketAdapterFlows)
+	var firstPayload, lastPayload []byte
+	for flowID := uint64(1); flowID <= maximumPacketAdapterFlows; flowID++ {
+		frame, err := protocol.NewFlowCloseFrame(protocol.FlowClose{
+			FlowID:    flowID,
+			CloseCode: protocol.CloseIdleTimeout,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		frames = append(frames, frame)
+		if flowID == 1 {
+			firstPayload = frame.Payload
+		}
+		lastPayload = frame.Payload
+	}
+	adapter.mu.Lock()
+	adapter.pendingFlowCloses = frames
+	err = adapter.queuePendingFlowClosesLocked(context.Background())
+	pending := len(adapter.pendingFlowCloses)
+	adapter.mu.Unlock()
+	if !errors.Is(err, session.ErrBackpressure) {
+		t.Fatalf("oversized close queue error = %v, want backpressure after partial progress", err)
+	}
+	stats := clientApplication.Stats()
+	if stats.QueuedPackets == 0 || pending <= 0 || pending >= maximumPacketAdapterFlows {
+		t.Fatalf("oversized close progress: queued=%d pending=%d, want both nonzero", stats.QueuedPackets, pending)
+	}
+	if !allPacketAdapterBytesZero(firstPayload) {
+		t.Fatal("successfully queued close payload was not zeroed")
+	}
+	if allPacketAdapterBytesZero(lastPayload) {
+		t.Fatal("unqueued close payload was zeroed before ownership was released")
+	}
+
+	adapter.Close()
+	if !allPacketAdapterBytesZero(lastPayload) {
+		t.Fatal("adapter close did not zero retained close payload")
+	}
+}
+
+func allPacketAdapterBytesZero(value []byte) bool {
+	for _, element := range value {
+		if element != 0 {
+			return false
+		}
+	}
+	return true
 }

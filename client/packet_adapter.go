@@ -104,9 +104,10 @@ type PacketAdapter struct {
 	ipv4Fragments map[packetAdapterIPv4FragmentKey]*packetAdapterIPv4FragmentSet
 	ipv6Fragments map[packetAdapterIPv6FragmentKey]*packetAdapterIPv6FragmentSet
 	localPackets  [][]byte
-	// pendingFlowCloses retains idle UDP cleanup until the bounded application
-	// queue accepts it. While it is non-empty, Ingress drops new packets under
-	// the normal backpressure contract, so the slice remains bounded by MaxFlows.
+	// pendingFlowCloses retains locally committed flow teardown (idle UDP expiry
+	// and non-retransmitted TCP resets) until the bounded application queue
+	// accepts it. Ingress and the encrypted writer both retry it; while it is
+	// unqueued, new ingress is dropped so the slice remains bounded by MaxFlows.
 	pendingFlowCloses []protocol.AuroraFrame
 }
 
@@ -421,9 +422,16 @@ func (a *PacketAdapter) NextEncryptedPacket(ctx context.Context) ([]byte, error)
 		return nil, ErrPacketAdapterClosed
 	}
 	application := a.application
+	var flushErr error
+	if len(a.pendingFlowCloses) != 0 {
+		flushErr = a.queuePendingFlowClosesLocked(ctx)
+	}
 	a.mu.Unlock()
 	if application == nil {
 		return nil, fmt.Errorf("client: packet adapter application is unavailable")
+	}
+	if flushErr != nil && !errors.Is(flushErr, session.ErrBackpressure) {
+		return nil, flushErr
 	}
 	return application.NextPacket(ctx)
 }
@@ -962,6 +970,13 @@ func (a *PacketAdapter) closeLocalFlowLocked(ctx context.Context, mapping *packe
 		return err
 	}
 	if err := a.application.QueueFrames(ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}); err != nil {
+		if !fin && errors.Is(err, session.ErrBackpressure) {
+			// Unlike FIN, the local stack does not retransmit an RST. Commit the
+			// reset locally and retain its close frame for the ordered retry path;
+			// otherwise this dead tuple survives indefinitely under congestion.
+			a.pendingFlowCloses = append(a.pendingFlowCloses, frame)
+			a.removeFlowLocked(mapping)
+		}
 		return err
 	}
 	mapping.localClosed = true
@@ -1084,6 +1099,12 @@ func (a *PacketAdapter) expireUDPFlowsLocked(now time.Time) ([]protocol.AuroraFr
 // unqueued suffix remains owned by the adapter for the next ingress attempt.
 // a.mu must be held.
 func (a *PacketAdapter) queuePendingFlowClosesLocked(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("client: packet adapter close queue context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	batchSize := len(a.pendingFlowCloses)
 	for len(a.pendingFlowCloses) != 0 {
 		if batchSize > len(a.pendingFlowCloses) {

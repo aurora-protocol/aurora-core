@@ -26,6 +26,7 @@ import (
 	"github.com/aurora-protocol/aurora-core/registry"
 	"github.com/aurora-protocol/aurora-core/session"
 	"github.com/aurora-protocol/aurora-core/transport"
+	"github.com/aurora-protocol/aurora-core/wire"
 )
 
 func TestPacketAdapterDropsSYNOnSessionQueueBackpressure(t *testing.T) {
@@ -219,7 +220,133 @@ func TestPacketAdapterRetriesExpiredUDPClosesAfterSessionBackpressure(t *testing
 	}
 }
 
-func TestPacketAdapterSplitsOversizedPendingUDPCloses(t *testing.T) {
+func TestPacketAdapterRetainsLocalResetOnSessionBackpressure(t *testing.T) {
+	clientApplication, relayApplication := packetAdapterApplications(t)
+	defer clientApplication.Close()
+	defer relayApplication.Close()
+	adapter, err := NewPacketAdapter(clientApplication, PacketAdapterOptions{
+		MaxFlows:       8,
+		MaxPacketBytes: 1500,
+		UDPMode:        transport.UDPOverStreamFallback,
+		Random:         bytes.NewReader(make([]byte, 128)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	source := [4]byte{10, 0, 0, 2}
+	target := [4]byte{93, 184, 216, 34}
+	var firstFlowID uint64
+	var firstSynthetic packetAdapterTestTCP
+
+	// Six opens fill the session data queue. Keep the first flow's synthetic
+	// sequence so its local RST models a real kernel response.
+	for port := uint16(50000); port < 50006; port++ {
+		syn := packetAdapterTCPv4(t, source, target, port, 443, 100, 0, tcpFlagSYN, nil)
+		if err := adapter.Ingress(context.Background(), syn, now); err != nil {
+			t.Fatalf("SYN %d ingress: %v", port, err)
+		}
+		packets := adapter.DrainLocalPackets()
+		if len(packets) != 1 {
+			t.Fatalf("SYN %d returned %d packets, want one", port, len(packets))
+		}
+		if port == 50000 {
+			firstSynthetic = packetAdapterParseTCPv4(t, packets[0])
+			adapter.mu.Lock()
+			for flowID := range adapter.flowsByID {
+				firstFlowID = flowID
+			}
+			adapter.mu.Unlock()
+		}
+	}
+	if firstFlowID == 0 {
+		t.Fatal("first TCP flow has no flow ID")
+	}
+
+	rst := packetAdapterTCPv4(t, source, target, 50000, 443, 101, firstSynthetic.sequence+1, tcpFlagRST|tcpFlagACK, nil)
+	if err := adapter.Ingress(context.Background(), rst, now); err != nil {
+		t.Fatalf("backpressured local RST: %v", err)
+	}
+	if adapter.FlowCount() != 5 {
+		t.Fatalf("flow count after local RST = %d, want dead tuple retired", adapter.FlowCount())
+	}
+	adapter.mu.Lock()
+	if len(adapter.pendingFlowCloses) != 1 {
+		adapter.mu.Unlock()
+		t.Fatalf("pending reset closes = %d, want one", len(adapter.pendingFlowCloses))
+	}
+	pendingPayload := adapter.pendingFlowCloses[0].Payload
+	reader := wire.NewReader(pendingPayload)
+	pendingClose := protocol.DecodeFlowClose(reader)
+	adapter.mu.Unlock()
+	if reader.Err() != nil || !reader.EOF() || pendingClose.FlowID != firstFlowID || pendingClose.CloseCode != protocol.CloseResetByPeer {
+		t.Fatalf("pending reset close = %+v, decode error %v", pendingClose, reader.Err())
+	}
+	if allPacketAdapterBytesZero(pendingPayload) {
+		t.Fatal("pending reset payload was zeroed before it was queued")
+	}
+
+	// The carrier writer first drains one full-queue packet, then its next call
+	// uses the freed slot for the retained close. No new local ingress is needed
+	// to release the relay-side socket.
+	closeFrames := 0
+	for packetIndex := range 7 {
+		encrypted, err := adapter.NextEncryptedPacket(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if packetIndex == 0 {
+			adapter.mu.Lock()
+			pending := len(adapter.pendingFlowCloses)
+			adapter.mu.Unlock()
+			if pending != 1 || allPacketAdapterBytesZero(pendingPayload) {
+				t.Fatalf("reset close after first drain: pending=%d zeroed=%v, want retained", pending, allPacketAdapterBytesZero(pendingPayload))
+			}
+		}
+		if packetIndex == 1 {
+			adapter.mu.Lock()
+			pending := len(adapter.pendingFlowCloses)
+			adapter.mu.Unlock()
+			if pending != 0 || !allPacketAdapterBytesZero(pendingPayload) {
+				t.Fatalf("reset close after writer retry: pending=%d zeroed=%v, want queued and zeroed", pending, allPacketAdapterBytesZero(pendingPayload))
+			}
+		}
+		blocks, err := relayApplication.HandlePacket(context.Background(), now, encrypted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, block := range blocks {
+			for _, frame := range block.Frames {
+				if frame.FrameType != registry.FrameFlowClose {
+					continue
+				}
+				closeFrames++
+				decoded := protocol.DecodeFlowClose(wire.NewReader(frame.Payload))
+				if decoded.FlowID != firstFlowID || decoded.CloseCode != protocol.CloseResetByPeer {
+					t.Fatalf("queued reset close = %+v", decoded)
+				}
+			}
+		}
+	}
+	if closeFrames != 1 {
+		t.Fatalf("queued reset closes = %d, want one", closeFrames)
+	}
+	if adapter.FlowCount() != 5 {
+		t.Fatalf("flow count after reset drain = %d, want 5", adapter.FlowCount())
+	}
+
+	// With the dead tuple gone and the close delivered, the local stack can
+	// immediately reuse the same four-tuple for a fresh connection.
+	reused := packetAdapterTCPv4(t, source, target, 50000, 443, 300, 0, tcpFlagSYN, nil)
+	if err := adapter.Ingress(context.Background(), reused, now); err != nil {
+		t.Fatalf("reused tuple SYN: %v", err)
+	}
+	if adapter.FlowCount() != 6 {
+		t.Fatalf("flow count after tuple reuse = %d, want 6", adapter.FlowCount())
+	}
+}
+
+func TestPacketAdapterSplitsOversizedPendingFlowCloses(t *testing.T) {
 	clientApplication, err := session.NewApplication(session.Config{
 		Suite:           registry.SuiteHybrid768AESGCM,
 		RouteInstanceID: 1,

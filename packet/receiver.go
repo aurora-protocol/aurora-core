@@ -104,7 +104,7 @@ func NewReceiver(cfg ReceiverConfig) *Receiver {
 	if windowSize > MaxReceiverWindowSize {
 		windowSize = MaxReceiverWindowSize
 	}
-	protector := cfg.Protector
+	protector := cloneProtectorForReceiver(cfg.Protector)
 	_ = protector.Prepare()
 	return &Receiver{
 		protector:           protector,
@@ -112,6 +112,23 @@ func NewReceiver(cfg ReceiverConfig) *Receiver {
 		windowSize:          windowSize,
 		windowBits:          windowSize + 1,
 		windows:             make(map[receiverPacketNumberSpace]*replayWindow),
+	}
+}
+
+// cloneProtectorForReceiver gives the receiver exclusive ownership of traffic
+// material and derived state. A shallow Protector copy would share the
+// caller's key slices and sealing scratch, so retiring the receiver could erase
+// or race with a protector the caller still uses.
+func cloneProtectorForReceiver(source Protector) Protector {
+	return Protector{
+		Suite:           source.Suite,
+		RouteInstanceID: source.RouteInstanceID,
+		HopLayer:        source.HopLayer,
+		Direction:       source.Direction,
+		KeyPhase:        source.KeyPhase,
+		Key:             append([]byte(nil), source.Key...),
+		StaticIV:        append([]byte(nil), source.StaticIV...),
+		NextPacket:      source.NextPacket,
 	}
 }
 

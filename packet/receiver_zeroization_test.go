@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
 )
 
@@ -87,5 +88,43 @@ func TestReceiverDestroyDefersBaseProtectorZeroizationUntilOpenReleases(t *testi
 	}
 	if len(receiver.protectorUses) != 0 || len(receiver.retiredProtectors) != 0 {
 		t.Fatalf("destroyed receiver ownership tracking leaked: uses=%d retired=%d", len(receiver.protectorUses), len(receiver.retiredProtectors))
+	}
+}
+
+func TestReceiverOwnsBaseProtectorMaterialAndCaches(t *testing.T) {
+	source := receiverConfigProtector()
+	source.RouteInstanceID = 0x71
+	source.HopLayer = 1
+	source.Direction = 0
+	if _, err := source.SealEncoded(protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}); err != nil {
+		t.Fatal(err)
+	}
+	if source.aead == nil || source.seal == nil {
+		t.Fatal("source protector did not initialize its cached state")
+	}
+	sourceKey := append([]byte(nil), source.Key...)
+	sourceIV := append([]byte(nil), source.StaticIV...)
+	sourceScratch := *source.seal
+
+	receiver := NewReceiver(ReceiverConfig{Protector: source})
+	if &receiver.protector.Key[0] == &source.Key[0] || &receiver.protector.StaticIV[0] == &source.StaticIV[0] {
+		t.Fatal("receiver retained caller-owned traffic material")
+	}
+	if receiver.protector.aead == source.aead {
+		t.Fatal("receiver retained the caller's cached AEAD")
+	}
+	if receiver.protector.seal == source.seal {
+		t.Fatal("receiver retained the caller's sealing scratch")
+	}
+
+	receiver.Destroy()
+	if !bytes.Equal(source.Key, sourceKey) || !bytes.Equal(source.StaticIV, sourceIV) {
+		t.Fatal("receiver destruction erased the caller's traffic material")
+	}
+	if source.seal == nil || *source.seal != sourceScratch {
+		t.Fatal("receiver destruction erased the caller's sealing scratch")
+	}
+	if _, err := source.SealEncoded(protocol.FrameBlock{Frames: []protocol.AuroraFrame{{FrameType: registry.FramePadding}}}); err != nil {
+		t.Fatalf("caller protector failed after receiver destruction: %v", err)
 	}
 }

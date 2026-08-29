@@ -235,14 +235,14 @@ func drainLocalPackets(clientSide *packetLabClient) [][]byte {
 	}
 }
 
-// TestLabPacketDataPlaneReproducesCarrierResetOnFailedEgress demonstrates the
+// TestLabPacketDataPlaneSurvivesFailedEgress is the regression test for the
 // Pixel 7 failure mode observed on-device ("packet carrier read failed:
 // stream error: stream ID 1; INTERNAL_ERROR; received from peer"): with real
-// egress, one TCP flow to a target the relay cannot dial makes the production
-// first hop reset the whole carrier stream (the egress dial error escapes the
-// frame handler), killing the session. This is why the lab server defaults to
-// loopback egress where every flow lands on an in-process endpoint.
-func TestLabPacketDataPlaneReproducesCarrierResetOnFailedEgress(t *testing.T) {
+// egress, one TCP flow to a target the relay could not dial used to make the
+// production first hop reset the whole carrier stream, because the egress dial
+// error escaped the frame handler and killed the session. The relay now closes
+// only the refused flow, so the carrier and every other flow must survive.
+func TestLabPacketDataPlaneSurvivesFailedEgress(t *testing.T) {
 	clientSide, labServer := startPacketLabClient(t, ServerOptions{DNSUpstream: "127.0.0.1:53"})
 	if labServer.LabEgress() {
 		t.Fatal("internet-egress mode unexpectedly reported lab egress")
@@ -276,16 +276,34 @@ func TestLabPacketDataPlaneReproducesCarrierResetOnFailedEgress(t *testing.T) {
 	if err := clientSide.adapter.Ingress(context.Background(), deadSyn, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case err := <-clientSide.pumpResult:
-		if err == nil {
-			t.Log("carrier closed without error")
-		} else {
-			t.Logf("carrier died after failed egress dial: %v", err)
+	// The refused flow is reported to the client as a reset, and the carrier
+	// keeps running: a target the relay cannot reach must not end the session.
+	deadline := time.After(10 * time.Second)
+	reset := false
+	for !reset {
+		select {
+		case err := <-clientSide.pumpResult:
+			t.Fatalf("failed egress dial ended the carrier: %v", err)
+		case packet := <-clientSide.localPackets:
+			if len(packet) >= 34 && packet[33]&0x04 != 0 {
+				reset = true
+			}
+		case <-deadline:
+			t.Fatal("refused flow was never reported to the client")
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("carrier survived a failed egress dial; reproduction scenario no longer applies")
 	}
+
+	// The healthy flow still works after the refusal, proving the failure was
+	// confined to the flow that caused it.
+	secondSyn := labTCPv4([4]byte{10, 0, 0, 2}, [4]byte{127, 0, 0, 1}, 50020, uint16(coverPort), 100, 0, 0x02, nil)
+	if err := clientSide.adapter.Ingress(context.Background(), secondSyn, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	secondSynAck := nextLocalPacket(t, clientSide, 10*time.Second)
+	if len(secondSynAck) < 34 || secondSynAck[33] != 0x12 {
+		t.Fatalf("carrier did not serve a new flow after a refused one: %x", secondSynAck)
+	}
+	labTCPExchange(t, clientSide, [4]byte{127, 0, 0, 1}, 50020, uint16(coverPort), secondSynAck, "GET / HTTP/1.0\r\n\r\n")
 }
 
 // TestLabPacketDataPlaneSurvivesDeviceFlowBurst is the regression test for the

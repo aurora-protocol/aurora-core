@@ -163,35 +163,44 @@ func (s *ExitSession) HandleFrameBlock(ctx context.Context, block protocol.Frame
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	now := uint64(time.Now().Unix())
-	result, err := s.validator.HandleFrameBlock(block, now)
-	if err != nil {
+	// Preserve whole-block structural validation, but advance validator state
+	// only as each frame reaches the external egress boundary. Validating the
+	// entire block up front could commit later opens, closes, or activity before
+	// an earlier egress/sink failure stopped their events from being dispatched.
+	if err := protocol.ValidateFrameBlock(block); err != nil {
 		return err
 	}
-	for _, event := range result.Events {
-		if err := ctx.Err(); err != nil {
+	now := uint64(time.Now().Unix())
+	for _, frame := range block.Frames {
+		result, err := s.validator.HandleFrameBlock(protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}, now)
+		if err != nil {
 			return err
 		}
-		outbound := appendAuroraFrames(nil, event.immediateFrames)
-		if event.Kind != ExitEventFlowRefused {
-			frames, err := s.egress.HandleEvent(ctx, event)
-			if err != nil {
-				closeFrames, recovered, recoverErr := s.recoverFlowFailure(event, err, now)
-				if recoverErr != nil {
-					return recoverErr
+		for _, event := range result.Events {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			outbound := appendAuroraFrames(nil, event.immediateFrames)
+			if event.Kind != ExitEventFlowRefused {
+				frames, err := s.egress.HandleEvent(ctx, event)
+				if err != nil {
+					closeFrames, recovered, recoverErr := s.recoverFlowFailure(event, err, now)
+					if recoverErr != nil {
+						return recoverErr
+					}
+					if !recovered {
+						return err
+					}
+					// A refused open supersedes any confirmation queued for it.
+					outbound = appendAuroraFrames(nil, closeFrames)
+				} else {
+					outbound = appendAuroraFrames(outbound, frames)
 				}
-				if !recovered {
+			}
+			if len(outbound) != 0 {
+				if err := s.queueFrames(ctx, protocol.FrameBlock{Frames: outbound}); err != nil {
 					return err
 				}
-				// A refused open supersedes any confirmation queued for it.
-				outbound = appendAuroraFrames(nil, closeFrames)
-			} else {
-				outbound = appendAuroraFrames(outbound, frames)
-			}
-		}
-		if len(outbound) != 0 {
-			if err := s.queueFrames(ctx, protocol.FrameBlock{Frames: outbound}); err != nil {
-				return err
 			}
 		}
 	}

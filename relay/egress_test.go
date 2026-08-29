@@ -100,6 +100,83 @@ func TestExitSessionRejectsMalformedBlockBeforeEgress(t *testing.T) {
 	}
 }
 
+func TestExitSessionRejectsStructurallyInvalidSuffixBeforeEgress(t *testing.T) {
+	egress := &recordingEgress{}
+	exitSession, err := NewExitSession(egress, &recordingFrameSink{}, ExitSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = exitSession.Close() })
+
+	open := relayTCPFlowOpen(30, "example.com")
+	err = exitSession.HandleFrameBlock(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{
+		flowOpenFrame(t, open),
+		{FrameType: registry.FrameStreamData, FlowID: open.FlowID},
+	}})
+	if err == nil {
+		t.Fatal("HandleFrameBlock accepted an empty STREAM_DATA suffix")
+	}
+	if len(egress.events) != 0 {
+		t.Fatalf("egress received %d events from a structurally invalid block", len(egress.events))
+	}
+	if _, ok := exitSession.validator.FlowState(open.FlowID); ok {
+		t.Fatal("validator committed a FLOW_OPEN before a structurally invalid suffix")
+	}
+}
+
+func TestExitSessionDispatchesValidatedPrefixBeforeSemanticBatchFailure(t *testing.T) {
+	egress := &recordingEgress{}
+	exitSession, err := NewExitSession(egress, &recordingFrameSink{}, ExitSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = exitSession.Close() })
+
+	open := relayTCPFlowOpen(31, "example.com")
+	err = exitSession.HandleFrameBlock(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{
+		flowOpenFrame(t, open),
+		flowOpenFrame(t, open),
+	}})
+	if err == nil {
+		t.Fatal("HandleFrameBlock accepted a duplicate FLOW_OPEN")
+	}
+	if len(egress.events) != 1 || egress.events[0].Kind != ExitEventFlowOpened || egress.events[0].FlowID != open.FlowID {
+		t.Fatalf("egress events before trailing semantic failure = %+v, want the validated FLOW_OPEN", egress.events)
+	}
+	if _, ok := exitSession.validator.FlowState(open.FlowID); !ok {
+		t.Fatal("validator lost the FLOW_OPEN already dispatched to egress")
+	}
+}
+
+func TestExitSessionDoesNotValidatePastEgressFailure(t *testing.T) {
+	want := errors.New("egress unavailable")
+	egress := &recordingEgress{err: want}
+	exitSession, err := NewExitSession(egress, &recordingFrameSink{}, ExitSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = exitSession.Close() })
+
+	first := relayTCPFlowOpen(32, "first.example")
+	second := relayTCPFlowOpen(33, "second.example")
+	err = exitSession.HandleFrameBlock(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{
+		flowOpenFrame(t, first),
+		flowOpenFrame(t, second),
+	}})
+	if !errors.Is(err, want) {
+		t.Fatalf("HandleFrameBlock error = %v, want %v", err, want)
+	}
+	if len(egress.events) != 1 || egress.events[0].FlowID != first.FlowID {
+		t.Fatalf("egress events = %+v, want only the first FLOW_OPEN", egress.events)
+	}
+	if _, ok := exitSession.validator.FlowState(first.FlowID); !ok {
+		t.Fatal("validator lost the first FLOW_OPEN dispatched to egress")
+	}
+	if _, ok := exitSession.validator.FlowState(second.FlowID); ok {
+		t.Fatal("validator committed the second FLOW_OPEN after egress had already failed")
+	}
+}
+
 func TestExitSessionRetriesQueueBackpressure(t *testing.T) {
 	egress := &recordingEgress{}
 	sink := &recordingFrameSink{responses: []error{session.ErrBackpressure}}

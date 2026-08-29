@@ -244,3 +244,25 @@ func TestSafeFieldRedactsSensitiveValuesBeyondDepthGuard(t *testing.T) {
 		t.Fatalf("deeply nested sensitive value was not redacted: %+v", field)
 	}
 }
+
+// TestSafeFieldRedactsSecretsNestedInUnexportedFields proves a Secret cannot
+// escape through a wrapper the fmt package prints without calling String():
+// fmt only invokes Stringer on values it can Interface(), so a Secret (or a
+// *Secret) held in an unexported struct field is printed as raw bytes unless
+// the redactor's value scan recognizes the Secret type itself.
+func TestSafeFieldRedactsSecretsNestedInUnexportedFields(t *testing.T) {
+	secret := Secret{Kind: HintSecret, Data: []byte{0x61, 0x62, 0x63}}
+	type byValue struct{ inner Secret }
+	type byPointer struct{ inner *Secret }
+	for name, value := range map[string]any{
+		"unexported value":   byValue{inner: secret},
+		"unexported pointer": byPointer{inner: &secret},
+		"pointer to wrapper": &byValue{inner: secret},
+		"slice of wrappers":  []byValue{{inner: secret}},
+	} {
+		field := SafeField("detail", value, false)
+		if field.Value != "[redacted-field]" {
+			t.Fatalf("%s: nested Secret escaped redaction: %+v", name, field)
+		}
+	}
+}

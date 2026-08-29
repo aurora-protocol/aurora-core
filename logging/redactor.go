@@ -195,6 +195,12 @@ func isSensitiveValue(value any) bool {
 	return containsSensitiveValue(reflect.ValueOf(value), 0)
 }
 
+// secretType is matched by identity so a Secret reached through a container
+// or an unexported field is redacted wholesale. fmt only calls String() on
+// values it can Interface(), so relying on the Stringer alone would print the
+// raw bytes of a Secret held in an unexported field.
+var secretType = reflect.TypeOf(Secret{})
+
 func containsSensitiveValue(v reflect.Value, depth int) bool {
 	if !v.IsValid() {
 		return false
@@ -206,7 +212,7 @@ func containsSensitiveValue(v reflect.Value, depth int) bool {
 		return true
 	}
 	t := v.Type()
-	if isSensitiveType(t, depth) {
+	if t == secretType || isSensitiveType(t, depth) {
 		return true
 	}
 

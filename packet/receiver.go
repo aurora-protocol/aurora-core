@@ -28,6 +28,8 @@ type Receiver struct {
 	mu                  sync.Mutex
 	protector           Protector
 	directionProtectors map[receiverPacketNumberSpace]*Protector
+	protectorUses       map[*Protector]int
+	retiredProtectors   map[*Protector]struct{}
 	windowSize          uint64
 	windowBits          uint64
 	windows             map[receiverPacketNumberSpace]*replayWindow
@@ -124,23 +126,25 @@ func (r *Receiver) Stats() ReceiverStats {
 	return ReceiverStats{PacketNumberSpaces: len(r.windows), SeenPackets: seen}
 }
 
-// Destroy releases cached traffic material and replay-window state.
+// Destroy releases replay-window state and retires cached traffic material.
+// Material pinned by an in-progress open is zeroed when that open returns.
 func (r *Receiver) Destroy() {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.protector.Destroy()
+	r.destroyed = true
+	r.retireProtectorLocked(&r.protector)
 	for _, protector := range r.directionProtectors {
-		protector.Destroy()
+		r.retireProtectorLocked(protector)
 	}
 	r.directionProtectors = nil
 	r.windows = nil
-	r.destroyed = true
 }
 
-// ForgetPacketNumberSpace removes replay state for an erased key phase.
+// ForgetPacketNumberSpace removes replay state and retires cached traffic
+// material for an erased key phase.
 func (r *Receiver) ForgetPacketNumberSpace(routeInstanceID uint64, hopLayer, direction, keyPhase uint8) {
 	space := receiverPacketNumberSpace{
 		RouteInstanceID: routeInstanceID,
@@ -150,8 +154,9 @@ func (r *Receiver) ForgetPacketNumberSpace(routeInstanceID uint64, hopLayer, dir
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// An in-flight open can retain a protector after this cache eviction.
+	protector := r.directionProtectors[space]
 	delete(r.directionProtectors, space)
+	r.retireProtectorLocked(protector)
 	delete(r.windows, space)
 }
 
@@ -189,7 +194,14 @@ func (r *Receiver) OpenWithDirectionState(pkt AuroraPacket, state *DirectionStat
 }
 
 func (r *Receiver) PrepareOpen(pkt AuroraPacket) (PreparedOpen, error) {
-	return r.prepareOpenWithProtector(pkt, &r.protector, false)
+	r.mu.Lock()
+	protector, err := r.acquireProtectorLocked(&r.protector)
+	r.mu.Unlock()
+	if err != nil {
+		return PreparedOpen{}, err
+	}
+	defer r.releaseProtector(protector)
+	return r.prepareOpenWithProtector(pkt, protector, false)
 }
 
 // PrepareOpenWithDirectionState authenticates synchronously without retaining
@@ -206,6 +218,7 @@ func (r *Receiver) PrepareOpenWithDirectionState(pkt AuroraPacket, state *Direct
 	if err != nil {
 		return PreparedOpen{}, err
 	}
+	defer r.releaseProtector(protector)
 	return r.prepareOpenWithProtector(pkt, protector, false)
 }
 
@@ -224,6 +237,7 @@ func (r *Receiver) PrepareOpenOwnedWithDirectionState(pkt AuroraPacket, state *D
 	if err != nil {
 		return PreparedOpen{}, err
 	}
+	defer r.releaseProtector(protector)
 	return r.prepareOpenWithProtector(pkt, protector, true)
 }
 
@@ -274,14 +288,70 @@ func (r *Receiver) directionProtector(pkt AuroraPacket, state *DirectionState, s
 		return nil, errReceiverDestroyed
 	}
 	if protector := r.directionProtectors[space]; protector != nil && protector.Suite == suite && protector.RouteInstanceID == state.RouteInstanceID && protector.HopLayer == state.HopLayer && protector.Direction == state.Direction && protector.KeyPhase == pkt.KeyPhase && bytes.Equal(protector.Key, material.Key) && bytes.Equal(protector.StaticIV, material.IV) {
-		return protector, nil
+		return r.acquireProtectorLocked(protector)
 	}
+	previous := r.directionProtectors[space]
+	delete(r.directionProtectors, space)
+	r.retireProtectorLocked(previous)
 	protector, err := NewProtector(suite, state.RouteInstanceID, state.HopLayer, state.Direction, pkt.KeyPhase, material.Key, material.IV)
 	if err != nil {
 		return nil, err
 	}
+	if r.directionProtectors == nil {
+		r.directionProtectors = make(map[receiverPacketNumberSpace]*Protector)
+	}
 	r.directionProtectors[space] = &protector
-	return &protector, nil
+	return r.acquireProtectorLocked(&protector)
+}
+
+// acquireProtectorLocked pins traffic material while an authenticated open is
+// in progress. r.mu must be held.
+func (r *Receiver) acquireProtectorLocked(protector *Protector) (*Protector, error) {
+	if r.destroyed {
+		return nil, errReceiverDestroyed
+	}
+	if protector == nil {
+		return nil, fmt.Errorf("packet: missing protector")
+	}
+	if r.protectorUses == nil {
+		r.protectorUses = make(map[*Protector]int)
+	}
+	r.protectorUses[protector]++
+	return protector, nil
+}
+
+func (r *Receiver) releaseProtector(protector *Protector) {
+	if protector == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	uses := r.protectorUses[protector]
+	if uses > 1 {
+		r.protectorUses[protector] = uses - 1
+		return
+	}
+	delete(r.protectorUses, protector)
+	if _, retired := r.retiredProtectors[protector]; retired {
+		delete(r.retiredProtectors, protector)
+		protector.Destroy()
+	}
+}
+
+// retireProtectorLocked removes traffic material as soon as no authenticated
+// open can still be using it. r.mu must be held.
+func (r *Receiver) retireProtectorLocked(protector *Protector) {
+	if protector == nil {
+		return
+	}
+	if r.protectorUses[protector] == 0 {
+		protector.Destroy()
+		return
+	}
+	if r.retiredProtectors == nil {
+		r.retiredProtectors = make(map[*Protector]struct{})
+	}
+	r.retiredProtectors[protector] = struct{}{}
 }
 
 func (r *Receiver) CommitPreparedOpen(prepared *PreparedOpen) error {

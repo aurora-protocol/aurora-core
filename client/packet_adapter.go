@@ -599,6 +599,14 @@ func (a *PacketAdapter) ingressTCPLocked(ctx context.Context, packet packetAdapt
 			mapping.clientNextSequence++
 			mapping.localClosed = true
 			_ = a.proxy.Close(mapping.flowID)
+			if mapping.peerClosed {
+				// The relay closed first (a server-initiated close), so this FIN
+				// completes the mutual close. Retire the mapping here as
+				// closeLocalFlowLocked does, otherwise the tuple and flow ID leak
+				// until the adapter is closed and a later connection reusing the
+				// local port collides with the dead mapping.
+				a.removeFlowLocked(mapping)
+			}
 		}
 		response, err := a.makeTCPPacketLocked(mapping, mapping.relayNextSequence, mapping.clientNextSequence, tcpFlagACK, nil)
 		if err != nil {

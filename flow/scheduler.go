@@ -13,12 +13,20 @@ type StreamChunk struct {
 	Flags         uint64
 }
 
+// maximumPriorityBurst bounds how many chunks a priority class may take while
+// a lower class has data waiting. Without it a flow that keeps its class
+// saturated shuts the classes below it out of the tunnel indefinitely.
+const maximumPriorityBurst = 4
+
 type Scheduler struct {
 	maxBufferedBytes int
 	bufferedBytes    int
 	realtime         []StreamChunk
 	interactive      []StreamChunk
 	bulk             []StreamChunk
+	// passedOver counts the chunks a higher class has taken while the queue at
+	// the same index held data, so a starved class can claim its turn.
+	passedOver [3]int
 }
 
 func NewScheduler(opts SchedulerOptions) *Scheduler {
@@ -52,19 +60,46 @@ func (s *Scheduler) Enqueue(chunk StreamChunk) error {
 }
 
 func (s *Scheduler) Next() (StreamChunk, bool) {
-	if chunk, ok := popChunk(&s.realtime); ok {
-		s.bufferedBytes -= len(chunk.Data)
-		return chunk, true
+	index, ok := s.nextQueueIndex()
+	if !ok {
+		return StreamChunk{}, false
 	}
-	if chunk, ok := popChunk(&s.interactive); ok {
-		s.bufferedBytes -= len(chunk.Data)
-		return chunk, true
+	chunk, _ := popChunk(s.queueAt(index))
+	s.bufferedBytes -= len(chunk.Data)
+	s.passedOver[index] = 0
+	for lower := index + 1; lower < len(s.passedOver); lower++ {
+		if len(*s.queueAt(lower)) != 0 {
+			s.passedOver[lower]++
+		}
 	}
-	if chunk, ok := popChunk(&s.bulk); ok {
-		s.bufferedBytes -= len(chunk.Data)
-		return chunk, true
+	return chunk, true
+}
+
+// nextQueueIndex reports the queue to serve. The highest priority non-empty
+// queue wins, unless a lower one has been passed over maximumPriorityBurst
+// times while holding data, in which case the most starved queue goes first.
+func (s *Scheduler) nextQueueIndex() (int, bool) {
+	for index := len(s.passedOver) - 1; index >= 0; index-- {
+		if s.passedOver[index] >= maximumPriorityBurst && len(*s.queueAt(index)) != 0 {
+			return index, true
+		}
 	}
-	return StreamChunk{}, false
+	for index := range s.passedOver {
+		if len(*s.queueAt(index)) != 0 {
+			return index, true
+		}
+	}
+	return 0, false
+}
+
+func (s *Scheduler) queueAt(index int) *[]StreamChunk {
+	switch index {
+	case 0:
+		return &s.realtime
+	case 1:
+		return &s.interactive
+	}
+	return &s.bulk
 }
 
 func popChunk(queue *[]StreamChunk) (StreamChunk, bool) {

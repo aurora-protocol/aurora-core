@@ -133,7 +133,11 @@ func exitFlowOpenFailureCloseCode(err error) (uint64, bool) {
 		return protocol.CloseTargetUnreachable, true
 	case errors.Is(err, ErrExitPolicyDenied):
 		return protocol.ClosePolicyDenied, true
-	case errors.Is(err, ErrExitFlowLimit):
+	case errors.Is(err, ErrExitFlowLimit), errors.Is(err, ErrExitDuplicateFlow):
+		// A flow ID the egress still holds is a resource condition, not a
+		// protocol violation: a TCP flow the client half-closed keeps its
+		// socket (and its ID) until the destination stops sending, which
+		// outlives the validator's much shorter close drain.
 		return protocol.CloseResourceLimit, true
 	case errors.Is(err, ErrExitTargetInvalid):
 		return protocol.CloseMalformedFlow, true

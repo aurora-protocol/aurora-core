@@ -9,6 +9,7 @@ package relay
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
 	"time"
 
@@ -226,5 +227,61 @@ func TestExitFlowHandlerPurgesLocallyClosedFlows(t *testing.T) {
 	}
 	if _, ok := handler.FlowState(65); ok {
 		t.Fatal("locally closed flow was not purged after its drain")
+	}
+}
+
+// halfCloseSocketConn is a TCP-like connection: a FLOW_CLOSE from the client
+// shuts down the write half while the exit keeps reading the response.
+type halfCloseSocketConn struct {
+	net.Conn
+}
+
+func (c *halfCloseSocketConn) CloseWrite() error { return nil }
+
+func TestExitSessionClosesFlowWhenEgressStillHoldsTheFlowID(t *testing.T) {
+	local, peer := net.Pipe()
+	t.Cleanup(func() {
+		_ = local.Close()
+		_ = peer.Close()
+	})
+	dialer := &recordingContextDialer{useConn: true, conn: &halfCloseSocketConn{Conn: local}}
+	exitSession, sink := newSocketExitSession(t, dialer, ExitPolicy{AllowPrivate: true})
+
+	open := relayTCPIPFlowOpen(70, [4]byte{93, 184, 216, 34})
+	if err := exitSession.HandleFrameBlock(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{flowOpenFrame(t, open)}}); err != nil {
+		t.Fatalf("HandleFrameBlock(FLOW_OPEN) = %v", err)
+	}
+
+	// The client half-closes. The exit shuts down the write half but keeps the
+	// socket to deliver the rest of the response, so the flow ID stays reserved
+	// in the egress for as long as the destination keeps sending.
+	closeFrame, err := protocol.NewFlowCloseFrame(protocol.FlowClose{FlowID: 70, CloseCode: protocol.CloseNormal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exitSession.HandleFrameBlock(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{closeFrame}}); err != nil {
+		t.Fatalf("HandleFrameBlock(client FLOW_CLOSE) = %v", err)
+	}
+	// The validator only keeps a peer-closed flow for its drain window.
+	exitSession.validator.flows.PurgeClosed(uint64(time.Now().Unix()) + exitCloseDrainSeconds)
+	if _, ok := exitSession.validator.FlowState(70); ok {
+		t.Fatal("peer-closed flow was not purged after its drain")
+	}
+
+	// Reusing that flow ID is not a protocol violation for the validator, but
+	// the egress still holds the socket: close the new flow, keep the session.
+	if err := exitSession.HandleFrameBlock(context.Background(), protocol.FrameBlock{Frames: []protocol.AuroraFrame{flowOpenFrame(t, open)}}); err != nil {
+		t.Fatalf("HandleFrameBlock(FLOW_OPEN reusing a draining flow ID) = %v, want nil (close the flow, keep the session)", err)
+	}
+	block := receiveSinkBlock(t, sink)
+	if len(block.Frames) != 1 {
+		t.Fatalf("queued frames = %d, want one FLOW_CLOSE", len(block.Frames))
+	}
+	if close := decodeFlowCloseForTest(t, block.Frames[0]); close.FlowID != 70 || close.CloseCode != protocol.CloseResourceLimit {
+		t.Fatalf("FLOW_CLOSE = %+v, want flow 70 resource-limit", close)
+	}
+	state, ok := exitSession.validator.FlowState(70)
+	if !ok || !state.LocalClosed {
+		t.Fatalf("refused duplicate flow state = %+v ok=%t, want local-closed", state, ok)
 	}
 }

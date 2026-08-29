@@ -805,8 +805,14 @@ func (a *PacketAdapter) handleRelayDNSLocked(frame protocol.AuroraFrame, now tim
 
 func (a *PacketAdapter) handleRelayDataLocked(frame protocol.AuroraFrame) ([][]byte, error) {
 	mapping := a.flowsByID[frame.FlowID]
-	if mapping == nil || mapping.peerClosed {
-		return nil, fmt.Errorf("client: packet adapter received data for unknown flow")
+	if mapping == nil {
+		// The flow was retired locally (a local reset or a completed close) while
+		// the relay still had data on the wire. No flow state exists to desync,
+		// so drop the frame instead of failing the whole tunnel.
+		return nil, nil
+	}
+	if mapping.peerClosed {
+		return nil, fmt.Errorf("client: packet adapter received data after the relay closed the flow")
 	}
 	switch mapping.kind {
 	case flow.FlowKindTCPStream:
@@ -840,7 +846,10 @@ func (a *PacketAdapter) handleRelayDataLocked(frame protocol.AuroraFrame) ([][]b
 func (a *PacketAdapter) handleRelayCloseLocked(frame protocol.AuroraFrame, now time.Time) ([][]byte, error) {
 	mapping := a.flowsByID[frame.FlowID]
 	if mapping == nil {
-		return nil, fmt.Errorf("client: packet adapter received close for unknown flow")
+		// The relay answers a local reset with its own close, and repeats a close
+		// it believes was lost. Both name a flow the adapter already retired, so
+		// drop them rather than fail the tunnel.
+		return nil, nil
 	}
 	r := wire.NewReader(frame.Payload)
 	close := protocol.DecodeFlowClose(r)

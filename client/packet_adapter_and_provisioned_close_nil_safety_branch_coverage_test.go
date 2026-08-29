@@ -15,9 +15,9 @@ package client
 //     the now validity guard at :407, and the closed guard at :411, before the
 //     application.NextPackets call).
 //   - packet_adapter.go:832 (*PacketAdapter).handleRelayCloseLocked
-//     mapping == nil -> "client: packet adapter received close for unknown flow"
-//     (first statement; fires before the wire.NewReader / DecodeFlowClose
-//     payload decode at :837, so the frame payload is never read).
+//     mapping == nil -> drop the close (nil packets, nil error) for a flow the
+//     adapter already retired (first statement; fires before the wire.NewReader
+//     / DecodeFlowClose payload decode, so the frame payload is never read).
 //   - provisioned_session.go:535 combineProvisionedCloseErrors
 //     second == nil -> return first (fires after the first == nil guard at
 //     :532, before the combined error formatting at :538).
@@ -44,15 +44,15 @@ package client
 //     :393 / :418 as the source (the nil-receiver and closed guards return
 //     different paths and are not reached). No network, no goroutine.
 //
-//   - handleRelayCloseLocked (nil-field clean return): a zero-value
+//   - handleRelayCloseLocked (nil-field clean drop): a zero-value
 //     &PacketAdapter{} has flowsByID == nil; reading a nil map
 //     (a.flowsByID[frame.FlowID]) is a well-defined no-op that returns the zero
-//     value (nil), so mapping is nil and :834 returns "received close for
-//     unknown flow" before the payload is decoded. The "unknown flow" message
-//     is unique to :835. The frame payload is never read, so an empty frame
-//     suffices. handleRelayCloseLocked is an unexported "Locked"-suffix method
-//     (caller holds the mutex) but does not acquire the lock itself, so calling
-//     it directly in a single-goroutine test is safe (no deadlock, no race).
+//     value (nil), so mapping is nil and the retired-flow branch returns no
+//     packets and no error before the payload is decoded. An undecodable
+//     payload proves the branch ran: any later statement would fail on it.
+//     handleRelayCloseLocked is an unexported "Locked"-suffix method (caller
+//     holds the mutex) but does not acquire the lock itself, so calling it
+//     directly in a single-goroutine test is safe (no deadlock, no race).
 //
 //   - combineProvisionedCloseErrors (nil-argument clean return): pass a non-nil
 //     sentinel as first (so the :532 first == nil guard is false and skipped)
@@ -111,16 +111,18 @@ func TestPacketAdapterHandleEncryptedPacketNilApplicationGuard(t *testing.T) {
 
 func TestPacketAdapterHandleRelayCloseLockedNilMappingGuard(t *testing.T) {
 	// 834: a zero-value PacketAdapter has flowsByID == nil; reading the nil map
-	// returns nil, so mapping == nil and :834 returns "unknown flow" before the
-	// payload is decoded at :837. The frame payload is never read. Calling the
+	// returns nil, so mapping == nil and the retired-flow branch drops the close
+	// before the payload is decoded. The undecodable payload proves the branch
+	// ran: reaching the decode would report a malformed flow close. Calling the
 	// "Locked" method directly is safe: it does not acquire the mutex and the
 	// test is single-goroutine.
 	a := &PacketAdapter{}
-	_, err := a.handleRelayCloseLocked(protocol.AuroraFrame{FlowID: 1}, time.Now())
-	if err == nil {
-		t.Fatal("handleRelayCloseLocked(zero-value adapter) err = nil, want non-nil (:834 should reject nil mapping)")
-	} else if !strings.Contains(err.Error(), "received close for unknown flow") {
-		t.Fatalf("handleRelayCloseLocked err = %q, want substring \"received close for unknown flow\" (:834)", err.Error())
+	packets, err := a.handleRelayCloseLocked(protocol.AuroraFrame{FlowID: 1, Payload: []byte{0xff}}, time.Now())
+	if err != nil {
+		t.Fatalf("handleRelayCloseLocked(zero-value adapter) err = %v, want nil (:834 should drop a retired flow close)", err)
+	}
+	if packets != nil {
+		t.Fatalf("handleRelayCloseLocked(zero-value adapter) packets = %v, want nil (:834)", packets)
 	}
 }
 

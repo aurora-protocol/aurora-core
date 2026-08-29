@@ -42,6 +42,13 @@ var (
 	ErrTCPProxyBackpressure = errors.New("client: TCP proxy local write backpressure")
 )
 
+// errTCPProxyUnknownFlow marks a relay frame whose flow the runtime already
+// retired locally (an aborted socket, a closed UDP association, a completed
+// close). The relay cannot know that yet, so these trailing frames are routine
+// and are dropped: failing the frame block would tear down the carrier duplex
+// and with it every other live flow.
+var errTCPProxyUnknownFlow = errors.New("client: proxy relay frame targets a retired flow")
+
 type TCPProxyRuntimeOptions struct {
 	MaxFlows                  int
 	ReadBufferBytes           int
@@ -240,31 +247,25 @@ func (r *TCPProxyRuntime) HandleFrameBlock(ctx context.Context, block protocol.F
 		return fmt.Errorf("client: invalid TCP proxy relay frame block: %w", err)
 	}
 	for _, frame := range block.Frames {
+		var err error
 		switch frame.FrameType {
 		case registry.FrameStreamData:
 			if r.flow(frame.FlowID) != nil {
-				if err := r.enqueueLocalWrite(frame.FlowID, frame.Payload); err != nil {
-					return err
-				}
-				continue
+				err = r.enqueueLocalWrite(frame.FlowID, frame.Payload)
+				break
 			}
-			if err := r.enqueueUDPWrite(frame); err != nil {
-				return err
-			}
+			err = r.enqueueUDPWrite(frame)
 		case registry.FrameDatagramData:
-			if err := r.enqueueUDPWrite(frame); err != nil {
-				return err
-			}
+			err = r.enqueueUDPWrite(frame)
 		case registry.FrameUDPTargetConfirm:
-			if err := r.handleUDPTargetConfirm(frame); err != nil {
-				return err
-			}
+			err = r.handleUDPTargetConfirm(frame)
 		case registry.FrameFlowClose:
-			if err := r.handlePeerFlowClose(frame); err != nil {
-				return err
-			}
+			err = r.handlePeerFlowClose(frame)
 		default:
 			return fmt.Errorf("client: TCP proxy runtime received unsupported relay frame 0x%x", frame.FrameType)
+		}
+		if err != nil && !errors.Is(err, errTCPProxyUnknownFlow) {
+			return err
 		}
 	}
 	return nil
@@ -841,7 +842,7 @@ func (r *TCPProxyRuntime) udpFlowForTarget(association *udpProxyAssociation, tar
 func (r *TCPProxyRuntime) handleUDPTargetConfirm(frame protocol.AuroraFrame) error {
 	flow := r.udpFlow(frame.FlowID)
 	if flow == nil {
-		return fmt.Errorf("client: UDP target confirm targets an unknown flow")
+		return fmt.Errorf("client: UDP target confirm targets an unknown flow: %w", errTCPProxyUnknownFlow)
 	}
 	if err := r.proxy.ReceiveUDPTargetConfirmFrameAt(frame, uint64(time.Now().Unix())); err != nil {
 		return err
@@ -868,7 +869,7 @@ func (r *TCPProxyRuntime) enqueueUDPWrite(frame protocol.AuroraFrame) error {
 	}
 	flow := r.udpFlow(frame.FlowID)
 	if flow == nil {
-		return fmt.Errorf("client: UDP proxy relay data targets an unknown flow")
+		return fmt.Errorf("client: UDP proxy relay data targets an unknown flow: %w", errTCPProxyUnknownFlow)
 	}
 	flow.mu.Lock()
 	confirmed := flow.confirmed
@@ -935,7 +936,7 @@ func (r *TCPProxyRuntime) enqueueLocalWrite(flowID uint64, payload []byte) error
 	}
 	flow := r.flow(flowID)
 	if flow == nil {
-		return fmt.Errorf("client: TCP proxy relay data targets an unknown flow")
+		return fmt.Errorf("client: TCP proxy relay data targets an unknown flow: %w", errTCPProxyUnknownFlow)
 	}
 	if !r.reservePendingWriteBytes(len(payload)) {
 		return ErrTCPProxyBackpressure
@@ -1027,7 +1028,7 @@ func (r *TCPProxyRuntime) runLocalWritePump(flow *tcpProxyFlow) {
 func (r *TCPProxyRuntime) handlePeerFlowClose(frame protocol.AuroraFrame) error {
 	if r.flow(frame.FlowID) == nil {
 		if r.udpFlow(frame.FlowID) == nil {
-			return fmt.Errorf("client: proxy relay close targets an unknown flow")
+			return fmt.Errorf("client: proxy relay close targets an unknown flow: %w", errTCPProxyUnknownFlow)
 		}
 		if err := r.proxy.ReceiveFlowCloseFrame(frame, uint64(time.Now().Unix()), 0); err != nil {
 			return err

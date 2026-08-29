@@ -85,6 +85,7 @@ package relay
 // No context.Context, no goroutines, no deprecated APIs.
 
 import (
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -163,26 +164,41 @@ func TestGatewayProbeOriginForwardingMethods(t *testing.T) {
 func TestHandleFrameBlockPropagatesFrameErrors(t *testing.T) {
 	t.Run("flow open policy denial", func(t *testing.T) {
 		// A structurally-valid FLOW_OPEN to a loopback domain passes
-		// ValidateFrameBlock (455) then fails checkExitPolicy in
-		// HandleFlowOpenFrame; the error propagates at 463.
+		// ValidateFrameBlock then fails checkExitPolicy in HandleFlowOpenFrame.
+		// HandleFlowOpenFrame reports the denial; HandleFrameBlock turns it into
+		// a refused-flow event carrying FLOW_CLOSE(policy denied) so a single
+		// refused destination does not terminate the authenticated session.
 		handler := NewExitFlowHandler(DefaultExitPolicy())
 		open := relayTCPFlowOpen(40, "localhost")
-		_, err := handler.HandleFrameBlock(protocol.FrameBlock{Frames: []protocol.AuroraFrame{flowOpenFrame(t, open)}}, 100)
-		if err == nil || !strings.Contains(err.Error(), "exit policy denied domain target") {
-			t.Fatalf("err = %v, want %q", err, "exit policy denied domain target")
+		_, err := handler.HandleFlowOpenFrame(flowOpenFrame(t, open), 100)
+		if err == nil || !strings.Contains(err.Error(), "exit policy denied domain target") || !errors.Is(err, ErrExitPolicyDenied) {
+			t.Fatalf("err = %v, want %q wrapping ErrExitPolicyDenied", err, "exit policy denied domain target")
+		}
+		result, err := handler.HandleFrameBlock(protocol.FrameBlock{Frames: []protocol.AuroraFrame{flowOpenFrame(t, open)}}, 100)
+		if err != nil {
+			t.Fatalf("HandleFrameBlock err = %v, want nil", err)
+		}
+		if len(result.Events) != 1 || result.Events[0].Kind != ExitEventFlowRefused || result.Events[0].FlowID != 40 || len(result.Events[0].immediateFrames) != 1 {
+			t.Fatalf("events = %+v, want one refused-flow event for flow 40", result.Events)
+		}
+		if len(result.OutboundFrames) != 1 || result.OutboundFrames[0].FrameType != registry.FrameFlowClose || result.OutboundFrames[0].FlowID != 40 {
+			t.Fatalf("outbound = %+v, want FLOW_CLOSE for flow 40", result.OutboundFrames)
+		}
+		if _, ok := handler.FlowState(40); ok {
+			t.Fatal("refused flow was opened")
 		}
 	})
 	t.Run("flow close unknown flow", func(t *testing.T) {
-		// A structurally-valid FLOW_CLOSE for a flow that was never opened
-		// passes ValidateFrameBlock, then MarkPeerClose fails inside
-		// handleFlowCloseFrame and propagates at 483 (and 607).
+		// A structurally-valid FLOW_CLOSE for a flow that was never opened (or
+		// that the relay already closed and purged) is dropped by
+		// HandleFrameBlock; handleFlowCloseFrame still reports it.
 		handler := NewExitFlowHandler(DefaultExitPolicy())
 		close := protocol.FlowClose{FlowID: 999, CloseCode: protocol.CloseNormal}
-		_, err := handler.HandleFrameBlock(protocol.FrameBlock{Frames: []protocol.AuroraFrame{
+		result, err := handler.HandleFrameBlock(protocol.FrameBlock{Frames: []protocol.AuroraFrame{
 			relayCovCloseFrame(t, close, 999),
 		}}, 100)
-		if err == nil || !strings.Contains(err.Error(), "unknown flow_id") {
-			t.Fatalf("err = %v, want %q", err, "unknown flow_id")
+		if err != nil || len(result.Events) != 0 {
+			t.Fatalf("result = %+v err = %v, want no events and nil", result, err)
 		}
 	})
 	t.Run("unsupported exit frame type", func(t *testing.T) {

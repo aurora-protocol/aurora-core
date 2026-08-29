@@ -1306,6 +1306,7 @@ func TestLiveFirstHopEgressPolicyDenialPreventsDial(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
+	received := make(chan protocol.FrameBlock, 4)
 	pumpResult := make(chan error, 1)
 	go func() {
 		pumpResult <- transport.RunPacketDuplex(
@@ -1313,7 +1314,15 @@ func TestLiveFirstHopEgressPolicyDenialPreventsDial(t *testing.T) {
 			established.ReadCarrier,
 			established.WriteCarrier,
 			established.Application,
-			func(context.Context, protocol.FrameBlock) error { return nil },
+			func(_ context.Context, block protocol.FrameBlock) error {
+				owned := protocol.FrameBlock{Frames: make([]protocol.AuroraFrame, 0, len(block.Frames))}
+				for _, frame := range block.Frames {
+					frame.Payload = append([]byte(nil), frame.Payload...)
+					owned.Frames = append(owned.Frames, frame)
+				}
+				received <- owned
+				return nil
+			},
 			1<<20,
 		)
 	}()
@@ -1323,16 +1332,38 @@ func TestLiveFirstHopEgressPolicyDenialPreventsDial(t *testing.T) {
 		t.Fatal(err)
 	}
 	queueLiveFirstHopBlock(t, ctx, established.Application, protocol.FrameBlock{Frames: []protocol.AuroraFrame{open}})
+	// A refused destination closes that flow towards the client; the
+	// authenticated carrier itself keeps running.
 	select {
-	case pumpErr := <-pumpResult:
-		if pumpErr == nil {
-			t.Fatal("policy-denied carrier stopped without an error")
+	case block := <-received:
+		if len(block.Frames) != 1 || block.Frames[0].FrameType != registry.FrameFlowClose || block.Frames[0].FlowID != 1 {
+			t.Fatalf("policy denial produced %+v, want FLOW_CLOSE for flow 1", block)
 		}
+		if err := proxy.ReceiveFlowCloseFrame(block.Frames[0], uint64(time.Now().Unix()), 0); err != nil {
+			t.Fatalf("client rejected the policy-denied FLOW_CLOSE: %v", err)
+		}
+		state, ok := proxy.FlowState(1)
+		if !ok || !state.PeerClosed || state.CloseCode != protocol.ClosePolicyDenied {
+			t.Fatalf("client flow state after policy denial = %+v ok=%t, want peer-closed policy-denied", state, ok)
+		}
+	case pumpErr := <-pumpResult:
+		t.Fatalf("policy denial terminated the carrier: %v", pumpErr)
 	case <-ctx.Done():
-		t.Fatalf("policy-denied carrier remained open: %v", ctx.Err())
+		t.Fatalf("policy-denied flow was not closed: %v", ctx.Err())
 	}
 	if calls := dialer.calls.Load(); calls != 0 {
 		t.Fatalf("policy denial invoked dialer %d times", calls)
+	}
+	if err := established.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case pumpErr := <-pumpResult:
+		if pumpErr != nil && !errors.Is(pumpErr, context.Canceled) && !errors.Is(pumpErr, session.ErrClosed) && !errors.Is(pumpErr, net.ErrClosed) && !errors.Is(pumpErr, io.ErrClosedPipe) && !errors.Is(pumpErr, io.EOF) {
+			t.Fatal(pumpErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("carrier pump did not stop after close")
 	}
 }
 

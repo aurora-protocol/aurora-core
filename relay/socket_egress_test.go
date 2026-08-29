@@ -472,8 +472,8 @@ func TestSocketEgressDNSMessageRejectsMalformedQuestionSections(t *testing.T) {
 	t.Cleanup(func() { _ = egress.Close() })
 	query := socketEgressDNSQuery(t, "example.com", socketDNSTypeA)
 	binary.BigEndian.PutUint16(query[6:8], 1)
-	if _, err := egress.HandleEvent(context.Background(), ExitFrameEvent{Kind: ExitEventDNSMessage, FlowID: 85, Data: query}); !errors.Is(err, ErrExitEventInvalid) {
-		t.Fatalf("answer-bearing DNS query error = %v, want ErrExitEventInvalid", err)
+	if _, err := egress.HandleEvent(context.Background(), ExitFrameEvent{Kind: ExitEventDNSMessage, FlowID: 85, Data: query}); !errors.Is(err, ErrExitDNSMessageInvalid) {
+		t.Fatalf("answer-bearing DNS query error = %v, want ErrExitDNSMessageInvalid", err)
 	}
 	if len(resolver.calls) != 0 {
 		t.Fatalf("resolver calls = %#v, want none", resolver.calls)
@@ -494,8 +494,8 @@ func TestSocketEgressDNSMessageRejectsOversizedEncodedName(t *testing.T) {
 
 	label := strings.Repeat("a", 63)
 	query := socketEgressDNSQuery(t, strings.Join([]string{label, label, label, label}, "."), socketDNSTypeA)
-	if _, err := egress.HandleEvent(context.Background(), ExitFrameEvent{Kind: ExitEventDNSMessage, FlowID: 85, Data: query}); !errors.Is(err, ErrExitEventInvalid) {
-		t.Fatalf("oversized encoded DNS name error = %v, want ErrExitEventInvalid", err)
+	if _, err := egress.HandleEvent(context.Background(), ExitFrameEvent{Kind: ExitEventDNSMessage, FlowID: 85, Data: query}); !errors.Is(err, ErrExitDNSMessageInvalid) {
+		t.Fatalf("oversized encoded DNS name error = %v, want ErrExitDNSMessageInvalid", err)
 	}
 	if len(resolver.calls) != 0 {
 		t.Fatalf("resolver calls = %#v, want none", resolver.calls)

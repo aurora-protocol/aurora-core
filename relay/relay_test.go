@@ -240,8 +240,11 @@ func TestExitFlowHandlerRejectsDataBeforeFlowOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := handler.HandleFrameBlock(protocol.FrameBlock{Frames: []protocol.AuroraFrame{data}}, 100); err == nil {
-		t.Fatalf("stream data before FLOW_OPEN was accepted")
+	// Data for a flow the relay does not serve is dropped (it may have raced a
+	// relay-side close) rather than terminating the session.
+	result, err := handler.HandleFrameBlock(protocol.FrameBlock{Frames: []protocol.AuroraFrame{data}}, 100)
+	if err != nil || len(result.Events) != 0 {
+		t.Fatalf("stream data before FLOW_OPEN = %+v err=%v, want dropped", result, err)
 	}
 	if _, ok := handler.FlowState(42); ok {
 		t.Fatalf("data-only frame block mutated flow state")

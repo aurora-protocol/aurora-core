@@ -396,6 +396,10 @@ type ExitFlowHandler struct {
 
 const maxUDPConfirmTTLSeconds uint32 = 86400
 
+// exitCloseDrainSeconds keeps a closed flow visible long enough to absorb
+// frames the peer sent before it observed the close.
+const exitCloseDrainSeconds uint64 = 30
+
 type ExitRateLimit struct {
 	// The all-zero value selects DefaultExitRateLimit. Otherwise, WindowSeconds
 	// defaults to the standard window when zero, while MaxFlowOpens and MaxBytes
@@ -428,7 +432,15 @@ const (
 	ExitEventDatagramData
 	ExitEventDNSMessage
 	ExitEventFlowClosed
+	// ExitEventFlowRefused carries the FLOW_CLOSE for a FLOW_OPEN the validator
+	// refused (for example an exit-policy denial). It never reaches the egress.
+	ExitEventFlowRefused
 )
+
+// errExitFlowUnavailable marks frames for a flow the relay no longer serves:
+// data or a peer close that raced the relay-side close (or the drain purge),
+// or a UDP association that expired. Such frames are dropped, not fatal.
+var errExitFlowUnavailable = errors.New("relay: exit flow is unavailable")
 
 type ExitFrameResult struct {
 	OutboundFrames []protocol.AuroraFrame
@@ -459,11 +471,28 @@ func (h *ExitFlowHandler) HandleFrameBlock(block protocol.FrameBlock, now uint64
 	if err := protocol.ValidateFrameBlock(block); err != nil {
 		return ExitFrameResult{}, err
 	}
+	h.flows.PurgeClosed(now)
 	var result ExitFrameResult
 	for _, frame := range block.Frames {
 		switch frame.FrameType {
 		case registry.FrameFlowOpen:
 			out, err := h.HandleFlowOpenFrame(frame, now)
+			if errors.Is(err, ErrExitPolicyDenied) {
+				// The destination is refused for this authenticated client, which
+				// is an ordinary per-flow outcome: close the flow, keep the session.
+				closeFrame, closeErr := protocol.NewFlowCloseFrame(protocol.FlowClose{FlowID: frame.FlowID, CloseCode: protocol.ClosePolicyDenied})
+				if closeErr != nil {
+					return ExitFrameResult{}, closeErr
+				}
+				result.OutboundFrames = append(result.OutboundFrames, cloneAuroraFrame(closeFrame))
+				result.Events = append(result.Events, ExitFrameEvent{
+					Kind:            ExitEventFlowRefused,
+					FlowID:          frame.FlowID,
+					FrameType:       frame.FrameType,
+					immediateFrames: []protocol.AuroraFrame{closeFrame},
+				})
+				continue
+			}
 			if err != nil {
 				return ExitFrameResult{}, err
 			}
@@ -478,12 +507,18 @@ func (h *ExitFlowHandler) HandleFrameBlock(block protocol.FrameBlock, now uint64
 			})
 		case registry.FrameStreamData, registry.FrameDatagramData, registry.FrameDNSMessage:
 			event, err := h.handleDataFrame(frame, now)
+			if errors.Is(err, errExitFlowUnavailable) {
+				continue
+			}
 			if err != nil {
 				return ExitFrameResult{}, err
 			}
 			result.Events = append(result.Events, event)
 		case registry.FrameFlowClose:
 			event, err := h.handleFlowCloseFrame(frame, now)
+			if errors.Is(err, errExitFlowUnavailable) {
+				continue
+			}
 			if err != nil {
 				return ExitFrameResult{}, err
 			}
@@ -544,23 +579,29 @@ func (h *ExitFlowHandler) handleDataFrame(frame protocol.AuroraFrame, now uint64
 			Data:      append([]byte(nil), frame.Payload...),
 		}, nil
 	}
+	// Account for the bytes before deciding whether the flow still exists, so
+	// dropped frames still count against the client's byte budget.
+	if err := h.consumeRateLimit(now, 0, uint64(len(frame.Payload))); err != nil {
+		return ExitFrameEvent{}, err
+	}
 	state, ok := h.flows.DemuxInbound(frame.FlowID)
 	if !ok {
-		return ExitFrameEvent{}, fmt.Errorf("relay: data for unknown flow_id %d", frame.FlowID)
+		return ExitFrameEvent{}, fmt.Errorf("relay: data for unknown flow_id %d: %w", frame.FlowID, errExitFlowUnavailable)
 	}
-	if state.LocalClosed || state.PeerClosed {
+	if state.PeerClosed {
 		return ExitFrameEvent{}, fmt.Errorf("relay: data for closed flow_id %d", frame.FlowID)
+	}
+	if state.LocalClosed {
+		// The relay closed this flow; the peer's data was already in flight.
+		return ExitFrameEvent{}, fmt.Errorf("relay: data for draining flow_id %d: %w", frame.FlowID, errExitFlowUnavailable)
 	}
 	switch frame.FrameType {
 	case registry.FrameStreamData:
-		if err := h.consumeRateLimit(now, 0, uint64(len(frame.Payload))); err != nil {
-			return ExitFrameEvent{}, err
-		}
 		if state.Kind == coreflow.FlowKindUDPAssociation {
 			var accepted bool
 			state, accepted = h.flows.AcceptDatagramWithOptions(frame.FlowID, coreflow.DatagramOptions{NowUnix: now})
 			if !accepted {
-				return ExitFrameEvent{}, fmt.Errorf("relay: UDP stream-fallback data for unavailable flow_id %d", frame.FlowID)
+				return ExitFrameEvent{}, fmt.Errorf("relay: UDP stream-fallback data for unavailable flow_id %d: %w", frame.FlowID, errExitFlowUnavailable)
 			}
 		} else if state.Kind != coreflow.FlowKindTCPStream {
 			return ExitFrameEvent{}, fmt.Errorf("relay: STREAM_DATA for non-stream flow_id %d", frame.FlowID)
@@ -573,13 +614,10 @@ func (h *ExitFlowHandler) handleDataFrame(frame protocol.AuroraFrame, now uint64
 			Data:      append([]byte(nil), frame.Payload...),
 		}, nil
 	case registry.FrameDatagramData:
-		if err := h.consumeRateLimit(now, 0, uint64(len(frame.Payload))); err != nil {
-			return ExitFrameEvent{}, err
-		}
 		var accepted bool
 		state, accepted = h.flows.AcceptDatagramWithOptions(frame.FlowID, coreflow.DatagramOptions{NowUnix: now})
 		if !accepted {
-			return ExitFrameEvent{}, fmt.Errorf("relay: DATAGRAM_DATA for unavailable flow_id %d", frame.FlowID)
+			return ExitFrameEvent{}, fmt.Errorf("relay: DATAGRAM_DATA for unavailable flow_id %d: %w", frame.FlowID, errExitFlowUnavailable)
 		}
 		return ExitFrameEvent{
 			Kind:      ExitEventDatagramData,
@@ -608,10 +646,23 @@ func (h *ExitFlowHandler) handleFlowCloseFrame(frame protocol.AuroraFrame, now u
 	if !r.EOF() {
 		return ExitFrameEvent{}, fmt.Errorf("relay: trailing FLOW_CLOSE payload bytes")
 	}
-	if err := h.flows.MarkPeerClose(close, coreflow.CloseOptions{NowUnix: now, DrainSeconds: 30}); err != nil {
+	state, ok := h.flows.DemuxInbound(close.FlowID)
+	if !ok {
+		// The relay-side close and its drain purge can precede the peer's own
+		// close; there is nothing left to close.
+		return ExitFrameEvent{}, fmt.Errorf("relay: FLOW_CLOSE for unknown flow_id %d: %w", close.FlowID, errExitFlowUnavailable)
+	}
+	if err := h.flows.MarkPeerClose(close, coreflow.CloseOptions{NowUnix: now, DrainSeconds: exitCloseDrainSeconds}); err != nil {
 		return ExitFrameEvent{}, err
 	}
-	state, _ := h.FlowState(frame.FlowID)
+	// A flow closed by both sides is removed by MarkPeerClose, so the event
+	// carries the pre-close state with the peer close applied.
+	if current, ok := h.flows.DemuxInbound(frame.FlowID); ok {
+		state = current
+	} else {
+		state.PeerClosed = true
+		state.CloseCode = close.CloseCode
+	}
 	return ExitFrameEvent{
 		Kind:      ExitEventFlowClosed,
 		FlowID:    frame.FlowID,
@@ -619,6 +670,15 @@ func (h *ExitFlowHandler) handleFlowCloseFrame(frame protocol.AuroraFrame, now u
 		Flow:      cloneFlowState(state),
 		Close:     cloneFlowClose(close),
 	}, nil
+}
+
+// markLocalClose records that the relay side closed flowID. Unknown flows
+// (already purged) are ignored.
+func (h *ExitFlowHandler) markLocalClose(flowID, closeCode, now uint64) {
+	if h == nil || h.flows == nil {
+		return
+	}
+	_ = h.flows.MarkLocalClose(protocol.FlowClose{FlowID: flowID, CloseCode: closeCode}, coreflow.CloseOptions{NowUnix: now, DrainSeconds: exitCloseDrainSeconds})
 }
 
 func (h *ExitFlowHandler) FlowState(flowID uint64) (coreflow.FlowState, bool) {
@@ -678,11 +738,11 @@ func (h *ExitFlowHandler) checkExitPolicy(open protocol.FlowOpen) error {
 			return fmt.Errorf("relay: malformed IP target")
 		}
 		if !h.Policy.AllowIP(addr.String()) {
-			return fmt.Errorf("relay: exit policy denied target")
+			return ErrExitPolicyDenied
 		}
 	case coreflow.TargetKindDomainName:
 		if !h.Policy.AllowDomain(string(open.TargetHost)) {
-			return fmt.Errorf("relay: exit policy denied domain target")
+			return fmt.Errorf("relay: exit policy denied domain target: %w", ErrExitPolicyDenied)
 		}
 	}
 	return nil

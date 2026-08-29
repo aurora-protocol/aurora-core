@@ -69,13 +69,77 @@ func NewExitSession(egress Egress, sink FrameSink, options ExitSessionOptions) (
 	if retry < 0 || retry > maximumExitQueueRetryInterval {
 		return nil, fmt.Errorf("relay: queue retry interval is invalid")
 	}
-	return &ExitSession{
+	session := &ExitSession{
 		closing:   make(chan struct{}),
 		validator: validator,
 		egress:    egress,
 		sink:      sink,
 		retry:     retry,
-	}, nil
+	}
+	if observable, ok := egress.(flowCloseObservableEgress); ok {
+		observable.SetFlowCloseObserver(session.observeLocalClose)
+	}
+	return session, nil
+}
+
+// flowCloseObservableEgress reports the FLOW_CLOSE frames its read pumps send
+// so the validator can drain and purge flows the relay closed on its own.
+type flowCloseObservableEgress interface {
+	SetFlowCloseObserver(func(flowID, closeCode uint64))
+}
+
+func (s *ExitSession) observeLocalClose(flowID, closeCode uint64) {
+	s.validator.markLocalClose(flowID, closeCode, uint64(time.Now().Unix()))
+}
+
+// recoverFlowFailure maps an egress failure that concerns only one flow to the
+// frames that close that flow towards the client. It reports false for
+// failures that must still terminate the session (lifecycle, contract, and
+// context errors).
+func (s *ExitSession) recoverFlowFailure(event ExitFrameEvent, err error, now uint64) ([]protocol.AuroraFrame, bool, error) {
+	switch event.Kind {
+	case ExitEventFlowOpened:
+		code, ok := exitFlowOpenFailureCloseCode(err)
+		if !ok {
+			return nil, false, nil
+		}
+		frame, frameErr := protocol.NewFlowCloseFrame(protocol.FlowClose{FlowID: event.FlowID, CloseCode: code})
+		if frameErr != nil {
+			return nil, false, frameErr
+		}
+		s.validator.markLocalClose(event.FlowID, code, now)
+		return []protocol.AuroraFrame{frame}, true, nil
+	case ExitEventStreamData, ExitEventDatagramData:
+		// The egress already closed the flow (its pump sends the FLOW_CLOSE) or
+		// the flow raced a relay-side close; the frame is simply dropped.
+		if errors.Is(err, ErrExitFlowUnknown) || errors.Is(err, ErrExitWriteFailed) || errors.Is(err, ErrExitDatagramLarge) {
+			return nil, true, nil
+		}
+	case ExitEventDNSMessage:
+		if errors.Is(err, ErrExitDNSMessageInvalid) {
+			return nil, true, nil
+		}
+	case ExitEventFlowClosed:
+		if errors.Is(err, ErrExitCloseFailed) {
+			return nil, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+func exitFlowOpenFailureCloseCode(err error) (uint64, bool) {
+	switch {
+	case errors.Is(err, ErrExitDialFailed), errors.Is(err, ErrExitResolveFailed):
+		return protocol.CloseTargetUnreachable, true
+	case errors.Is(err, ErrExitPolicyDenied):
+		return protocol.ClosePolicyDenied, true
+	case errors.Is(err, ErrExitFlowLimit):
+		return protocol.CloseResourceLimit, true
+	case errors.Is(err, ErrExitTargetInvalid):
+		return protocol.CloseMalformedFlow, true
+	default:
+		return 0, false
+	}
 }
 
 func (s *ExitSession) HandleFrameBlock(ctx context.Context, block protocol.FrameBlock) error {
@@ -95,7 +159,8 @@ func (s *ExitSession) HandleFrameBlock(ctx context.Context, block protocol.Frame
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	result, err := s.validator.HandleFrameBlock(block, uint64(time.Now().Unix()))
+	now := uint64(time.Now().Unix())
+	result, err := s.validator.HandleFrameBlock(block, now)
 	if err != nil {
 		return err
 	}
@@ -103,12 +168,23 @@ func (s *ExitSession) HandleFrameBlock(ctx context.Context, block protocol.Frame
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		frames, err := s.egress.HandleEvent(ctx, event)
-		if err != nil {
-			return err
-		}
 		outbound := appendAuroraFrames(nil, event.immediateFrames)
-		outbound = appendAuroraFrames(outbound, frames)
+		if event.Kind != ExitEventFlowRefused {
+			frames, err := s.egress.HandleEvent(ctx, event)
+			if err != nil {
+				closeFrames, recovered, recoverErr := s.recoverFlowFailure(event, err, now)
+				if recoverErr != nil {
+					return recoverErr
+				}
+				if !recovered {
+					return err
+				}
+				// A refused open supersedes any confirmation queued for it.
+				outbound = appendAuroraFrames(nil, closeFrames)
+			} else {
+				outbound = appendAuroraFrames(outbound, frames)
+			}
+		}
 		if len(outbound) != 0 {
 			if err := s.queueFrames(ctx, protocol.FrameBlock{Frames: outbound}); err != nil {
 				return err

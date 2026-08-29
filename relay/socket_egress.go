@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	coreflow "github.com/aurora-protocol/aurora-core/flow"
@@ -50,6 +51,9 @@ var (
 	ErrExitFlowUnknown    = errors.New("relay: unknown exit flow")
 	ErrExitWriteFailed    = errors.New("relay: exit socket write failed")
 	ErrExitDatagramLarge  = errors.New("relay: exit datagram exceeds limit")
+	// ErrExitDNSMessageInvalid marks a relayed DNS query the exit cannot parse;
+	// the query is dropped and the client's request expires on its own.
+	ErrExitDNSMessageInvalid = errors.New("relay: exit DNS message is invalid")
 )
 
 type ContextDialer interface {
@@ -102,14 +106,15 @@ type SocketEgress struct {
 	dnsResolver DNSMessageResolver
 	limits      SocketEgressLimits
 
-	mu        sync.Mutex
-	closeOnce sync.Once
-	done      chan struct{}
-	flows     map[uint64]*socketFlow
-	buffered  int
-	closed    bool
-	closeErr  error
-	wg        sync.WaitGroup
+	mu         sync.Mutex
+	closeOnce  sync.Once
+	done       chan struct{}
+	flows      map[uint64]*socketFlow
+	buffered   int
+	closed     bool
+	closeErr   error
+	wg         sync.WaitGroup
+	flowClosed func(flowID, closeCode uint64)
 }
 
 type socketFlow struct {
@@ -125,6 +130,9 @@ type socketFlow struct {
 	closeOnce   sync.Once
 	peerClosed  bool
 	expiresAt   time.Time
+	// peerAborted records that the peer closed the flow first, so the read
+	// pump must not answer with a FLOW_CLOSE for a flow the peer already forgot.
+	peerAborted atomic.Bool
 }
 
 func NewSocketEgress(ctx context.Context, options SocketEgressOptions) (*SocketEgress, error) {
@@ -160,6 +168,14 @@ func NewSocketEgress(ctx context.Context, options SocketEgressOptions) (*SocketE
 		done:        make(chan struct{}),
 		flows:       make(map[uint64]*socketFlow),
 	}, nil
+}
+
+// SetFlowCloseObserver registers a callback invoked after a read pump queued
+// the FLOW_CLOSE for a flow the egress closed on its own.
+func (e *SocketEgress) SetFlowCloseObserver(observer func(flowID, closeCode uint64)) {
+	e.mu.Lock()
+	e.flowClosed = observer
+	e.mu.Unlock()
 }
 
 func (e *SocketEgress) HandleEvent(ctx context.Context, event ExitFrameEvent) ([]protocol.AuroraFrame, error) {
@@ -530,6 +546,7 @@ func (e *SocketEgress) handleFlowClosed(event ExitFrameEvent) error {
 		return nil
 	}
 	if event.Close.CloseCode != protocol.CloseNormal || flow.kind != coreflow.FlowKindTCPStream {
+		flow.peerAborted.Store(true)
 		e.closeFlow(event.FlowID, flow)
 		return nil
 	}
@@ -644,12 +661,16 @@ func (e *SocketEgress) runTCPReadPump(flowID uint64, flow *socketFlow) {
 		if n > 0 {
 			frame, frameErr := protocol.NewStreamDataFrame(flowID, buffer[:n], 0)
 			if frameErr != nil || e.queueSocketFrames(flow.ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}) != nil {
+				e.queueTCPFlowClose(flow, flowID, protocol.CloseResetByPeer)
 				return
 			}
 		}
 		if err != nil {
 			code := protocol.CloseResetByPeer
-			if errors.Is(err, io.EOF) {
+			if flow.ctx.Err() != nil {
+				// The egress closed the socket (write failure or oversize data);
+				// the interrupted read is not an idle timeout.
+			} else if errors.Is(err, io.EOF) {
 				code = protocol.CloseNormal
 			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				code = protocol.CloseIdleTimeout
@@ -688,12 +709,15 @@ func (e *SocketEgress) runUDPReadPump(flowID uint64, flow *socketFlow) {
 		if n > 0 {
 			frame, frameErr := protocol.NewDatagramDataFrame(flowID, buffer[:n], 0)
 			if frameErr != nil || e.queueSocketFrames(flow.ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}) != nil {
+				e.queueFlowClose(flow, flowID, protocol.CloseResetByPeer)
 				return
 			}
 		}
 		if err != nil {
 			code := protocol.CloseResetByPeer
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			if flow.ctx.Err() != nil {
+				// Closed by the egress itself; see the TCP pump.
+			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				code = protocol.CloseIdleTimeout
 			}
 			e.queueFlowClose(flow, flowID, code)
@@ -710,12 +734,26 @@ func (e *SocketEgress) queueTCPFlowClose(flow *socketFlow, flowID, code uint64) 
 	e.queueFlowClose(flow, flowID, code)
 }
 
+// queueFlowClose tells the client the relay closed flowID. It is skipped when
+// the peer closed first, and it uses the egress lifecycle context rather than
+// the flow context so a flow the egress cancelled itself is still announced.
 func (e *SocketEgress) queueFlowClose(flow *socketFlow, flowID, code uint64) {
+	if flow.peerAborted.Load() {
+		return
+	}
 	frame, err := protocol.NewFlowCloseFrame(protocol.FlowClose{FlowID: flowID, CloseCode: code})
 	if err != nil {
 		return
 	}
-	_ = e.queueSocketFrames(flow.ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}})
+	if err := e.queueSocketFrames(e.ctx, protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}); err != nil {
+		return
+	}
+	e.mu.Lock()
+	observer := e.flowClosed
+	e.mu.Unlock()
+	if observer != nil {
+		observer(flowID, code)
+	}
 }
 
 func (e *SocketEgress) queueSocketFrames(ctx context.Context, block protocol.FrameBlock) error {

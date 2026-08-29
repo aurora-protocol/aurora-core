@@ -50,7 +50,7 @@ type socketDNSQuestion struct {
 func (e *SocketEgress) handleDNSMessage(ctx context.Context, event ExitFrameEvent) ([]protocol.AuroraFrame, error) {
 	question, err := parseSocketDNSQuestion(event.Data)
 	if err != nil {
-		return nil, ErrExitEventInvalid
+		return nil, ErrExitDNSMessageInvalid
 	}
 	responseCode := uint16(socketDNSRCodeOK)
 	var answers []netip.Addr

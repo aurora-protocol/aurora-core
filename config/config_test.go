@@ -233,3 +233,28 @@ func TestRequireSplit2ForAdversarialForbidsFast1(t *testing.T) {
 		t.Fatalf("default require_split2_for_adversarial changed")
 	}
 }
+
+func TestMemoryLabOnlyReplayCacheRequiresLabProfile(t *testing.T) {
+	_, err := Parse(strings.NewReader(`[aurora]
+profile = "adversarial-dpi"
+
+[storage]
+replay_cache = "memory-lab-only"
+`))
+	if err == nil {
+		t.Fatalf("non-lab profile accepted the memory-lab-only replay cache")
+	}
+
+	cfg, err := Parse(strings.NewReader(`[aurora]
+profile = "lab"
+
+[storage]
+replay_cache = "memory-lab-only"
+`))
+	if err != nil {
+		t.Fatalf("lab profile rejected the memory-lab-only replay cache: %v", err)
+	}
+	if cfg.ReplayCache != "memory-lab-only" {
+		t.Fatalf("replay cache was not parsed: %q", cfg.ReplayCache)
+	}
+}

@@ -273,6 +273,9 @@ func (c Config) Validate() error {
 	if c.AllowLabTokens && c.Profile != "lab" {
 		return fmt.Errorf("config: allow_lab_tokens requires lab profile")
 	}
+	if c.ReplayCache == "memory-lab-only" && c.Profile != "lab" {
+		return fmt.Errorf("config: memory-lab-only replay cache requires lab profile")
+	}
 	return nil
 }
 

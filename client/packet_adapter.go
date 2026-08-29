@@ -581,6 +581,12 @@ func (a *PacketAdapter) validateRelayLocalPacketLimitLocked(blocks []protocol.Fr
 				if mapping == nil {
 					continue
 				}
+				if mapping.peerClosed {
+					continue
+				}
+				if _, peerClosed := peerClosedFlows[frame.FlowID]; peerClosed {
+					continue
+				}
 				r := wire.NewReader(frame.Payload)
 				close := protocol.DecodeFlowClose(r)
 				if r.Err() != nil || !r.EOF() || close.FlowID != frame.FlowID {
@@ -1157,6 +1163,13 @@ func (a *PacketAdapter) handleRelayCloseLocked(frame protocol.AuroraFrame, now t
 	close := protocol.DecodeFlowClose(r)
 	if r.Err() != nil || !r.EOF() || close.FlowID != frame.FlowID {
 		return nil, fmt.Errorf("client: packet adapter received malformed flow close")
+	}
+	if mapping.peerClosed {
+		// A normal relay close leaves the mapping half-open until the local TCP
+		// stack answers with its FIN. Repeated closes during that window are
+		// idempotent; synthesizing another FIN would consume a second sequence
+		// number and desynchronize the local connection.
+		return nil, nil
 	}
 	if err := a.proxy.ReceiveFlowCloseFrame(frame, uint64(now.Unix()), 0); err != nil && !mapping.localClosed {
 		return nil, err

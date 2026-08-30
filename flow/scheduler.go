@@ -37,8 +37,10 @@ func (s *Scheduler) Enqueue(chunk StreamChunk) error {
 	if len(chunk.Data) == 0 {
 		return fmt.Errorf("flow: empty stream chunk")
 	}
-	if s.maxBufferedBytes > 0 && s.bufferedBytes+len(chunk.Data) > s.maxBufferedBytes {
-		return fmt.Errorf("flow: scheduler buffer limit exceeded")
+	if s.maxBufferedBytes > 0 {
+		if s.bufferedBytes < 0 || s.bufferedBytes > s.maxBufferedBytes || len(chunk.Data) > s.maxBufferedBytes-s.bufferedBytes {
+			return fmt.Errorf("flow: scheduler buffer limit exceeded")
+		}
 	}
 	copied := StreamChunk{
 		FlowID:        chunk.FlowID,
@@ -106,7 +108,13 @@ func popChunk(queue *[]StreamChunk) (StreamChunk, bool) {
 	if len(*queue) == 0 {
 		return StreamChunk{}, false
 	}
-	chunk := (*queue)[0]
-	*queue = (*queue)[1:]
+	chunks := *queue
+	chunk := chunks[0]
+	chunks[0] = StreamChunk{}
+	if len(chunks) == 1 {
+		*queue = chunks[:0]
+	} else {
+		*queue = chunks[1:]
+	}
 	return chunk, true
 }

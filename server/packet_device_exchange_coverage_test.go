@@ -119,6 +119,9 @@ func TestWriteFullPacketShortWrite(t *testing.T) {
 
 func TestPacketProtocolNumberEmpty(t *testing.T) {
 	// An empty packet maps to protocol 0 at the len==0 guard (257).
+	if packetFamilyIPv4 != 2 || packetFamilyIPv6 != 30 {
+		t.Fatalf("packet family constants = %d/%d, want 2/30", packetFamilyIPv4, packetFamilyIPv6)
+	}
 	if got := packetProtocolNumber([]byte{}); got != 0 {
 		t.Fatalf("packetProtocolNumber([]) = %d, want 0", got)
 	}
@@ -128,9 +131,9 @@ func TestPacketProtocolNumberEmpty(t *testing.T) {
 		packet []byte
 		want   uint16
 	}{
-		{[]byte{0x45, 0x00}, 2},  // IPv4 first nibble 4
-		{[]byte{0x60, 0x00}, 30}, // IPv6 first nibble 6
-		{[]byte{0x10, 0x00}, 0},  // nibble 1 -> default
+		{[]byte{0x45, 0x00}, packetFamilyIPv4},
+		{[]byte{0x60, 0x00}, packetFamilyIPv6},
+		{[]byte{0x10, 0x00}, 0}, // nibble 1 -> default
 	}
 	for _, c := range cases {
 		if got := packetProtocolNumber(c.packet); got != c.want {

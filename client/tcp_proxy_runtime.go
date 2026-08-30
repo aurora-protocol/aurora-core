@@ -215,6 +215,7 @@ func (r *TCPProxyRuntime) Serve(ctx context.Context, listener net.Listener) erro
 	}()
 	defer close(stopListener)
 
+	var acceptBackoff time.Duration
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
@@ -222,11 +223,24 @@ func (r *TCPProxyRuntime) Serve(ctx context.Context, listener net.Listener) erro
 				return nil
 			}
 			if temporary, ok := err.(interface{ Temporary() bool }); ok && temporary.Temporary() {
-				time.Sleep(5 * time.Millisecond)
+				if acceptBackoff == 0 {
+					acceptBackoff = time.Millisecond
+				} else {
+					acceptBackoff *= 2
+					if acceptBackoff > time.Second {
+						acceptBackoff = time.Second
+					}
+				}
+				select {
+				case <-time.After(acceptBackoff):
+				case <-ctx.Done():
+					return nil
+				}
 				continue
 			}
 			return err
 		}
+		acceptBackoff = 0
 		go func() {
 			_ = r.serveConnection(ctx, connection)
 		}()

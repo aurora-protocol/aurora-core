@@ -90,47 +90,49 @@ func OpenForSuite(suite uint64, key, nonce, aad, ciphertextAndTag []byte) ([]byt
 }
 
 func AES256GCMSeal(key, nonce, aad, plaintext []byte) ([]byte, error) {
-	a, err := aes256gcm(key)
+	aead, err := aes256gcm(key)
 	if err != nil {
 		return nil, err
 	}
-	if len(nonce) != a.NonceSize() {
-		return nil, fmt.Errorf("crypto: AES-GCM nonce length %d, want %d", len(nonce), a.NonceSize())
-	}
-	return a.Seal(nil, nonce, plaintext, aad), nil
+	return sealWithAEAD(aead, "AES-GCM", nonce, aad, plaintext)
 }
 
 func AES256GCMOpen(key, nonce, aad, ciphertextAndTag []byte) ([]byte, error) {
-	a, err := aes256gcm(key)
+	aead, err := aes256gcm(key)
 	if err != nil {
 		return nil, err
 	}
-	if len(nonce) != a.NonceSize() {
-		return nil, fmt.Errorf("crypto: AES-GCM nonce length %d, want %d", len(nonce), a.NonceSize())
-	}
-	return a.Open(nil, nonce, ciphertextAndTag, aad)
+	return openWithAEAD(aead, "AES-GCM", nonce, aad, ciphertextAndTag)
 }
 
 func ChaCha20Poly1305Seal(key, nonce, aad, plaintext []byte) ([]byte, error) {
-	a, err := chacha20poly1305.New(key)
+	aead, err := chacha20poly1305.New(key)
 	if err != nil {
 		return nil, err
 	}
-	if len(nonce) != a.NonceSize() {
-		return nil, fmt.Errorf("crypto: ChaCha20-Poly1305 nonce length %d, want %d", len(nonce), a.NonceSize())
-	}
-	return a.Seal(nil, nonce, plaintext, aad), nil
+	return sealWithAEAD(aead, "ChaCha20-Poly1305", nonce, aad, plaintext)
 }
 
 func ChaCha20Poly1305Open(key, nonce, aad, ciphertextAndTag []byte) ([]byte, error) {
-	a, err := chacha20poly1305.New(key)
+	aead, err := chacha20poly1305.New(key)
 	if err != nil {
 		return nil, err
 	}
-	if len(nonce) != a.NonceSize() {
-		return nil, fmt.Errorf("crypto: ChaCha20-Poly1305 nonce length %d, want %d", len(nonce), a.NonceSize())
+	return openWithAEAD(aead, "ChaCha20-Poly1305", nonce, aad, ciphertextAndTag)
+}
+
+func sealWithAEAD(aead cipher.AEAD, name string, nonce, aad, plaintext []byte) ([]byte, error) {
+	if len(nonce) != aead.NonceSize() {
+		return nil, fmt.Errorf("crypto: %s nonce length %d, want %d", name, len(nonce), aead.NonceSize())
 	}
-	return a.Open(nil, nonce, ciphertextAndTag, aad)
+	return aead.Seal(nil, nonce, plaintext, aad), nil
+}
+
+func openWithAEAD(aead cipher.AEAD, name string, nonce, aad, ciphertextAndTag []byte) ([]byte, error) {
+	if len(nonce) != aead.NonceSize() {
+		return nil, fmt.Errorf("crypto: %s nonce length %d, want %d", name, len(nonce), aead.NonceSize())
+	}
+	return aead.Open(nil, nonce, ciphertextAndTag, aad)
 }
 
 func aes256gcm(key []byte) (cipher.AEAD, error) {

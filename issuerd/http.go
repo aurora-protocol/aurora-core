@@ -460,7 +460,7 @@ func DecodeAdmissionProofBytes(raw []byte) (protocol.AdmissionProof, error) {
 
 func (s *Service) ready() bool {
 	nowUnix := s.currentUnix()
-	if s == nil || nowUnix == 0 || s.blindRSAKey == nil || s.spentTokens == nil || len(s.metadata.IssuerID) != 16 || nowUnix < s.metadata.ValidFromUnix || nowUnix >= s.metadata.ValidUntilUnix {
+	if nowUnix == 0 || s.blindRSAKey == nil || s.spentTokens == nil || len(s.metadata.IssuerID) != 16 || nowUnix < s.metadata.ValidFromUnix || nowUnix >= s.metadata.ValidUntilUnix {
 		return false
 	}
 	if err := validateCurrentIssuanceScope(s.metadata, s.issuanceScope, s.issuanceOriginInfoPolicyID, nowUnix); err != nil {

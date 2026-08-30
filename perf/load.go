@@ -211,7 +211,7 @@ func executeCarrierLoadRequest(ctx context.Context, client *http.Client, endpoin
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, endpoint, body)
 	if err != nil {
 		_ = body.Close()
-		result.err = fmt.Errorf("create request")
+		result.err = fmt.Errorf("create request: %w", err)
 		result.latency = measuredDuration(time.Since(started))
 		return result
 	}
@@ -220,13 +220,13 @@ func executeCarrierLoadRequest(ctx context.Context, client *http.Client, endpoin
 	response, err := client.Do(request)
 	bodyErr := body.WaitClosed(requestCtx)
 	if err != nil {
-		result.err = fmt.Errorf("execute request")
+		result.err = fmt.Errorf("execute request: %w", err)
 		result.latency = measuredDuration(time.Since(started))
 		return result
 	}
 	if bodyErr != nil {
 		_ = response.Body.Close()
-		result.err = fmt.Errorf("finish request body")
+		result.err = fmt.Errorf("finish request body: %w", bodyErr)
 		result.latency = measuredDuration(time.Since(started))
 		return result
 	}
@@ -236,11 +236,11 @@ func executeCarrierLoadRequest(ctx context.Context, client *http.Client, endpoin
 	closeErr := response.Body.Close()
 	result.latency = measuredDuration(time.Since(started))
 	if readErr != nil {
-		result.err = fmt.Errorf("read response")
+		result.err = fmt.Errorf("read response: %w", readErr)
 		return result
 	}
 	if closeErr != nil {
-		result.err = fmt.Errorf("close response")
+		result.err = fmt.Errorf("close response: %w", closeErr)
 		return result
 	}
 	if len(responseBody) > len(requestBody) {
@@ -248,22 +248,30 @@ func executeCarrierLoadRequest(ctx context.Context, client *http.Client, endpoin
 		return result
 	}
 	if response.StatusCode != http.StatusOK {
-		result.err = fmt.Errorf("unexpected response status")
+		result.err = fmt.Errorf("unexpected response status: %d", response.StatusCode)
 		return result
 	}
 	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/octet-stream" {
-		result.err = fmt.Errorf("unexpected response content type")
+		result.err = fmt.Errorf("unexpected response content type: %s", response.Header.Get("Content-Type"))
 		return result
 	}
 	carrierType, payload, err := server.DecodeCarrier(responseBody)
 	if err != nil || carrierType != server.CarrierPacketBatch {
-		result.err = fmt.Errorf("invalid carrier response")
+		if err != nil {
+			result.err = fmt.Errorf("invalid carrier response: %w", err)
+		} else {
+			result.err = fmt.Errorf("invalid carrier response: unexpected type %d", carrierType)
+		}
 		return result
 	}
 	batch, err := server.DecodePacketBatch(payload)
 	if err != nil || len(batch.Packets) != 1 || len(batch.ProtocolNumbers) != 1 || batch.ProtocolNumbers[0] != 2 {
-		result.err = fmt.Errorf("invalid packet response")
+		if err != nil {
+			result.err = fmt.Errorf("invalid packet response: %w", err)
+		} else {
+			result.err = fmt.Errorf("invalid packet response: %d packets", len(batch.Packets))
+		}
 		return result
 	}
 	if !bytes.Equal(batch.Packets[0], requestBody[9:]) {

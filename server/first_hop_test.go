@@ -1046,15 +1046,22 @@ func TestFirstHopDoesNotReleaseCapsule2AfterSessionFactoryTimeout(t *testing.T) 
 	server, client, _, handler := startFirstHopGateTestServer(t, func(context.Context, handshake.FirstHopBinding, protocol.CoverPrelude0, uint64) (*handshake.RelayHandshake, protocol.CoverPrelude1, error) {
 		return &handshake.RelayHandshake{}, firstHopTestPrelude1(), nil
 	})
-	handler.postHeaderTimeout = 200 * time.Millisecond
+	handler.postHeaderTimeout = 50 * time.Millisecond
 	endpoint := newFirstHopTestEndpoint([]byte("server packet"))
 	handler.finish = func(context.Context, *handshake.RelayHandshake, []byte, uint64) ([]byte, transport.PacketEndpoint, protocol.PolicyAccept, error) {
 		return []byte("Capsule2"), endpoint, protocol.PolicyAccept{SelectedTunnelPersonality: registry.PersonalityProxyFlow}, nil
 	}
 	handler.frameHandler = nil
 	closer := &signalingFirstHopCloser{closed: make(chan struct{})}
+	releaseFactory := make(chan struct{}, 1)
+	t.Cleanup(func() {
+		select {
+		case releaseFactory <- struct{}{}:
+		default:
+		}
+	})
 	handler.sessionFactory = func(context.Context, FirstHopSessionApplication, protocol.PolicyAccept) (transport.FrameBlockHandler, io.Closer, error) {
-		time.Sleep(400 * time.Millisecond)
+		<-releaseFactory
 		return func(context.Context, protocol.FrameBlock) error { return nil }, closer, nil
 	}
 	response, writer := openFirstHopStreamingRequest(t, client, server.URL+handler.path)
@@ -1073,6 +1080,7 @@ func TestFirstHopDoesNotReleaseCapsule2AfterSessionFactoryTimeout(t *testing.T) 
 	if capsule, err := reader.Read(); err == nil {
 		t.Fatalf("factory timeout released Capsule2 %q", capsule)
 	}
+	releaseFactory <- struct{}{}
 	select {
 	case <-closer.closed:
 	case <-time.After(time.Second):

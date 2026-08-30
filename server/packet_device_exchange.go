@@ -260,9 +260,9 @@ func packetProtocolNumber(packet []byte) uint16 {
 	}
 	switch packet[0] >> 4 {
 	case 4:
-		return 2
+		return packetFamilyIPv4
 	case 6:
-		return 30
+		return packetFamilyIPv6
 	default:
 		return 0
 	}

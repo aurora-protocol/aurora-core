@@ -669,6 +669,25 @@ func TestLocalProxyGracefulCloseKeepsHalfClosedStateAndCompletesOnPeerClose(t *t
 	}
 }
 
+func TestLocalProxyPurgeClosedReleasesHalfClosedFlowAtDrainDeadline(t *testing.T) {
+	p := NewLocalProxy()
+	if err := p.OpenTCP(45, "example.com", 443); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.GracefulCloseFrame(45, 0, nil, 100, 5); err != nil {
+		t.Fatal(err)
+	}
+
+	p.PurgeClosed(104)
+	if !p.HasFlow(45) {
+		t.Fatal("half-closed flow was purged before its drain deadline")
+	}
+	p.PurgeClosed(105)
+	if p.HasFlow(45) {
+		t.Fatal("half-closed flow remained tracked at its drain deadline")
+	}
+}
+
 func TestLocalProxyReceiveFlowCloseFrameRejectsMismatchBeforeMutation(t *testing.T) {
 	p := NewLocalProxy()
 	if err := p.OpenTCP(46, "example.com", 443); err != nil {

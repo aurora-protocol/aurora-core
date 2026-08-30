@@ -3,9 +3,11 @@ package admission
 import (
 	"errors"
 	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
@@ -22,6 +24,31 @@ func TestReplayCacheDurabilityMarkers(t *testing.T) {
 	t.Cleanup(func() { _ = cache.Close() })
 	if !cache.Durable() {
 		t.Fatal("file replay cache did not report durable")
+	}
+}
+
+func TestRetentionFileReplayCacheSupportsBaseReplayCacheContract(t *testing.T) {
+	directory, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := NewRetentionFileReplayCacheAt(directory, "retention.log", uint64(time.Now().Unix()))
+	if err != nil {
+		_ = directory.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cache.Close() })
+
+	var base ReplayCache = cache
+	if !cache.Durable() {
+		t.Fatal("retention file replay cache did not report durable")
+	}
+	key := []byte("permanent-spend")
+	if inserted, err := base.InsertIfAbsent(key); err != nil || !inserted {
+		t.Fatalf("insert permanent key: inserted=%t err=%v", inserted, err)
+	}
+	if inserted, err := base.InsertIfAbsent(key); err != nil || inserted {
+		t.Fatalf("duplicate permanent key: inserted=%t err=%v", inserted, err)
 	}
 }
 

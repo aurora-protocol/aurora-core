@@ -426,6 +426,9 @@ func NewFakeIPAllocator(cidr string) *FakeIPAllocator {
 	if err != nil {
 		_, network, _ = net.ParseCIDR("198.18.0.0/15")
 	}
+	if network == nil {
+		network = &net.IPNet{IP: net.IPv4(198, 18, 0, 0), Mask: net.CIDRMask(15, 32)}
+	}
 	return &FakeIPAllocator{network: network, byName: make(map[string]string), byIP: make(map[string]FakeIPMapping)}
 }
 

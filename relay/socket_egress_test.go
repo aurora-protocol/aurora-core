@@ -1018,7 +1018,8 @@ func TestSocketEgressTCPNormalCloseDrainsDestinationRead(t *testing.T) {
 func TestSocketEgressTCPCanceledWriteReleasesFlow(t *testing.T) {
 	local, peer := net.Pipe()
 	defer peer.Close()
-	dialer := &recordingContextDialer{conn: local, useConn: true}
+	writeStarted := make(chan struct{}, 1)
+	dialer := &recordingContextDialer{conn: &writeStartedConn{Conn: local, started: writeStarted}, useConn: true}
 	egress, err := NewSocketEgress(context.Background(), SocketEgressOptions{
 		Sink:     &channelFrameSink{blocks: make(chan protocol.FrameBlock, 4)},
 		Policy:   ExitPolicy{AllowPrivate: true},
@@ -1049,7 +1050,11 @@ func TestSocketEgressTCPCanceledWriteReleasesFlow(t *testing.T) {
 		})
 		writeResult <- err
 	}()
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("write did not start")
+	}
 	cancel()
 	select {
 	case err := <-writeResult:
@@ -1067,15 +1072,29 @@ func TestSocketEgressTCPCanceledWriteReleasesFlow(t *testing.T) {
 	}
 }
 
+type writeStartedConn struct {
+	net.Conn
+	started chan<- struct{}
+}
+
+func (c *writeStartedConn) Write(payload []byte) (int, error) {
+	select {
+	case c.started <- struct{}{}:
+	default:
+	}
+	return c.Conn.Write(payload)
+}
+
 func TestSocketEgressLifecycleCancellationInterruptsTCPWrite(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	local, peer := net.Pipe()
 	defer peer.Close()
+	writeStarted := make(chan struct{}, 1)
 	egress, err := NewSocketEgress(parent, SocketEgressOptions{
 		Sink:     &channelFrameSink{blocks: make(chan protocol.FrameBlock, 4)},
 		Policy:   ExitPolicy{AllowPrivate: true},
-		Dialer:   &recordingContextDialer{conn: local, useConn: true},
+		Dialer:   &recordingContextDialer{conn: &writeStartedConn{Conn: local, started: writeStarted}, useConn: true},
 		Resolver: &recordingIPResolver{},
 	})
 	if err != nil {
@@ -1101,7 +1120,11 @@ func TestSocketEgressLifecycleCancellationInterruptsTCPWrite(t *testing.T) {
 		})
 		writeResult <- err
 	}()
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("write did not start")
+	}
 	cancel()
 	select {
 	case err := <-writeResult:

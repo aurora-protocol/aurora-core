@@ -105,6 +105,8 @@ func NewReceiver(cfg ReceiverConfig) *Receiver {
 		windowSize = MaxReceiverWindowSize
 	}
 	protector := cloneProtectorForReceiver(cfg.Protector)
+	// Prepare only warms the AEAD cache; its error is deliberately ignored
+	// because Open re-prepares and surfaces the failure when the key is used.
 	_ = protector.Prepare()
 	return &Receiver{
 		protector:           protector,

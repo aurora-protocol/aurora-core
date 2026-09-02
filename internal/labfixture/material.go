@@ -130,19 +130,6 @@ type Material struct {
 	files    []labFile
 }
 
-// File returns a copy of one minted file's contents, or nil if unknown.
-func (m *Material) File(name string) []byte {
-	if m == nil {
-		return nil
-	}
-	for _, file := range m.files {
-		if file.name == name {
-			return append([]byte(nil), file.data...)
-		}
-	}
-	return nil
-}
-
 // WriteTo persists the minted deployment into dir, which must not already
 // contain lab material. The directory is created owner-only (0700) and every
 // file is written owner-only (0600) without overwriting existing files.

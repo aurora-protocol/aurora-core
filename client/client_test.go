@@ -395,6 +395,26 @@ func TestLocalProxyOpenUDPExplicitFrameReturnsRelayResolvedFlowOpen(t *testing.T
 	}
 }
 
+func TestLocalProxyOpenUDPExplicitTracksFlowWithoutReturningFrame(t *testing.T) {
+	p := NewLocalProxy()
+	if err := p.OpenUDPExplicit(64, "Example.COM.", 443, 100); err != nil {
+		t.Fatal(err)
+	}
+	state, ok := p.FlowState(64)
+	if !ok {
+		t.Fatal("explicit UDP open did not track flow")
+	}
+	if state.Kind != flow.FlowKindUDPAssociation || state.TargetKind != flow.TargetKindDomainName || string(state.TargetHost) != "example.com" {
+		t.Fatalf("tracked explicit UDP flow = %+v", state)
+	}
+	if err := p.OpenUDPExplicit(65, "bad/host", 443, 100); err == nil {
+		t.Fatal("explicit UDP open accepted an invalid target host")
+	}
+	if _, ok := p.FlowState(65); ok {
+		t.Fatal("failed explicit UDP open tracked flow")
+	}
+}
+
 func TestLocalProxyBuildsTCPStreamDataFrameForLiveTCPFlow(t *testing.T) {
 	p := NewLocalProxy()
 	if err := p.OpenTCP(3, "example.com", 443); err != nil {

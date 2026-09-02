@@ -57,6 +57,24 @@ func TestHTTPDaemonReadinessHarnessCoversLiveIssuerSurface(t *testing.T) {
 	}
 }
 
+func TestHTTPReadinessReportRecordsFailedHealthProbeFinding(t *testing.T) {
+	// A nil service forces the /healthz probe to report "ready":false, driving
+	// the harness's failing-probe branch so the finding text is validated.
+	handler := NewHTTPHandler(nil)
+	health := serveHarnessRequest(handler, http.MethodGet, "/healthz", nil)
+	report := HTTPReadinessReport{}
+	report.HealthEndpoint = health.status == http.StatusOK && containsAll(health.body, []string{`"ready":true`})
+	if !report.HealthEndpoint {
+		report.addFinding("issuer HTTP health endpoint failed")
+	}
+	if report.HealthEndpoint {
+		t.Fatal("health probe passed against a nil issuer service")
+	}
+	if len(report.Findings) != 1 || report.Findings[0] != "issuer HTTP health endpoint failed" {
+		t.Fatalf("readiness findings = %+v, want the health-endpoint failure", report.Findings)
+	}
+}
+
 func TestDecodeVerifierRequestBodyOwnsAndScrubsInput(t *testing.T) {
 	service, err := NewHarnessService(200)
 	if err != nil {

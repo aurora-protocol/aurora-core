@@ -88,6 +88,20 @@ func TestServiceReadinessHarnessCoversIssuerDuties(t *testing.T) {
 	}
 }
 
+func TestServiceReadinessReportAddFindingAppendsFindings(t *testing.T) {
+	report := ServiceReadinessReport{}
+	report.addFinding("spent-token store accepted a duplicate token")
+	report.addFinding("VOPRF verifier service outage did not fail closed")
+	if len(report.Findings) != 2 ||
+		report.Findings[0] != "spent-token store accepted a duplicate token" ||
+		report.Findings[1] != "VOPRF verifier service outage did not fail closed" {
+		t.Fatalf("service readiness findings = %+v", report.Findings)
+	}
+	if report.Passed {
+		t.Fatal("readiness report with findings reported passed")
+	}
+}
+
 func TestServicePublishesIssuesVerifiesSpendsAndRedacts(t *testing.T) {
 	service, err := NewHarnessService(200)
 	if err != nil {

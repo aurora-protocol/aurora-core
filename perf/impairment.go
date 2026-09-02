@@ -5,10 +5,12 @@
 package perf
 
 import (
+	"bytes"
 	"fmt"
 	"time"
 
 	"github.com/aurora-protocol/aurora-core/flow"
+	"github.com/aurora-protocol/aurora-core/packet"
 	"github.com/aurora-protocol/aurora-core/policy"
 	"github.com/aurora-protocol/aurora-core/protocol"
 	"github.com/aurora-protocol/aurora-core/registry"
@@ -147,6 +149,17 @@ func RunImpairmentHarness() (ImpairmentReport, error) {
 	report.scenario("carrier-path-cache", cached.Score(now) > noAffinity.Score(now),
 		fmt.Sprintf("cached_score=%.3f cold_score=%.3f", cached.Score(now), noAffinity.Score(now)))
 
+	// Packet protect throughput: the only wall-clock scenario. It measures
+	// seal+open round trips per second on the per-packet hot path against a
+	// generous floor, so a gross regression (accidental O(n^2), large per-packet
+	// allocation) fails the gate while slow shared CI runners still pass.
+	protectOpsPerSec, err := measureProtectRoundTripsPerSecond(protectThroughputWarmup, protectThroughputIterations)
+	if err != nil {
+		return ImpairmentReport{}, err
+	}
+	report.scenario("packet-protect-throughput", protectThroughputWithinBudget(protectOpsPerSec, protectThroughputFloorOpsPerSec),
+		fmt.Sprintf("ops_per_sec=%.0f floor=%d iterations=%d", protectOpsPerSec, protectThroughputFloorOpsPerSec, protectThroughputIterations))
+
 	// --- Acceptance criteria ---
 
 	report.InteractivePrioritized = checkInteractivePriority()
@@ -230,4 +243,64 @@ func repeatedByte(b byte, n int) []byte {
 		out[i] = b
 	}
 	return out
+}
+
+const (
+	// protectThroughputWarmup runs unmeasured seal+open round trips so caches,
+	// the AEAD scratch state, and the allocator are warm before timing.
+	protectThroughputWarmup = 2048
+	// protectThroughputIterations bounds the worst-case measured runtime to
+	// iterations/floor (~1s) even on a runner running exactly at the floor.
+	protectThroughputIterations = 10_000
+	// protectThroughputFloorOpsPerSec is deliberately generous: modern hardware
+	// sustains roughly 900k seal+open round trips/sec for 1200-byte packets, so
+	// this floor is ~90x below that and only trips on a gross hot-path
+	// regression (accidental O(n^2) work, large per-packet allocations). It must
+	// stay rock-stable on slow shared ubuntu/macos/windows CI runners.
+	protectThroughputFloorOpsPerSec = 10_000
+)
+
+// protectThroughputWithinBudget reports whether a measured seal+open round-trip
+// rate (ops/sec) meets the regression floor.
+func protectThroughputWithinBudget(opsPerSec, floor float64) bool {
+	return opsPerSec >= floor
+}
+
+// measureProtectRoundTripsPerSecond seals and opens a 1200-byte stream-data
+// packet (mirroring packet/benchmark_test.go) and returns wall-clock round
+// trips per second after a warmup phase.
+func measureProtectRoundTripsPerSecond(warmup, iterations int) (float64, error) {
+	frame, err := protocol.NewStreamDataFrame(7, bytes.Repeat([]byte{0x5a}, 1200), 0)
+	if err != nil {
+		return 0, err
+	}
+	protector := &packet.Protector{
+		Suite:           registry.SuiteHybrid768AESGCM,
+		RouteInstanceID: 0x42,
+		HopLayer:        1,
+		Direction:       0,
+		Key:             bytes.Repeat([]byte{0x33}, 32),
+		StaticIV:        bytes.Repeat([]byte{0x44}, 12),
+	}
+	block := protocol.FrameBlock{Frames: []protocol.AuroraFrame{frame}}
+	roundTrip := func() error {
+		sealed, err := protector.Seal(block)
+		if err != nil {
+			return err
+		}
+		_, err = protector.Open(sealed)
+		return err
+	}
+	for i := 0; i < warmup; i++ {
+		if err := roundTrip(); err != nil {
+			return 0, err
+		}
+	}
+	start := time.Now()
+	for i := 0; i < iterations; i++ {
+		if err := roundTrip(); err != nil {
+			return 0, err
+		}
+	}
+	return float64(iterations) / time.Since(start).Seconds(), nil
 }

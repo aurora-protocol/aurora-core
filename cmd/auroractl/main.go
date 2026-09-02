@@ -129,7 +129,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|server-check|client-check|p0-p8-check|p0-p11-check|cover-check|crypto-check|wire-check|transport-check|flow-check|route-check|perf-check|load-check --url URL [--requests N --concurrency N --packet-bytes N --request-limit D]|coverage-check --profile PATH [--minimum PERCENT]|release-gate-check|host-build-check [--portable|--apple-simulator|--all]|check-native-provisioning-trust PATH|build-native-provisioning-trust --spec PATH --out PATH [--force]|check-config>")
+	fmt.Fprintln(os.Stderr, "usage: auroractl <vectors [--check [path]|--real-crypto [--check [path]]|--negative [--check [path]]]|capabilities|negative-vectors-check|active-probes|classifier-check|evaluation-check|deployment-security-check|platform-check|packaging-check|release-check|proof-check|issuer-check|issuerd-check|issuerd-http-check|server-check|client-check|p0-p8-check|p0-p11-check|cover-check|crypto-check|wire-check|transport-check|flow-check|route-check|perf-check|load-check --url URL [--requests N --concurrency N --packet-bytes N --request-limit D --max-p50 D --max-p95 D --max-p99 D --min-rps F --max-errors N]|coverage-check --profile PATH [--minimum PERCENT]|release-gate-check|host-build-check [--portable|--apple-simulator|--all]|check-native-provisioning-trust PATH|build-native-provisioning-trust --spec PATH --out PATH [--force]|check-config>")
 }
 
 const structuralVectorSnapshotPath = "vectors/structural_vectors.txt"
@@ -1166,6 +1166,11 @@ func loadCheckWithRunner(args []string, w io.Writer, runner carrierLoadRunner) e
 	concurrency := flags.Int("concurrency", 8, "number of concurrent requests")
 	packetBytes := flags.Int("packet-bytes", 1200, "packet bytes per request")
 	requestLimit := flags.Duration("request-limit", 5*time.Second, "per-request limit")
+	maxP50 := flags.Duration("max-p50", 0, "maximum p50 latency budget (disabled when zero)")
+	maxP95 := flags.Duration("max-p95", 0, "maximum p95 latency budget (disabled when zero)")
+	maxP99 := flags.Duration("max-p99", 0, "maximum p99 latency budget (disabled when zero)")
+	minRPS := flags.Float64("min-rps", 0, "minimum requests-per-second budget (disabled when zero)")
+	maxErrors := flags.Int("max-errors", 0, "maximum error budget (disabled when zero)")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return fmt.Errorf("load-check: invalid options")
 	}
@@ -1189,6 +1194,16 @@ func loadCheckWithRunner(args []string, w io.Writer, runner carrierLoadRunner) e
 	}
 	if loadErr != nil {
 		return fmt.Errorf("load-check: carrier load failed")
+	}
+	violations := report.CheckBudgets(auroraperf.Budgets{
+		MaxP50:    *maxP50,
+		MaxP95:    *maxP95,
+		MaxP99:    *maxP99,
+		MinRPS:    *minRPS,
+		MaxErrors: *maxErrors,
+	})
+	if len(violations) != 0 {
+		return fmt.Errorf("load-check: budget exceeded: %s", strings.Join(violations, "; "))
 	}
 	return nil
 }

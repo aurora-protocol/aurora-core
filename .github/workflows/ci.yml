@@ -153,6 +153,14 @@ jobs:
           go test -timeout 2m ./relay -run '^$' -fuzz '^FuzzSocketEgressFlowOpen$' -fuzztime=10s
           go test -timeout 2m ./client -run '^$' -fuzz '^FuzzPacketAdapterIngress$' -fuzztime=10s
           go test -timeout 2m ./wire -run '^$' -fuzz '^FuzzDecodeVarint$' -fuzztime=10s
+      - name: Admission decoder fuzz smoke
+        timeout-minutes: 8
+        run: |
+          go test -timeout 2m ./admission -run '^$' -fuzz '^FuzzDecodeAccessHintCredential$' -fuzztime=10s
+          go test -timeout 2m ./admission -run '^$' -fuzz '^FuzzDecodeAccessHintCredentialSet$' -fuzztime=10s
+          go test -timeout 2m ./carrier -run '^$' -fuzz '^FuzzDecodeMetadataResponse$' -fuzztime=10s
+          go test -timeout 2m ./issuerd -run '^$' -fuzz '^FuzzDecodeAdmissionProofBytes$' -fuzztime=10s
+          go test -timeout 2m ./route -run '^$' -fuzz '^FuzzDecodePrivatePrelude$' -fuzztime=10s
       - name: Native ABI fuzz smoke
         timeout-minutes: 5
         run: |
